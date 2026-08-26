@@ -2,6 +2,7 @@
 
 #include "ui/plot_widget.hpp"
 #include "ui/protocol_widget.hpp"
+#include "ui/replay_widget.hpp"
 #include "ui/send_panel.hpp"
 #include "ui/serial_panel.hpp"
 #include "ui/terminal_widget.hpp"
@@ -9,6 +10,7 @@
 #include <QAction>
 #include <QCloseEvent>
 #include <QDateTime>
+#include <QDir>
 #include <QFileDialog>
 #include <QLabel>
 #include <QMessageBox>
@@ -28,7 +30,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     auto* toolbar = addToolBar(tr("主工具栏"));
     toolbar->setMovable(false);
-    recordAction_ = toolbar->addAction(tr("开始原始记录"));
+    recordAction_ = toolbar->addAction(tr("开始 Session 记录"));
     recordAction_->setCheckable(true);
     toolbar->addSeparator();
     auto* architectureAction = toolbar->addAction(tr("架构状态"));
@@ -37,12 +39,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     terminal_ = new TerminalWidget(this);
     plot_ = new PlotWidget(&session_.timeSeries(), this);
     protocol_ = new ProtocolWidget(this);
+    replay_ = new ReplayWidget(this);
     sendPanel_ = new SendPanel(this);
 
     auto* tabs = new QTabWidget(this);
     tabs->addTab(terminal_, tr("终端"));
     tabs->addTab(plot_, tr("实时曲线"));
     tabs->addTab(protocol_, tr("协议解析"));
+    tabs->addTab(replay_, tr("Session 回放"));
 
     auto* right = new QWidget(this);
     auto* rightLayout = new QVBoxLayout(right);
@@ -83,6 +87,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::loadProtocolFile);
     connect(protocol_, &ProtocolWidget::disableProtocolRequested,
             &session_, &lab::app::SerialSession::clearProtocol);
+    connect(replay_, &ReplayWidget::openSessionRequested,
+            &session_, &lab::app::SerialSession::openReplaySession);
+    connect(replay_, &ReplayWidget::closeReplayRequested,
+            &session_, &lab::app::SerialSession::closeReplay);
+    connect(replay_, &ReplayWidget::pauseRequested,
+            &session_, &lab::app::SerialSession::pauseReplay);
+    connect(replay_, &ReplayWidget::resumeRequested,
+            &session_, &lab::app::SerialSession::resumeReplay);
+    connect(replay_, &ReplayWidget::speedChanged,
+            &session_, &lab::app::SerialSession::setReplaySpeed);
+    connect(replay_, &ReplayWidget::seekRequested,
+            &session_, &lab::app::SerialSession::seekReplay);
     connect(&session_, &lab::app::SerialSession::chunkReady,
             terminal_, &TerminalWidget::appendChunk);
     connect(&session_, &lab::app::SerialSession::sourceStateChanged,
@@ -102,6 +118,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             protocol_, &ProtocolWidget::appendEvents);
     connect(&session_, &lab::app::SerialSession::protocolStatisticsChanged,
             protocol_, &ProtocolWidget::setStatistics);
+    connect(&session_, &lab::app::SerialSession::replayOpened,
+            replay_, &ReplayWidget::setOpened);
+    connect(&session_, &lab::app::SerialSession::replayOpenFailed,
+            replay_, &ReplayWidget::showOpenError);
+    connect(&session_, &lab::app::SerialSession::replayStatusChanged,
+            replay_, &ReplayWidget::setStatus);
+    connect(&session_, &lab::app::SerialSession::csvFieldsRestored,
+            plot_, &PlotWidget::useProtocolFields);
+    connect(&session_, &lab::app::SerialSession::recordingChanged,
+            this, [this](bool active, const QString& message) {
+                recordAction_->setText(active ? tr("停止 Session 记录")
+                                              : tr("开始 Session 记录"));
+                statusBar()->showMessage(message, active ? 0 : 5000);
+            });
     connect(&session_, &lab::app::SerialSession::sourceError, this, [this](const QString& message) {
         statusBar()->showMessage(tr("错误：%1").arg(message), 8000);
     });
@@ -122,39 +152,37 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                "GUI 每 33 ms 批量刷新；暂停显示不会暂停采集或记录。\n"
                "所有数据均携带 sourceId、源时间、接收时间和序号。"));
     });
+    session_.setCsvFields(plot_->fieldNames());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     session_.disconnectSerial();
-    session_.stopRecording();
+    session_.closeReplay();
+    session_.stopSession();
     event->accept();
 }
 
 void MainWindow::toggleRecording(bool enabled) {
     if (!enabled) {
-        session_.stopRecording();
-        recordAction_->setText(tr("开始原始记录"));
-        statusBar()->showMessage(tr("原始记录已停止"), 3000);
+        session_.stopSession();
         return;
     }
 
-    const auto directory = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    const auto defaultName = directory + QStringLiteral("/lab_debug_") +
-                             QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")) +
-                             QStringLiteral(".ldraw");
-    const auto path = QFileDialog::getSaveFileName(
-        this, tr("保存原始记录"), defaultName, tr("Lab Debug Raw (*.ldraw);;所有文件 (*)"));
-    if (path.isEmpty() || !session_.startRecording(path)) {
+    const auto documents = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    const auto parent = QFileDialog::getExistingDirectory(
+        this, tr("选择 Session 保存位置"), documents);
+    const auto sessionName = QStringLiteral("session_") +
+                             QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"));
+    const auto path = parent.isEmpty() ? QString() : QDir(parent).filePath(sessionName);
+    if (path.isEmpty() || !session_.startSession(path)) {
         recordAction_->blockSignals(true);
         recordAction_->setChecked(false);
         recordAction_->blockSignals(false);
         if (!path.isEmpty()) {
-            QMessageBox::warning(this, tr("记录失败"), tr("无法创建记录文件。"));
+            QMessageBox::warning(this, tr("记录失败"), tr("无法创建 Session，详情请查看状态栏。"));
         }
         return;
     }
-    recordAction_->setText(tr("停止原始记录"));
-    statusBar()->showMessage(tr("正在记录：%1").arg(path));
 }
 
 }  // namespace lab::ui

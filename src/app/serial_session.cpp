@@ -1,9 +1,13 @@
 #include "app/serial_session.hpp"
 
 #include "lab/core/protocol_json_loader.hpp"
+#include "lab/core/timestamp.hpp"
 
 #include <QFile>
+#include <QDir>
+#include <QFileInfo>
 #include <QMetaObject>
+#include <QSysInfo>
 #include <QVariantMap>
 
 #include <algorithm>
@@ -15,7 +19,8 @@ namespace lab::app {
 SerialSession::SerialSession(QObject* parent) : QObject(parent) {
     source_.setCallbacks({
         [this](const lab::core::DataChunk& chunk) {
-            recorder_.enqueue(chunk);
+            std::scoped_lock routeLock(routingMutex_);
+            recorder_.enqueueRaw(chunk);
             if (chunk.direction == lab::core::Direction::Rx) {
                 processing_.push(chunk);
             }
@@ -23,21 +28,65 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
             uiQueue_.push_back(chunk);
         },
         [this](lab::core::SourceState state) {
+            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                                    source_.sourceId(),
+                                    "info",
+                                    "source_state",
+                                    "Serial state changed to " +
+                                        std::to_string(static_cast<int>(state)),
+                                    0});
             QMetaObject::invokeMethod(
                 this,
                 [this, state] { emit sourceStateChanged(static_cast<int>(state)); },
                 Qt::QueuedConnection);
         },
         [this](const std::string& message) {
+            recorder_.enqueueEvent({
+                lab::core::nowTimestampNs(), source_.sourceId(), "error", "source", message, 0});
             QMetaObject::invokeMethod(
                 this,
                 [this, message] { emit sourceError(QString::fromStdString(message)); },
                 Qt::QueuedConnection);
         }});
 
+    replay_.setCallbacks({
+        [this](const lab::core::DataChunk& chunk) {
+            std::scoped_lock routeLock(routingMutex_);
+            if (chunk.direction == lab::core::Direction::Rx) {
+                processing_.push(chunk);
+            }
+            std::scoped_lock lock(uiQueueMutex_);
+            uiQueue_.push_back(chunk);
+        },
+        {},
+        [this](const std::string& message) {
+            QMetaObject::invokeMethod(
+                this,
+                [this, message] {
+                    emit sourceError(tr("回放：%1").arg(QString::fromStdString(message)));
+                },
+                Qt::QueuedConnection);
+        }});
+
+    processing_.setSampleHandler([this](const lab::core::DataSample& sample) {
+        recorder_.enqueueSample(sample);
+    });
+
     processing_.setFrameHandler([this](const lab::core::FrameEvent& event) {
-        std::scoped_lock lock(protocolQueueMutex_);
-        protocolQueue_.push_back(event);
+        {
+            std::scoped_lock lock(protocolQueueMutex_);
+            protocolQueue_.push_back(event);
+        }
+        if (event.kind != lab::core::FrameEventKind::FrameDecoded) {
+            recorder_.enqueueEvent({event.sourceTimestamp,
+                                    event.sourceId,
+                                    "warning",
+                                    "protocol",
+                                    event.message,
+                                    event.sequence});
+        } else {
+            recorder_.enqueueFrame(event);
+        }
     });
 
     refreshTimer_.setInterval(33);
@@ -48,6 +97,8 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
 
 SerialSession::~SerialSession() {
     source_.close();
+    replay_.close();
+    processing_.flush();
     recorder_.stop();
 }
 
@@ -60,6 +111,7 @@ const lab::core::TimeSeriesStore& SerialSession::timeSeries() const noexcept {
 }
 
 void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings) {
+    replay_.close();
     lastSettings_ = std::move(settings);
     source_.setSettings(lastSettings_);
     source_.open();
@@ -88,6 +140,7 @@ void SerialSession::setCsvFields(const QStringList& fields) {
     for (const auto& field : fields) {
         names.push_back(field.trimmed().toStdString());
     }
+    activeCsvFields_ = names;
     processing_.setFieldNames(std::move(names));
     timeSeries_.clear();
 }
@@ -128,6 +181,16 @@ void SerialSession::loadProtocolFile(const QString& path) {
         std::scoped_lock lock(protocolQueueMutex_);
         protocolQueue_.clear();
     }
+    activeProtocolName_ = result.definition->name;
+    activeProtocolJson_.assign(data.constData(), static_cast<std::size_t>(data.size()));
+    recorder_.updateProtocolSnapshot(
+        activeProtocolName_, activeProtocolJson_, lab::core::nowTimestampNs());
+    recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                            source_.sourceId(),
+                            "info",
+                            "protocol",
+                            "Protocol loaded: " + activeProtocolName_,
+                            0});
     emit protocolLoaded(protocolName, numericFields);
 }
 
@@ -137,18 +200,174 @@ void SerialSession::clearProtocol() {
         std::scoped_lock lock(protocolQueueMutex_);
         protocolQueue_.clear();
     }
+    activeProtocolName_.clear();
+    activeProtocolJson_.clear();
+    recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                            source_.sourceId(),
+                            "info",
+                            "protocol",
+                            "Protocol disabled",
+                            0});
     emit protocolCleared();
 }
 
-bool SerialSession::startRecording(const QString& path) {
-    const auto result = recorder_.start(std::filesystem::path(path.toStdWString()));
-    emit recordingChanged(result);
+bool SerialSession::startSession(const QString& directory) {
+    if (replay_.isOpen()) {
+        emit recordingChanged(false, tr("回放模式下不能开始新的实时 Session 记录"));
+        return false;
+    }
+    if (lastSettings_.portName.empty()) {
+        emit recordingChanged(false, tr("请先选择并至少连接一次目标串口"));
+        return false;
+    }
+    lab::core::SessionStartOptions options;
+    options.softwareVersion = "0.3.0";
+    options.sessionName = QFileInfo(directory).fileName().toStdString();
+    options.machineName = QSysInfo::machineHostName().toStdString();
+    options.operatingSystem = QSysInfo::prettyProductName().toStdString();
+    options.protocolName = activeProtocolName_;
+    options.protocolJson = activeProtocolJson_;
+    options.csvFields = activeCsvFields_;
+    options.sources.push_back({
+        source_.sourceId(),
+        "serial",
+        lastSettings_.portName,
+        {{"port", lastSettings_.portName},
+         {"baud_rate", std::to_string(lastSettings_.baudRate)},
+         {"data_bits", std::to_string(lastSettings_.dataBits)},
+         {"stop_bits", std::to_string(static_cast<int>(lastSettings_.stopBits))},
+         {"parity", std::to_string(static_cast<int>(lastSettings_.parity))},
+         {"flow_control", std::to_string(static_cast<int>(lastSettings_.flowControl))}}});
+
+    bool result = false;
+    {
+        std::scoped_lock routeLock(routingMutex_);
+        result = recorder_.start(
+            std::filesystem::path(directory.toStdWString()), std::move(options));
+    }
+    const auto message = result
+                             ? tr("Session 记录已开始：%1").arg(directory)
+                             : tr("Session 创建失败：%1")
+                                   .arg(QString::fromStdString(recorder_.error()));
+    emit recordingChanged(result, message);
+    if (result) {
+        recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                                source_.sourceId(),
+                                "info",
+                                "session",
+                                "Session recording started",
+                                0});
+    }
     return result;
 }
 
-void SerialSession::stopRecording() {
-    recorder_.stop();
-    emit recordingChanged(false);
+void SerialSession::stopSession() {
+    if (!recorder_.isRecording()) {
+        return;
+    }
+    {
+        std::scoped_lock routeLock(routingMutex_);
+        processing_.flush();
+        recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                                source_.sourceId(),
+                                "info",
+                                "session",
+                                "Session recording stopped",
+                                0});
+        recorder_.stop();
+    }
+    emit recordingChanged(false, tr("Session 记录已安全结束"));
+}
+
+bool SerialSession::openReplaySession(const QString& directory) {
+    if (recorder_.isRecording()) {
+        emit replayOpenFailed(tr("请先停止当前 Session 记录"));
+        return false;
+    }
+
+    const QFileInfo selected(directory);
+    const auto sessionDirectory = selected.isDir() ? selected.absoluteFilePath()
+                                                   : selected.absolutePath();
+    const auto rawPath = selected.isDir()
+                             ? QDir(sessionDirectory).filePath(QStringLiteral("raw/stream.ldraw"))
+                             : selected.absoluteFilePath();
+    if (!QFileInfo::exists(rawPath)) {
+        emit replayOpenFailed(tr("找不到 Session 原始数据：%1").arg(rawPath));
+        return false;
+    }
+
+    source_.close();
+    replay_.close();
+    timeSeries_.clear();
+    {
+        std::scoped_lock lock(uiQueueMutex_);
+        uiQueue_.clear();
+    }
+    const auto protocolPath = QDir(sessionDirectory).filePath(QStringLiteral("protocol/initial.json"));
+    clearProtocol();
+    if (QFileInfo::exists(protocolPath)) {
+        loadProtocolFile(protocolPath);
+    }
+    if (activeProtocolName_.empty()) {
+        QFile fieldsFile(QDir(sessionDirectory).filePath(
+            QStringLiteral("configuration/csv_fields.txt")));
+        if (fieldsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QStringList restoredFields;
+            while (!fieldsFile.atEnd()) {
+                const auto field = QString::fromUtf8(fieldsFile.readLine()).trimmed();
+                if (!field.isEmpty()) {
+                    restoredFields.push_back(field);
+                }
+            }
+            if (!restoredFields.isEmpty()) {
+                setCsvFields(restoredFields);
+                emit csvFieldsRestored(restoredFields);
+            }
+        }
+    }
+    replay_.setPath(std::filesystem::path(rawPath.toStdWString()));
+    if (!replay_.open()) {
+        emit replayOpenFailed(tr("无法打开回放文件；详细原因已写入状态栏和日志"));
+        return false;
+    }
+    const auto replayStatus = replay_.status();
+    emit replayOpened(sessionDirectory, replayStatus.recoveredTruncatedTail);
+    return true;
+}
+
+void SerialSession::closeReplay() {
+    replay_.close();
+}
+
+void SerialSession::pauseReplay() {
+    replay_.pause();
+}
+
+void SerialSession::resumeReplay() {
+    replay_.resume();
+}
+
+void SerialSession::setReplaySpeed(double speed) {
+    replay_.setSpeed(speed);
+}
+
+void SerialSession::seekReplay(double fraction) {
+    const auto wasPaused = replay_.status().paused;
+    replay_.pause();
+    {
+        std::scoped_lock routeLock(routingMutex_);
+        processing_.flush();
+        processing_.resetParsers();
+        replay_.seekFraction(fraction);
+        timeSeries_.clear();
+        {
+            std::scoped_lock lock(protocolQueueMutex_);
+            protocolQueue_.clear();
+        }
+    }
+    if (!wasPaused) {
+        replay_.resume();
+    }
 }
 
 void SerialSession::drainUiQueue() {
@@ -235,7 +454,18 @@ void SerialSession::drainUiQueue() {
                                        protocolStats->lengthErrors,
                                        protocolStats->decodeErrors);
     }
-    const auto stats = source_.statistics();
+    const auto replayStatus = replay_.status();
+    emit replayStatusChanged(replayStatus.open,
+                             replayStatus.paused,
+                             replayStatus.atEnd,
+                             replayStatus.speed,
+                             replayStatus.position,
+                             replayStatus.recordCount,
+                             replayStatus.firstTimestamp,
+                             replayStatus.lastTimestamp,
+                             replayStatus.currentTimestamp);
+
+    const auto stats = replayStatus.open ? replay_.statistics() : source_.statistics();
     emit statisticsChanged(
         stats.receivedBytes,
         stats.transmittedBytes,

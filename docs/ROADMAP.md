@@ -39,9 +39,19 @@
 - 数值字段自动进入统一时序存储与实时曲线；
 - 协议热切换清空旧解析队列，原始记录链路保持独立。
 
+## 已实现：Phase 4 — Recorder / Replay
+
+- 目录式 Session 与版本化 `metadata.json`；
+- 原始 RX/TX、数值 CSV、结构化帧 JSONL、事件和配置/协议快照；
+- 停止记录处理屏障，保证已接收原始数据与解析值的尾部一致性；
+- 小端可移植原始格式、长度防护、截断尾部恢复和中段损坏拒绝；
+- 正式 `ReplaySource : IDataSource`，支持 0.1×~10×、暂停、继续、跳转；
+- Replay 接入终端、协议引擎、TimeSeries 和曲线，自动恢复初始协议或 CSV 字段。
+
+尚需强化：后台/缓存索引、超长 Session 压力测试、Session 浏览器、marker，以及回放结构化结果而不重新解析的可选模式。
+
 ## 后续顺序
 
-- Phase 4：完整 Session、索引、ReplaySource、seek/speed/pause；
 - Phase 5：TCP/UDP adapters；
 - Phase 6：Linux ROS2 adapter 与远程 Agent；
 - Phase 7：generic ROS introspection 与 rosbag2；

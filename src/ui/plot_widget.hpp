@@ -24,6 +24,7 @@ public:
     explicit PlotWidget(
         const lab::core::TimeSeriesStore* store,
         QWidget* parent = nullptr);
+    [[nodiscard]] QStringList fieldNames() const;
 
 public slots:
     void useProtocolFields(const QStringList& fields);

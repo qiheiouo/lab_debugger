@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.2.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.3.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -31,7 +31,10 @@ add_library(lab_core STATIC
     src/core/src/protocol_decoder.cpp
     src/core/src/protocol_definition.cpp
     src/core/src/protocol_json_loader.cpp
+    src/core/src/raw_log_reader.cpp
     src/core/src/raw_log_recorder.cpp
+    src/core/src/replay_source.cpp
+    src/core/src/session_recorder.cpp
     src/core/src/time_series_store.cpp
 )
 target_include_directories(lab_core PUBLIC src/core/include)
@@ -69,6 +72,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
             src/ui/plot_widget.hpp
             src/ui/protocol_widget.cpp
             src/ui/protocol_widget.hpp
+            src/ui/replay_widget.cpp
+            src/ui/replay_widget.hpp
             src/ui/send_panel.cpp
             src/ui/send_panel.hpp
             src/ui/serial_panel.cpp

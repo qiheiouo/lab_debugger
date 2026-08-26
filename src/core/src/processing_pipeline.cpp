@@ -45,6 +45,14 @@ void ProcessingPipeline::clearProtocolDefinition() {
     csvEnabled_ = true;
 }
 
+void ProcessingPipeline::resetParsers() {
+    std::scoped_lock lock(parserMutex_);
+    parser_.reset();
+    if (frameParser_) {
+        frameParser_->reset();
+    }
+}
+
 void ProcessingPipeline::setFrameHandler(FrameHandler handler) {
     std::scoped_lock lock(frameHandlerMutex_);
     frameHandler_ = std::move(handler);
@@ -68,6 +76,11 @@ std::size_t ProcessingPipeline::pendingChunks() const {
     return queue_.size();
 }
 
+void ProcessingPipeline::flush() {
+    std::unique_lock lock(queueMutex_);
+    queueIdle_.wait(lock, [this] { return queue_.empty() && !processingChunk_; });
+}
+
 void ProcessingPipeline::run(std::stop_token stopToken) {
     while (true) {
         DataChunk chunk;
@@ -82,9 +95,15 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
             }
             chunk = std::move(queue_.front());
             queue_.pop_front();
+            processingChunk_ = true;
         }
 
         if (chunk.direction != Direction::Rx) {
+            std::scoped_lock lock(queueMutex_);
+            processingChunk_ = false;
+            if (queue_.empty()) {
+                queueIdle_.notify_all();
+            }
             continue;
         }
 
@@ -122,13 +141,22 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
                     if (!field.numericValue) {
                         continue;
                     }
-                    store_.append({
+                    DataSample sample{
                         event.sourceTimestamp,
                         event.sourceId,
                         field.name,
                         *field.numericValue,
                         field.unit,
-                        event.sequence});
+                        event.sequence};
+                    store_.append(sample);
+                    SampleHandler sampleHandler;
+                    {
+                        std::scoped_lock lock(handlerMutex_);
+                        sampleHandler = sampleHandler_;
+                    }
+                    if (sampleHandler) {
+                        sampleHandler(sample);
+                    }
                 }
             }
             FrameHandler handler;
@@ -138,6 +166,14 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
             }
             if (handler) {
                 handler(event);
+            }
+        }
+
+        {
+            std::scoped_lock lock(queueMutex_);
+            processingChunk_ = false;
+            if (queue_.empty()) {
+                queueIdle_.notify_all();
             }
         }
     }

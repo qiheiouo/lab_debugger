@@ -4,14 +4,24 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <type_traits>
 
 namespace lab::core {
 namespace {
 
 template <typename T>
 void writeValue(std::ofstream& stream, T value) {
-    stream.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    static_assert(std::is_integral_v<T>);
+    using Unsigned = std::make_unsigned_t<T>;
+    Unsigned bits{};
+    std::memcpy(&bits, &value, sizeof(value));
+    std::array<std::uint8_t, sizeof(T)> bytes{};
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        bytes[index] = static_cast<std::uint8_t>(bits >> (index * 8U));
+    }
+    stream.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 }
 
 }  // namespace

@@ -11,6 +11,7 @@ namespace lab::ui {
 
 class PlotWidget;
 class ProtocolWidget;
+class ReplayWidget;
 class SendPanel;
 class SerialPanel;
 class TerminalWidget;
@@ -33,6 +34,7 @@ private:
     TerminalWidget* terminal_{};
     PlotWidget* plot_{};
     ProtocolWidget* protocol_{};
+    ReplayWidget* replay_{};
     SendPanel* sendPanel_{};
     QLabel* traffic_{};
     QLabel* parserStatus_{};

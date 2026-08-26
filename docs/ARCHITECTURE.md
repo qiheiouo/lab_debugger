@@ -62,11 +62,14 @@ GUI thread                 只处理交互、33 ms 批量终端刷新和绘图�
 Serial QThread             QSerialPort 的 open/read/write/error 生命周期
 Processing std::jthread    CSV/二进制帧解析、TimeSeries 追加、FrameEvent
 Recorder std::jthread      有序写入 RX/TX 原始记录
+Session std::jthread       异步写入数值、结构化帧、事件和配置快照
 ```
 
 暂停终端或曲线只影响绘制，不会停止串口、处理线程或记录线程。`TimeSeriesStore` 使用共享锁保护；绘图得到有序快照，不持有内部存储引用。
 
-当前处理和记录队列选择可靠性优先，不在压力下静默丢弃。队列深度会暴露为指标；后续持续压力策略是背压告警、分块落盘和可配置内存上限，而不是无提示截断。
+当前处理和记录队列选择可靠性优先，不在压力下静默丢弃。停止 Session 时，数据源路由短暂进入屏障，等待处理队列变空后再结束记录，确保停止点前的原始数据和解析值一致。队列深度会暴露为指标；后续持续压力策略是背压告警、分块落盘和可配置内存上限，而不是无提示截断。
+
+`ReplaySource` 实现同一个 `IDataSource` 接口，按原始接收时间调度 `DataChunk`，所以回放复用 Monitor、Protocol 和 Plot 全链路。跳转会暂停回放、等待处理队列空闲、重置流解析器后再切换索引位置。
 
 ## 4. Windows / Linux / ROS2 解耦
 
@@ -98,7 +101,7 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 ## 7. 当前已知边界
 
 - 当前最小绘图是自绘 Qt Widget，不依赖 Qt Charts；适合 10~20 条常规曲线，但尚未实现高密度 LTTB/min-max downsampling。
-- `.ldraw` 是 Phase 1 原始流格式，不等同于 Phase 4 完整 Session。
+- 回放索引当前在打开文件时同步建立，每条原始记录占 16 字节索引内存；超长 Session 的后台建索引与稀疏缓存仍待实现。
 - CSV 解析器只处理换行分隔的数值；二进制帧、单位和校验由独立协议引擎处理。
 - 串口断开后提供手动重连；自动退避重连和端口热插拔恢复留到后续。
 - 时钟目前使用系统 Unix 时间。多机 ROS Agent 需要记录时钟偏移估计和同步质量。

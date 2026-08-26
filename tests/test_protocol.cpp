@@ -275,6 +275,10 @@ void testProtocolProcessingPipeline() {
     lab::core::TimeSeriesStore store(100);
     lab::core::ProcessingPipeline pipeline(store);
     std::atomic_int decodedFrames{};
+    std::atomic_int decodedSamples{};
+    pipeline.setSampleHandler([&decodedSamples](const lab::core::DataSample&) {
+        decodedSamples.fetch_add(1, std::memory_order_relaxed);
+    });
     pipeline.setFrameHandler([&decodedFrames](const lab::core::FrameEvent& event) {
         if (event.kind == lab::core::FrameEventKind::FrameDecoded) {
             decodedFrames.fetch_add(1, std::memory_order_relaxed);
@@ -296,6 +300,8 @@ void testProtocolProcessingPipeline() {
             "pipeline preserves source timestamp");
     require(decodedFrames.load(std::memory_order_relaxed) == 1,
             "pipeline forwards frame event");
+    require(decodedSamples.load(std::memory_order_relaxed) == 4,
+            "pipeline forwards every numeric protocol field for session recording");
     const auto stats = pipeline.protocolStatistics();
     require(stats && stats->decodedFrames == 1, "pipeline exposes parser statistics");
 }

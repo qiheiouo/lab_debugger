@@ -34,10 +34,12 @@ public:
     void setSampleHandler(SampleHandler handler);
     void setProtocolDefinition(ProtocolDefinition definition);
     void clearProtocolDefinition();
+    void resetParsers();
     void setFrameHandler(FrameHandler handler);
     [[nodiscard]] bool protocolEnabled() const;
     [[nodiscard]] std::optional<FrameParserStatistics> protocolStatistics() const;
     [[nodiscard]] std::size_t pendingChunks() const;
+    void flush();
 
 private:
     void run(std::stop_token stopToken);
@@ -45,7 +47,9 @@ private:
     TimeSeriesStore& store_;
     mutable std::mutex queueMutex_;
     std::condition_variable_any queueReady_;
+    std::condition_variable queueIdle_;
     std::deque<DataChunk> queue_;
+    bool processingChunk_{};
 
     mutable std::mutex parserMutex_;
     CsvStreamParser parser_;

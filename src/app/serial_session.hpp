@@ -3,7 +3,8 @@
 #include "lab/adapters/serial/serial_source.hpp"
 #include "lab/core/data_chunk.hpp"
 #include "lab/core/processing_pipeline.hpp"
-#include "lab/core/raw_log_recorder.hpp"
+#include "lab/core/replay_source.hpp"
+#include "lab/core/session_recorder.hpp"
 #include "lab/core/time_series_store.hpp"
 
 #include <QByteArray>
@@ -37,15 +38,21 @@ public slots:
     void setCsvFields(const QStringList& fields);
     void loadProtocolFile(const QString& path);
     void clearProtocol();
-    bool startRecording(const QString& path);
-    void stopRecording();
+    bool startSession(const QString& directory);
+    void stopSession();
+    bool openReplaySession(const QString& directory);
+    void closeReplay();
+    void pauseReplay();
+    void resumeReplay();
+    void setReplaySpeed(double speed);
+    void seekReplay(double fraction);
 
 signals:
     void chunkReady(QByteArray bytes, bool transmitted, qint64 timestampNs);
     void sourceStateChanged(int state);
     void sourceError(QString message);
     void statisticsChanged(quint64 rxBytes, quint64 txBytes, qsizetype parserBacklog);
-    void recordingChanged(bool active);
+    void recordingChanged(bool active, QString message);
     void protocolLoaded(QString name, QStringList numericFields);
     void protocolCleared();
     void protocolLoadFailed(QStringList issues);
@@ -55,20 +62,37 @@ signals:
                                    quint64 checksumErrors,
                                    quint64 lengthErrors,
                                    quint64 decodeErrors);
+    void replayOpened(QString directory, bool recoveredTruncatedTail);
+    void replayOpenFailed(QString message);
+    void replayStatusChanged(bool open,
+                             bool paused,
+                             bool atEnd,
+                             double speed,
+                             quint64 position,
+                             quint64 recordCount,
+                             qint64 firstTimestamp,
+                             qint64 lastTimestamp,
+                             qint64 currentTimestamp);
+    void csvFieldsRestored(QStringList fields);
 
 private slots:
     void drainUiQueue();
 
 private:
     lab::adapters::serial::SerialSource source_;
+    lab::core::ReplaySource replay_;
     lab::adapters::serial::SerialSettings lastSettings_;
     lab::core::TimeSeriesStore timeSeries_{120'000};
     std::mutex uiQueueMutex_;
     std::deque<lab::core::DataChunk> uiQueue_;
     std::mutex protocolQueueMutex_;
     std::deque<lab::core::FrameEvent> protocolQueue_;
+    std::mutex routingMutex_;
+    lab::core::SessionRecorder recorder_;
     lab::core::ProcessingPipeline processing_{timeSeries_};
-    lab::core::RawLogRecorder recorder_;
+    std::string activeProtocolName_;
+    std::string activeProtocolJson_;
+    std::vector<std::string> activeCsvFields_;
     QTimer refreshTimer_;
 };
 
