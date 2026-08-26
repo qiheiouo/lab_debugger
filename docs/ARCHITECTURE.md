@@ -89,6 +89,8 @@ Windows remote mode:
 
 远程帧必须携带 topic、message type、源时间、Agent 接收时间、序号与负载。第一版 Agent 先支持常用消息的结构化字段；之后再增加 GenericSubscription、类型描述与 CDR introspection。ROS2 构建通过独立 CMake 选项和目标启用，不向核心传播头文件或链接依赖。
 
+Remote Agent v1 帧和负载编解码现已位于纯 C++ `lab_core`。固定帧包含版本、类型、长度、序号、源时间、Agent 接收时间和 CRC32；SampleBatch 同时保留原始 CDR 与数值/布尔/文本字段。详细字节格式、限制和握手状态机见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。Linux Agent、客户端数据源和 topic UI 尚未完成，因此当前不能把协议基础层视为已可连接 ROS2。
+
 ## 5. 协议引擎边界
 
 `FrameStreamParser` 消费 `DataChunk`，处理固定帧头、固定/动态长度、校验与流重新同步；`ProtocolDecoder` 再按经过严格校验的 `ProtocolDefinition` 解码字段。两层分开，避免每个 STM32 协议重复实现状态机，也使 CRC 错误不会污染字段层。
@@ -107,3 +109,4 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 - 串口断开后提供手动重连；自动退避重连和端口热插拔恢复留到后续。
 - TCP 当前服务一个活动客户端；UDP 远端目前要求数字 IPv4/IPv6 地址。自动重连、TLS、组播和多客户端管理留到后续。
 - 时钟目前使用系统 Unix 时间。多机 ROS Agent 需要记录时钟偏移估计和同步质量。
+- Remote Agent v1 暂无认证或加密，只允许受信网络/VPN/SSH 隧道；TLS 与访问控制留在 Agent 联调阶段。

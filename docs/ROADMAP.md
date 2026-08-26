@@ -63,9 +63,25 @@
 
 尚需强化：TCP 多客户端会话、主机名形式的 UDP 目标、自动退避重连、TLS、组播，以及网络高吞吐/长时间压力测试。
 
-## 后续顺序
+## 进行中：Phase 6 — ROS2 / Remote Agent
 
-- Phase 6：Linux ROS2 adapter 与远程 Agent；
+已完成基础层：
+
+- 无 Qt/ROS 依赖的 Remote Agent v1 帧与 payload 数据模型；
+- Hello/HelloAck、TopicCatalog、Subscribe/Unsubscribe、SampleBatch、Error 和心跳；
+- 原始 CDR 与数值/布尔/文本字段同时保留；
+- 源时间、Agent 接收时间、序号、CRC32 和固定长度上限；
+- TCP 分片/粘包、垃圾、错误 CRC/版本/类型/长度后的流式重同步测试。
+
+下一批：
+
+- Windows `RemoteAgentSource`、握手状态机和 topic 选择 UI；
+- Linux/ROS2 Humble Agent 进程、graph discovery 与常用消息字段映射；
+- GenericSubscription 原始 CDR 转发和 introspection 能力探测；
+- Agent 心跳、重连、时钟偏移估计、认证与 TLS 部署方式。
+
+后续：
+
 - Phase 7：generic ROS introspection 与 rosbag2；
 - Phase 8：派生字段、滤波、marker、告警、多源同步分析。
 

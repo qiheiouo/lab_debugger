@@ -1,6 +1,6 @@
 # Lab Debugger / 实验室调试助手
 
-Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路和 Phase 5 网络数据源：
+Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路、Phase 5 网络数据源，并开始 Phase 6 Remote ROS Agent 基础层：
 
 - 与 Qt UI 解耦的 C++20 数据核心；
 - 多数据源友好的 `IDataSource` 抽象；
@@ -14,9 +14,11 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 正式 `ReplaySource`：0.1×~10×、暂停/继续、跳转、截断尾部恢复；
 - 独立 I/O 线程的 TCP 客户端、单连接 TCP 服务端和 UDP 收发；
 - 网络数据复用终端、协议、曲线、记录与回放全链路；
+- 无 Qt/ROS 依赖的 Remote Agent 帧、握手、topic、订阅和样本编解码；
+- Remote Agent CRC32、长度防护、流式分片/粘包处理与错误重同步；
 - 可测试的 `MockDataSource` 与核心测试。
 
-详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
+详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
 
 ## Windows 构建
 

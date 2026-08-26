@@ -22,6 +22,7 @@ endif()
 find_package(Threads REQUIRED)
 
 add_library(lab_core STATIC
+    src/core/src/agent_protocol.cpp
     src/core/src/checksum.cpp
     src/core/src/csv_stream_parser.cpp
     src/core/src/frame_stream_parser.cpp
@@ -137,6 +138,9 @@ if(LAB_DEBUGGER_BUILD_TESTS)
     )
     target_link_libraries(lab_core_tests PRIVATE lab_core)
     add_test(NAME lab_core_tests COMMAND lab_core_tests)
+    add_executable(lab_agent_protocol_tests tests/test_agent_protocol.cpp)
+    target_link_libraries(lab_agent_protocol_tests PRIVATE lab_core)
+    add_test(NAME lab_agent_protocol_tests COMMAND lab_agent_protocol_tests)
     if(TARGET lab_network_adapter)
         add_executable(lab_network_tests tests/test_network.cpp)
         target_link_libraries(lab_network_tests PRIVATE lab_network_adapter Qt6::Core Qt6::Network)
