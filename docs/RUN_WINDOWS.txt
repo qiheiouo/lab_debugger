@@ -1,0 +1,15 @@
+Lab Debugger Windows 便携版
+===========================
+
+直接双击：bin\LabDebugger.exe
+
+首次使用：
+1. USB-UART 连接 STM32。
+2. 选择 COM 口、波特率和串口参数，点击“连接”。
+3. 在“终端”页选择 HEX 或 ASCII 查看 RX/TX。
+4. 如果 STM32 持续发送 1.24,3.56,23.80 加换行，打开“实时曲线”页，
+   设置字段 speed,current,voltage 后点击“应用字段”即可看到曲线。
+
+程序不要求系统安装 Qt。原始记录使用 .ldraw 格式；源码仓库的
+docs/ARCHITECTURE.md 说明了格式、线程模型和后续扩展边界。
+

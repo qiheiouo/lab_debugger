@@ -1,0 +1,8 @@
+/build/
+/dist/
+/.idea/
+/.vscode/
+*.user
+*.ldraw
+*.log
+
