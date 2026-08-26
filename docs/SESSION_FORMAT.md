@@ -1,6 +1,6 @@
 # Session 记录与回放格式
 
-Lab Debugger 0.3 引入目录式 Session。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
+Lab Debugger 0.3 引入目录式 Session，0.4 将 TCP/UDP 配置纳入同一格式。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
 
 ```text
 session_YYYYMMDD_HHMMSS/
@@ -26,6 +26,8 @@ session_YYYYMMDD_HHMMSS/
 - `frames.jsonl`：二进制协议的逐帧结构化字段，也保留 enum、布尔和字节数组等非纯数值表现。
 - `events.jsonl`：连接状态、协议错误和 Session 生命周期事件。
 - `protocol/`、`configuration/`：记录开始时的协议与字段/数据源配置快照。
+
+串口配置记录端口、波特率、数据位、停止位、校验和流控；网络配置记录 `tcp_client` / `tcp_server` / `udp` 模式、绑定地址、本地端口、远端地址和远端端口。
 
 ## 原始流格式
 

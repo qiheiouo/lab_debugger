@@ -50,9 +50,21 @@
 
 尚需强化：后台/缓存索引、超长 Session 压力测试、Session 浏览器、marker，以及回放结构化结果而不重新解析的可选模式。
 
+## 已实现：Phase 5 — Network
+
+- 与串口同样实现 `IDataSource` 的 `NetworkSource`；
+- 独立 `QThread` 中的 TCP 客户端、单连接 TCP 服务端和 UDP socket 生命周期；
+- TCP 双向字节流、UDP 双向数据报，RX/TX 均携带时间戳、方向、来源和序号；
+- 网络配置页、连接状态、手动断开/重开和统一发送入口；
+- 网络数据接入 Terminal、CSV/二进制协议、TimeSeries、Plot 与 Session；
+- Session 保存网络模式、绑定端点和远端端点；
+- 本机回环测试覆盖 TCP client/server 和 UDP 的精确收发内容。
+- 独立 offscreen GUI 烟雾测试覆盖主窗口构造、事件循环和完整析构；CTest 固定使用项目 Qt，避免系统其他 Qt 版本干扰。
+
+尚需强化：TCP 多客户端会话、主机名形式的 UDP 目标、自动退避重连、TLS、组播，以及网络高吞吐/长时间压力测试。
+
 ## 后续顺序
 
-- Phase 5：TCP/UDP adapters；
 - Phase 6：Linux ROS2 adapter 与远程 Agent；
 - Phase 7：generic ROS introspection 与 rosbag2；
 - Phase 8：派生字段、滤波、marker、告警、多源同步分析。

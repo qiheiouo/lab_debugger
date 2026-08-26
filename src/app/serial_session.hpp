@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lab/adapters/serial/serial_source.hpp"
+#include "lab/adapters/network/network_source.hpp"
 #include "lab/core/data_chunk.hpp"
 #include "lab/core/processing_pipeline.hpp"
 #include "lab/core/replay_source.hpp"
@@ -34,6 +35,9 @@ public slots:
     void connectSerial(lab::adapters::serial::SerialSettings settings);
     void disconnectSerial();
     void reconnectSerial();
+    void connectNetwork(lab::adapters::network::NetworkSettings settings);
+    void disconnectNetwork();
+    void reconnectNetwork();
     void sendBytes(const QByteArray& bytes);
     void setCsvFields(const QStringList& fields);
     void loadProtocolFile(const QString& path);
@@ -50,6 +54,7 @@ public slots:
 signals:
     void chunkReady(QByteArray bytes, bool transmitted, qint64 timestampNs);
     void sourceStateChanged(int state);
+    void networkStateChanged(int state);
     void sourceError(QString message);
     void statisticsChanged(quint64 rxBytes, quint64 txBytes, qsizetype parserBacklog);
     void recordingChanged(bool active, QString message);
@@ -79,9 +84,15 @@ private slots:
     void drainUiQueue();
 
 private:
+    enum class LiveSourceKind { Serial, Network };
+
     lab::adapters::serial::SerialSource source_;
+    lab::adapters::network::NetworkSource network_;
     lab::core::ReplaySource replay_;
     lab::adapters::serial::SerialSettings lastSettings_;
+    lab::adapters::network::NetworkSettings lastNetworkSettings_;
+    bool networkConfigured_{};
+    LiveSourceKind activeLiveSource_{LiveSourceKind::Serial};
     lab::core::TimeSeriesStore timeSeries_{120'000};
     std::mutex uiQueueMutex_;
     std::deque<lab::core::DataChunk> uiQueue_;

@@ -49,6 +49,44 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 Qt::QueuedConnection);
         }});
 
+    network_.setCallbacks({
+        [this](const lab::core::DataChunk& chunk) {
+            std::scoped_lock routeLock(routingMutex_);
+            recorder_.enqueueRaw(chunk);
+            if (chunk.direction == lab::core::Direction::Rx) {
+                processing_.push(chunk);
+            }
+            std::scoped_lock lock(uiQueueMutex_);
+            uiQueue_.push_back(chunk);
+        },
+        [this](lab::core::SourceState state) {
+            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                                    network_.sourceId(),
+                                    "info",
+                                    "source_state",
+                                    "Network state changed to " +
+                                        std::to_string(static_cast<int>(state)),
+                                    0});
+            QMetaObject::invokeMethod(
+                this,
+                [this, state] { emit networkStateChanged(static_cast<int>(state)); },
+                Qt::QueuedConnection);
+        },
+        [this](const std::string& message) {
+            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                                    network_.sourceId(),
+                                    "error",
+                                    "source",
+                                    message,
+                                    0});
+            QMetaObject::invokeMethod(
+                this,
+                [this, message] {
+                    emit sourceError(tr("网络：%1").arg(QString::fromStdString(message)));
+                },
+                Qt::QueuedConnection);
+        }});
+
     replay_.setCallbacks({
         [this](const lab::core::DataChunk& chunk) {
             std::scoped_lock routeLock(routingMutex_);
@@ -97,6 +135,7 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
 
 SerialSession::~SerialSession() {
     source_.close();
+    network_.close();
     replay_.close();
     processing_.flush();
     recorder_.stop();
@@ -111,7 +150,13 @@ const lab::core::TimeSeriesStore& SerialSession::timeSeries() const noexcept {
 }
 
 void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings) {
+    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::Serial) {
+        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+        return;
+    }
+    network_.close();
     replay_.close();
+    activeLiveSource_ = LiveSourceKind::Serial;
     lastSettings_ = std::move(settings);
     source_.setSettings(lastSettings_);
     source_.open();
@@ -122,15 +167,65 @@ void SerialSession::disconnectSerial() {
 }
 
 void SerialSession::reconnectSerial() {
+    if (lastSettings_.portName.empty()) {
+        emit sourceError(tr("请先选择并连接一次目标串口"));
+        return;
+    }
+    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::Serial) {
+        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+        return;
+    }
+    network_.close();
+    replay_.close();
+    activeLiveSource_ = LiveSourceKind::Serial;
     source_.close();
     source_.setSettings(lastSettings_);
     source_.open();
 }
 
+void SerialSession::connectNetwork(lab::adapters::network::NetworkSettings settings) {
+    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::Network) {
+        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+        return;
+    }
+    source_.close();
+    replay_.close();
+    activeLiveSource_ = LiveSourceKind::Network;
+    lastNetworkSettings_ = std::move(settings);
+    networkConfigured_ = true;
+    network_.setSettings(lastNetworkSettings_);
+    network_.open();
+}
+
+void SerialSession::disconnectNetwork() {
+    network_.close();
+}
+
+void SerialSession::reconnectNetwork() {
+    if (!networkConfigured_) {
+        emit sourceError(tr("请先配置并打开一次网络数据源"));
+        return;
+    }
+    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::Network) {
+        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+        return;
+    }
+    source_.close();
+    replay_.close();
+    activeLiveSource_ = LiveSourceKind::Network;
+    network_.close();
+    network_.setSettings(lastNetworkSettings_);
+    network_.open();
+}
+
 void SerialSession::sendBytes(const QByteArray& bytes) {
     const auto first = reinterpret_cast<const std::uint8_t*>(bytes.constData());
-    if (!source_.write(std::span(first, static_cast<std::size_t>(bytes.size())))) {
-        emit sourceError(tr("发送失败：串口未连接或写入未被接受"));
+    const auto data = std::span(first, static_cast<std::size_t>(bytes.size()));
+    const auto accepted = activeLiveSource_ == LiveSourceKind::Network
+                              ? network_.write(data)
+                              : source_.write(data);
+    if (!accepted) {
+        emit sourceError(tr("发送失败：当前数据源未连接或写入未被接受"));
     }
 }
 
@@ -186,7 +281,9 @@ void SerialSession::loadProtocolFile(const QString& path) {
     recorder_.updateProtocolSnapshot(
         activeProtocolName_, activeProtocolJson_, lab::core::nowTimestampNs());
     recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                            source_.sourceId(),
+                            activeLiveSource_ == LiveSourceKind::Network
+                                ? network_.sourceId()
+                                : source_.sourceId(),
                             "info",
                             "protocol",
                             "Protocol loaded: " + activeProtocolName_,
@@ -203,7 +300,9 @@ void SerialSession::clearProtocol() {
     activeProtocolName_.clear();
     activeProtocolJson_.clear();
     recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                            source_.sourceId(),
+                            activeLiveSource_ == LiveSourceKind::Network
+                                ? network_.sourceId()
+                                : source_.sourceId(),
                             "info",
                             "protocol",
                             "Protocol disabled",
@@ -216,28 +315,40 @@ bool SerialSession::startSession(const QString& directory) {
         emit recordingChanged(false, tr("回放模式下不能开始新的实时 Session 记录"));
         return false;
     }
-    if (lastSettings_.portName.empty()) {
-        emit recordingChanged(false, tr("请先选择并至少连接一次目标串口"));
+    if ((activeLiveSource_ == LiveSourceKind::Serial && lastSettings_.portName.empty()) ||
+        (activeLiveSource_ == LiveSourceKind::Network && !networkConfigured_)) {
+        emit recordingChanged(false, tr("请先配置并至少连接一次实时数据源"));
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.3.0";
+    options.softwareVersion = "0.4.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
     options.protocolName = activeProtocolName_;
     options.protocolJson = activeProtocolJson_;
     options.csvFields = activeCsvFields_;
-    options.sources.push_back({
-        source_.sourceId(),
-        "serial",
-        lastSettings_.portName,
-        {{"port", lastSettings_.portName},
-         {"baud_rate", std::to_string(lastSettings_.baudRate)},
-         {"data_bits", std::to_string(lastSettings_.dataBits)},
-         {"stop_bits", std::to_string(static_cast<int>(lastSettings_.stopBits))},
-         {"parity", std::to_string(static_cast<int>(lastSettings_.parity))},
-         {"flow_control", std::to_string(static_cast<int>(lastSettings_.flowControl))}}});
+    if (activeLiveSource_ == LiveSourceKind::Serial) {
+        options.sources.push_back({
+            source_.sourceId(),
+            "serial",
+            lastSettings_.portName,
+            {{"port", lastSettings_.portName},
+             {"baud_rate", std::to_string(lastSettings_.baudRate)},
+             {"data_bits", std::to_string(lastSettings_.dataBits)},
+             {"stop_bits", std::to_string(static_cast<int>(lastSettings_.stopBits))},
+             {"parity", std::to_string(static_cast<int>(lastSettings_.parity))},
+             {"flow_control", std::to_string(static_cast<int>(lastSettings_.flowControl))}}});
+    } else {
+        options.sources.push_back({
+            network_.sourceId(),
+            lab::adapters::network::toString(lastNetworkSettings_.mode),
+            network_.sourceId(),
+            {{"remote_host", lastNetworkSettings_.remoteHost},
+             {"remote_port", std::to_string(lastNetworkSettings_.remotePort)},
+             {"bind_address", lastNetworkSettings_.bindAddress},
+             {"local_port", std::to_string(lastNetworkSettings_.localPort)}}});
+    }
 
     bool result = false;
     {
@@ -252,7 +363,9 @@ bool SerialSession::startSession(const QString& directory) {
     emit recordingChanged(result, message);
     if (result) {
         recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                source_.sourceId(),
+                                activeLiveSource_ == LiveSourceKind::Network
+                                    ? network_.sourceId()
+                                    : source_.sourceId(),
                                 "info",
                                 "session",
                                 "Session recording started",
@@ -269,7 +382,9 @@ void SerialSession::stopSession() {
         std::scoped_lock routeLock(routingMutex_);
         processing_.flush();
         recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                source_.sourceId(),
+                                activeLiveSource_ == LiveSourceKind::Network
+                                    ? network_.sourceId()
+                                    : source_.sourceId(),
                                 "info",
                                 "session",
                                 "Session recording stopped",
@@ -297,6 +412,7 @@ bool SerialSession::openReplaySession(const QString& directory) {
     }
 
     source_.close();
+    network_.close();
     replay_.close();
     timeSeries_.clear();
     {
@@ -465,7 +581,11 @@ void SerialSession::drainUiQueue() {
                              replayStatus.lastTimestamp,
                              replayStatus.currentTimestamp);
 
-    const auto stats = replayStatus.open ? replay_.statistics() : source_.statistics();
+    const auto stats = replayStatus.open
+                           ? replay_.statistics()
+                           : activeLiveSource_ == LiveSourceKind::Network
+                                 ? network_.statistics()
+                                 : source_.statistics();
     emit statisticsChanged(
         stats.receivedBytes,
         stats.transmittedBytes,

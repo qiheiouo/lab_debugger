@@ -1,6 +1,6 @@
 # Lab Debugger / 实验室调试助手
 
-Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎，以及可用的 Phase 4 Session/回放链路：
+Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路和 Phase 5 网络数据源：
 
 - 与 Qt UI 解耦的 C++20 数据核心；
 - 多数据源友好的 `IDataSource` 抽象；
@@ -12,26 +12,31 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 协议加载界面、逐帧检查器、错误统计，以及数值字段自动接入曲线；
 - 目录式 Session：原始流、数值、结构化帧、事件、元数据和配置快照；
 - 正式 `ReplaySource`：0.1×~10×、暂停/继续、跳转、截断尾部恢复；
+- 独立 I/O 线程的 TCP 客户端、单连接 TCP 服务端和 UDP 收发；
+- 网络数据复用终端、协议、曲线、记录与回放全链路；
 - 可测试的 `MockDataSource` 与核心测试。
 
-详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
+详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
 
 ## Windows 构建
 
-需要 Visual Studio 2022、CMake 3.24+、Qt 6.5+（Widgets 与 SerialPort）。
+需要 Visual Studio 2022、CMake 3.24+、Qt 6.5+（Widgets、SerialPort 与 Network）。
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
   -DCMAKE_PREFIX_PATH=C:\Qt\6.8.3\msvc2022_64
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
+cmake --install build --config Release --prefix dist/LabDebugger
 ```
 
-运行：
+安装步骤会把所需 Qt DLL 和平台插件部署到 `dist/LabDebugger`，推荐运行部署后的版本：
 
 ```powershell
-.\build\Release\LabDebugger.exe
+.\dist\LabDebugger\bin\LabDebugger.exe
 ```
+
+若只从 Qt/Visual Studio 开发终端调试，也可以直接运行 `build\Release\LabDebugger.exe`；普通终端直接运行构建目录版本时，需要确保对应 Qt `bin` 位于 `PATH`，避免误加载系统中其他软件附带的 Qt DLL。
 
 若没有 Qt，可用 `-DLAB_DEBUGGER_BUILD_GUI=OFF` 单独构建核心和测试。
 
@@ -52,3 +57,13 @@ ctest --test-dir build -C Release --output-on-failure
 工具栏点击“开始 Session 记录”，选择父目录后会创建带时间戳的 Session 文件夹。点击停止时，应用先等待已接收数据完成解析，再安全结束原始流和解析结果，避免尾部不一致。
 
 打开“Session 回放”页选择历史目录即可回放。回放默认暂停，数据进入与实时串口完全相同的终端、协议和曲线链路；可选择倍速并拖动时间轴跳转。格式与恢复规则见 [记录与回放说明](docs/SESSION_FORMAT.md)。
+
+## TCP/UDP 快速验证
+
+左侧切换到“网络”页后选择模式：
+
+- TCP 客户端填写远端主机和端口；连接成功后即可双向收发字节流；
+- TCP 服务端填写监听地址和本地端口；当前保留一个活动客户端，新连接会替换旧连接；
+- UDP 同时填写本地绑定地址/端口和远端数字 IP/端口；每个收到的数据报形成一个独立数据块。
+
+网络 RX/TX 会进入和串口相同的终端、CSV/二进制协议、曲线及 Session。更完整的模式语义和限制见 [TCP/UDP 使用说明](docs/NETWORK.md)。

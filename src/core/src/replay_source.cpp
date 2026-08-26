@@ -236,8 +236,6 @@ void ReplaySource::run(std::stop_token stopToken) {
                 publishError("Replay record read failed: " + reader_.error());
                 break;
             }
-            publishData(*chunk);
-
             {
                 std::scoped_lock lock(mutex_);
                 if (controlVersion_ != version || position_ != recordIndex) {
@@ -258,6 +256,7 @@ void ReplaySource::run(std::stop_token stopToken) {
                     ++controlVersion_;
                 }
             }
+            publishData(*chunk);
         }
     }
 }

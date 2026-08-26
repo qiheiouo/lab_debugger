@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.3.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.4.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -48,9 +48,16 @@ else()
 endif()
 
 if(LAB_DEBUGGER_BUILD_GUI)
-    find_package(Qt6 6.5 QUIET COMPONENTS Widgets SerialPort)
+    find_package(Qt6 6.5 QUIET COMPONENTS Widgets SerialPort Network)
     if(Qt6_FOUND)
         qt_standard_project_setup()
+        get_target_property(LAB_DEBUGGER_QT_CORE_DLL Qt6::Core IMPORTED_LOCATION_RELEASE)
+        if(NOT LAB_DEBUGGER_QT_CORE_DLL)
+            get_target_property(LAB_DEBUGGER_QT_CORE_DLL Qt6::Core IMPORTED_LOCATION)
+        endif()
+        get_filename_component(LAB_DEBUGGER_QT_BIN_DIR
+            "${LAB_DEBUGGER_QT_CORE_DLL}" DIRECTORY
+        )
 
         add_library(lab_serial_adapter STATIC
             src/adapters/serial/src/serial_source.cpp
@@ -62,12 +69,23 @@ if(LAB_DEBUGGER_BUILD_GUI)
             PUBLIC lab_core Qt6::Core Qt6::SerialPort
         )
 
-        qt_add_executable(lab_debugger WIN32
-            src/app/main.cpp
+        add_library(lab_network_adapter STATIC
+            src/adapters/network/src/network_source.cpp
+        )
+        target_include_directories(lab_network_adapter PUBLIC
+            src/adapters/network/include
+        )
+        target_link_libraries(lab_network_adapter
+            PUBLIC lab_core Qt6::Core Qt6::Network
+        )
+
+        add_library(lab_app_ui STATIC
             src/app/serial_session.cpp
             src/app/serial_session.hpp
             src/ui/main_window.cpp
             src/ui/main_window.hpp
+            src/ui/network_panel.cpp
+            src/ui/network_panel.hpp
             src/ui/plot_widget.cpp
             src/ui/plot_widget.hpp
             src/ui/protocol_widget.cpp
@@ -81,10 +99,13 @@ if(LAB_DEBUGGER_BUILD_GUI)
             src/ui/terminal_widget.cpp
             src/ui/terminal_widget.hpp
         )
-        target_include_directories(lab_debugger PRIVATE src)
-        target_link_libraries(lab_debugger
-            PRIVATE lab_core lab_serial_adapter Qt6::Widgets
+        target_include_directories(lab_app_ui PUBLIC src)
+        target_link_libraries(lab_app_ui
+            PUBLIC lab_core lab_serial_adapter lab_network_adapter Qt6::Widgets
         )
+
+        qt_add_executable(lab_debugger WIN32 src/app/main.cpp)
+        target_link_libraries(lab_debugger PRIVATE lab_app_ui)
         set_target_properties(lab_debugger PROPERTIES
             OUTPUT_NAME "LabDebugger"
         )
@@ -102,7 +123,7 @@ if(LAB_DEBUGGER_BUILD_GUI)
         install(SCRIPT ${deploy_script})
     else()
         message(WARNING
-            "Qt 6 Widgets + SerialPort were not found. "
+            "Qt 6 Widgets + SerialPort + Network were not found. "
             "The portable core and tests will still be built."
         )
     endif()
@@ -116,4 +137,24 @@ if(LAB_DEBUGGER_BUILD_TESTS)
     )
     target_link_libraries(lab_core_tests PRIVATE lab_core)
     add_test(NAME lab_core_tests COMMAND lab_core_tests)
+    if(TARGET lab_network_adapter)
+        add_executable(lab_network_tests tests/test_network.cpp)
+        target_link_libraries(lab_network_tests PRIVATE lab_network_adapter Qt6::Core Qt6::Network)
+        add_test(NAME lab_network_tests COMMAND lab_network_tests)
+        set_tests_properties(lab_network_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+        )
+    endif()
+    if(TARGET lab_app_ui)
+        add_executable(lab_gui_smoke_tests tests/test_gui_smoke.cpp)
+        target_link_libraries(lab_gui_smoke_tests PRIVATE lab_app_ui)
+        add_test(NAME lab_gui_smoke_tests COMMAND lab_gui_smoke_tests)
+        set_tests_properties(lab_gui_smoke_tests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 15
+        )
+    endif()
 endif()

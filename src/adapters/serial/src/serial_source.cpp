@@ -239,7 +239,7 @@ bool SerialSource::open() {
 }
 
 void SerialSource::close() {
-    if (!ioThread_.isRunning()) {
+    if (!ioThread_.isRunning() || !isOpen()) {
         return;
     }
     QMetaObject::invokeMethod(
@@ -299,4 +299,3 @@ void SerialSource::handleData(
 }
 
 }  // namespace lab::adapters::serial
-

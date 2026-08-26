@@ -13,7 +13,7 @@ int main(int argc, char* argv[]) {
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("LabDebugger"));
     QCoreApplication::setApplicationName(QStringLiteral("Lab Debugger"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.3.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.4.0"));
 
     const auto dataDirectory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     QDir().mkpath(dataDirectory);
@@ -50,7 +50,9 @@ int main(int argc, char* argv[]) {
     lab::ui::MainWindow window;
     window.show();
     if (application.arguments().contains(QStringLiteral("--smoke-test"))) {
-        QTimer::singleShot(300, &application, &QCoreApplication::quit);
+        QTimer::singleShot(300, &application, [] {
+            QCoreApplication::exit(0);
+        });
     }
     return application.exec();
 }

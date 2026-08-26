@@ -10,6 +10,7 @@ class QLabel;
 namespace lab::ui {
 
 class PlotWidget;
+class NetworkPanel;
 class ProtocolWidget;
 class ReplayWidget;
 class SendPanel;
@@ -31,6 +32,7 @@ private slots:
 private:
     lab::app::SerialSession session_;
     SerialPanel* serialPanel_{};
+    NetworkPanel* networkPanel_{};
     TerminalWidget* terminal_{};
     PlotWidget* plot_{};
     ProtocolWidget* protocol_{};

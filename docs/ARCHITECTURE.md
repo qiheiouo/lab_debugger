@@ -27,7 +27,7 @@ Serial / TCP / UDP / Replay / ROS2 / Remote ROS Agent
 
 `IDataSource` 只表达打开、关闭、状态、写入、数据、错误与统计。上层从 `DataChunk` 中得到来源、方向、源时间、接收时间、序号和字节，不需要知道数据来自 COM、UDP 还是 ROS2。
 
-核心库不用 Qt 类型，便于独立测试、用于无界面 Agent，或未来抽成基础设施库。Qt 目前只出现在串口适配器和桌面界面。
+核心库不用 Qt 类型，便于独立测试、用于无界面 Agent，或未来抽成基础设施库。Qt 目前只出现在串口/网络适配器和桌面界面。
 
 ## 2. 时间与数据语义
 
@@ -53,13 +53,14 @@ repeat:
   payload
 ```
 
-多字节整数当前以小端写入；正式 Session 格式阶段会加入版本、端序标记、校验与索引。
+多字节整数明确以小端写入。读取器验证文件头、记录标记、方向和长度上限；尾部截断可恢复，中段损坏会拒绝加载。Session 元数据独立携带格式版本。
 
 ## 3. 线程模型
 
 ```text
 GUI thread                 只处理交互、33 ms 批量终端刷新和绘图快照
 Serial QThread             QSerialPort 的 open/read/write/error 生命周期
+Network QThread            QTcpSocket/QTcpServer/QUdpSocket 生命周期
 Processing std::jthread    CSV/二进制帧解析、TimeSeries 追加、FrameEvent
 Recorder std::jthread      有序写入 RX/TX 原始记录
 Session std::jthread       异步写入数值、结构化帧、事件和配置快照
@@ -96,7 +97,7 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 
 ## 6. 生命周期与多数据源
 
-应用层将演进为 `SourceManager`：管理多个 `IDataSource`、独立状态和计数，并把数据扇出到 Recorder、Parser 与 Global Timeline。当前 UI 接入一个 `SerialSource`，但核心事件和记录格式均已带 `sourceId`，没有单串口假设。
+应用层将演进为 `SourceManager`：管理多个 `IDataSource`、独立状态和计数，并把数据扇出到 Recorder、Parser 与 Global Timeline。当前 UI 可在一个 `SerialSource` 与一个 `NetworkSource` 之间切换；两者和 `ReplaySource` 已复用统一的处理、显示和记录链路。核心事件和记录格式均带 `sourceId`，但“同时启用多个实时源”仍需 SourceManager 阶段完成。
 
 ## 7. 当前已知边界
 
@@ -104,4 +105,5 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 - 回放索引当前在打开文件时同步建立，每条原始记录占 16 字节索引内存；超长 Session 的后台建索引与稀疏缓存仍待实现。
 - CSV 解析器只处理换行分隔的数值；二进制帧、单位和校验由独立协议引擎处理。
 - 串口断开后提供手动重连；自动退避重连和端口热插拔恢复留到后续。
+- TCP 当前服务一个活动客户端；UDP 远端目前要求数字 IPv4/IPv6 地址。自动重连、TLS、组播和多客户端管理留到后续。
 - 时钟目前使用系统 Unix 时间。多机 ROS Agent 需要记录时钟偏移估计和同步质量。

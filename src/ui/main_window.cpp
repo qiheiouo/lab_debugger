@@ -1,5 +1,6 @@
 #include "ui/main_window.hpp"
 
+#include "ui/network_panel.hpp"
 #include "ui/plot_widget.hpp"
 #include "ui/protocol_widget.hpp"
 #include "ui/replay_widget.hpp"
@@ -36,6 +37,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* architectureAction = toolbar->addAction(tr("架构状态"));
 
     serialPanel_ = new SerialPanel(this);
+    networkPanel_ = new NetworkPanel(this);
     terminal_ = new TerminalWidget(this);
     plot_ = new PlotWidget(&session_.timeSeries(), this);
     protocol_ = new ProtocolWidget(this);
@@ -55,7 +57,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     rightLayout->addWidget(sendPanel_);
 
     auto* splitter = new QSplitter(Qt::Horizontal, this);
-    splitter->addWidget(serialPanel_);
+    auto* sources = new QTabWidget(this);
+    sources->addTab(serialPanel_, tr("串口"));
+    sources->addTab(networkPanel_, tr("网络"));
+    sources->setMinimumWidth(280);
+    splitter->addWidget(sources);
     splitter->addWidget(right);
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({270, 1010});
@@ -79,6 +85,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::disconnectSerial);
     connect(serialPanel_, &SerialPanel::reconnectRequested,
             &session_, &lab::app::SerialSession::reconnectSerial);
+    connect(networkPanel_, &NetworkPanel::connectRequested, this, [this] {
+        session_.connectNetwork(networkPanel_->settings());
+    });
+    connect(networkPanel_, &NetworkPanel::disconnectRequested,
+            &session_, &lab::app::SerialSession::disconnectNetwork);
+    connect(networkPanel_, &NetworkPanel::reconnectRequested,
+            &session_, &lab::app::SerialSession::reconnectNetwork);
     connect(sendPanel_, &SendPanel::sendRequested,
             &session_, &lab::app::SerialSession::sendBytes);
     connect(plot_, &PlotWidget::fieldsChanged,
@@ -103,6 +116,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             terminal_, &TerminalWidget::appendChunk);
     connect(&session_, &lab::app::SerialSession::sourceStateChanged,
             serialPanel_, &SerialPanel::setSourceState);
+    connect(&session_, &lab::app::SerialSession::networkStateChanged,
+            networkPanel_, &NetworkPanel::setSourceState);
     connect(&session_, &lab::app::SerialSession::protocolLoaded,
             protocol_, &ProtocolWidget::setProtocolLoaded);
     connect(&session_, &lab::app::SerialSession::protocolLoaded,
@@ -148,7 +163,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         QMessageBox::information(
             this,
             tr("线程与数据状态"),
-            tr("串口 I/O、CSV/二进制协议处理、原始记录分别运行在独立线程。\n"
+            tr("串口/网络 I/O、CSV/二进制协议处理、原始记录分别运行在独立线程。\n"
                "GUI 每 33 ms 批量刷新；暂停显示不会暂停采集或记录。\n"
                "所有数据均携带 sourceId、源时间、接收时间和序号。"));
     });
@@ -156,9 +171,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    session_.disconnectSerial();
-    session_.closeReplay();
     session_.stopSession();
+    session_.disconnectSerial();
+    session_.disconnectNetwork();
+    session_.closeReplay();
     event->accept();
 }
 
