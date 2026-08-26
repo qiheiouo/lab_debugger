@@ -26,13 +26,16 @@
 
 尚需补齐：历史拖动、区间框选、CSV 导出、可靠的高密度降采样、完善的坐标交互与长时间性能基准。
 
-## 下一阶段：Phase 3 — Protocol Engine
+## 已实现核心：Phase 3 — Protocol Engine
 
-1. 定义不可变 `ProtocolDefinition` 与 JSON schema。
-2. 实现流式 frame synchronizer：半帧、粘包、垃圾字节和重同步。
-3. 实现整数/浮点/数组、端序、scale、offset、unit、enum。
-4. 实现 checksum、CRC8、CRC16 和长度字段。
-5. 增加 Packet Inspector 与覆盖异常路径的表驱动测试。
+- 不可变 `ProtocolDefinition` 与严格 JSON 加载；
+- 流式 frame synchronizer：半帧、粘包、垃圾字节、错误长度、CRC 错误和重同步；
+- 整数、浮点、布尔、字节数组、端序、scale、offset、unit、enum；
+- sum8、CRC8/ATM、CRC16/MODBUS、CRC16/CCITT-FALSE；
+- 固定长度与 `uint8/16/32` 动态长度字段；
+- 首字节时间戳保留和解析统计。
+
+尚需完成：把协议核心接入 GUI、Packet Inspector、协议文件热切换，以及解析字段自动进入实时曲线。
 
 ## 后续顺序
 
@@ -43,4 +46,3 @@
 - Phase 8：派生字段、滤波、marker、告警、多源同步分析。
 
 每阶段必须先补数据格式、线程与错误路径测试，再扩 UI。性能验证重点是 921600 baud、1000 Hz 数值流、数小时记录和 UI 暂停期间的数据完整性。
-

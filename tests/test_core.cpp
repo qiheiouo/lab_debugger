@@ -145,6 +145,8 @@ void testRawRecorder() {
 
 }  // namespace
 
+void runProtocolTests();
+
 int main() {
     try {
         testRingBufferWrapAround();
@@ -153,6 +155,7 @@ int main() {
         testMockDataSource();
         testProcessingPipeline();
         testRawRecorder();
+        runProtocolTests();
         std::cout << "All Lab Debugger core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.1.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.2.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -22,10 +22,15 @@ endif()
 find_package(Threads REQUIRED)
 
 add_library(lab_core STATIC
+    src/core/src/checksum.cpp
     src/core/src/csv_stream_parser.cpp
+    src/core/src/frame_stream_parser.cpp
     src/core/src/logger.cpp
     src/core/src/mock_data_source.cpp
     src/core/src/processing_pipeline.cpp
+    src/core/src/protocol_decoder.cpp
+    src/core/src/protocol_definition.cpp
+    src/core/src/protocol_json_loader.cpp
     src/core/src/raw_log_recorder.cpp
     src/core/src/time_series_store.cpp
 )
@@ -100,6 +105,7 @@ if(LAB_DEBUGGER_BUILD_TESTS)
     enable_testing()
     add_executable(lab_core_tests
         tests/test_core.cpp
+        tests/test_protocol.cpp
     )
     target_link_libraries(lab_core_tests PRIVATE lab_core)
     add_test(NAME lab_core_tests COMMAND lab_core_tests)
