@@ -87,6 +87,103 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 Qt::QueuedConnection);
         }});
 
+    remoteAgent_.setCallbacks({
+        [this](const lab::core::DataChunk& chunk) {
+            std::scoped_lock routeLock(routingMutex_);
+            recorder_.enqueueRaw(chunk);
+            std::scoped_lock lock(uiQueueMutex_);
+            uiQueue_.push_back(chunk);
+        },
+        [this](lab::core::SourceState state) {
+            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                                    remoteAgent_.sourceId(),
+                                    "info",
+                                    "source_state",
+                                    "Remote Agent state changed to " +
+                                        std::to_string(static_cast<int>(state)),
+                                    0});
+            QMetaObject::invokeMethod(
+                this,
+                [this, state] {
+                    emit remoteAgentStateChanged(static_cast<int>(state));
+                },
+                Qt::QueuedConnection);
+        },
+        [this](const std::string& message) {
+            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                                    remoteAgent_.sourceId(),
+                                    "error",
+                                    "remote_agent",
+                                    message,
+                                    0});
+            QMetaObject::invokeMethod(
+                this,
+                [this, message] {
+                    emit sourceError(
+                        tr("Remote Agent：%1").arg(QString::fromStdString(message)));
+                },
+                Qt::QueuedConnection);
+        },
+        [this](const lab::core::DataSample& sample) {
+            {
+                std::scoped_lock routeLock(routingMutex_);
+                timeSeries_.append(sample);
+                recorder_.enqueueSample(sample);
+            }
+            QStringList fields;
+            bool changed = false;
+            {
+                std::scoped_lock lock(remoteFieldsMutex_);
+                changed = remoteFieldNames_.insert(sample.field).second;
+                if (changed) {
+                    for (const auto& name : remoteFieldNames_) {
+                        fields.push_back(QString::fromStdString(name));
+                    }
+                }
+            }
+            if (changed) {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, fields] { emit remoteFieldsDiscovered(fields); },
+                    Qt::QueuedConnection);
+            }
+        }});
+
+    remoteAgent_.setAgentCallbacks({
+        [this](const lab::core::agent::Hello& hello) {
+            const auto agentId = QString::fromStdString(hello.agentId);
+            const auto version = QString::fromStdString(hello.softwareVersion);
+            const auto hostName = QString::fromStdString(hello.hostName);
+            QMetaObject::invokeMethod(
+                this,
+                [this, agentId, version, hostName, capabilities = hello.capabilities] {
+                    emit remoteAgentHello(agentId, version, hostName, capabilities);
+                },
+                Qt::QueuedConnection);
+        },
+        [this](const lab::core::agent::TopicCatalog& catalog) {
+            QVariantList topics;
+            topics.reserve(static_cast<qsizetype>(catalog.topics.size()));
+            for (const auto& topic : catalog.topics) {
+                QVariantMap item;
+                item.insert(QStringLiteral("name"), QString::fromStdString(topic.name));
+                item.insert(QStringLiteral("type"), QString::fromStdString(topic.type));
+                item.insert(QStringLiteral("reliability"),
+                            static_cast<int>(topic.reliability));
+                item.insert(QStringLiteral("durability"),
+                            static_cast<int>(topic.durability));
+                topics.push_back(item);
+            }
+            QMetaObject::invokeMethod(
+                this,
+                [this, topics, revision = catalog.graphRevision] {
+                    emit remoteTopicsChanged(topics, revision);
+                },
+                Qt::QueuedConnection);
+        },
+        {},
+        {}});
+
     replay_.setCallbacks({
         [this](const lab::core::DataChunk& chunk) {
             std::scoped_lock routeLock(routingMutex_);
@@ -136,6 +233,7 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
 SerialSession::~SerialSession() {
     source_.close();
     network_.close();
+    remoteAgent_.close();
     replay_.close();
     processing_.flush();
     recorder_.stop();
@@ -149,12 +247,22 @@ const lab::core::TimeSeriesStore& SerialSession::timeSeries() const noexcept {
     return timeSeries_;
 }
 
+std::string SerialSession::activeSourceId() const {
+    switch (activeLiveSource_) {
+    case LiveSourceKind::Serial: return source_.sourceId();
+    case LiveSourceKind::Network: return network_.sourceId();
+    case LiveSourceKind::RemoteAgent: return remoteAgent_.sourceId();
+    }
+    return "unknown";
+}
+
 void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings) {
     if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::Serial) {
         emit sourceError(tr("Session 记录期间不能切换数据源类型"));
         return;
     }
     network_.close();
+    remoteAgent_.close();
     replay_.close();
     activeLiveSource_ = LiveSourceKind::Serial;
     lastSettings_ = std::move(settings);
@@ -176,6 +284,7 @@ void SerialSession::reconnectSerial() {
         return;
     }
     network_.close();
+    remoteAgent_.close();
     replay_.close();
     activeLiveSource_ = LiveSourceKind::Serial;
     source_.close();
@@ -189,6 +298,7 @@ void SerialSession::connectNetwork(lab::adapters::network::NetworkSettings setti
         return;
     }
     source_.close();
+    remoteAgent_.close();
     replay_.close();
     activeLiveSource_ = LiveSourceKind::Network;
     lastNetworkSettings_ = std::move(settings);
@@ -211,6 +321,7 @@ void SerialSession::reconnectNetwork() {
         return;
     }
     source_.close();
+    remoteAgent_.close();
     replay_.close();
     activeLiveSource_ = LiveSourceKind::Network;
     network_.close();
@@ -218,9 +329,75 @@ void SerialSession::reconnectNetwork() {
     network_.open();
 }
 
+void SerialSession::connectRemoteAgent(
+    lab::adapters::remote_agent::RemoteAgentSettings settings) {
+    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::RemoteAgent) {
+        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+        return;
+    }
+    source_.close();
+    network_.close();
+    replay_.close();
+    activeLiveSource_ = LiveSourceKind::RemoteAgent;
+    lastRemoteAgentSettings_ = std::move(settings);
+    remoteAgentConfigured_ = true;
+    {
+        std::scoped_lock lock(remoteFieldsMutex_);
+        remoteFieldNames_.clear();
+    }
+    remoteAgent_.setSettings(lastRemoteAgentSettings_);
+    remoteAgent_.open();
+}
+
+void SerialSession::disconnectRemoteAgent() {
+    remoteAgent_.close();
+}
+
+void SerialSession::reconnectRemoteAgent() {
+    if (!remoteAgentConfigured_) {
+        emit sourceError(tr("请先配置并连接一次 Remote Agent"));
+        return;
+    }
+    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::RemoteAgent) {
+        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+        return;
+    }
+    source_.close();
+    network_.close();
+    replay_.close();
+    activeLiveSource_ = LiveSourceKind::RemoteAgent;
+    remoteAgent_.close();
+    remoteAgent_.setSettings(lastRemoteAgentSettings_);
+    remoteAgent_.open();
+}
+
+void SerialSession::requestRemoteTopics() {
+    if (!remoteAgent_.requestTopicCatalog()) {
+        emit sourceError(tr("Remote Agent 尚未完成握手，无法刷新 Topic"));
+    }
+}
+
+void SerialSession::subscribeRemoteTopic(
+    lab::core::agent::SubscriptionRequest request) {
+    if (!remoteAgent_.subscribe(request)) {
+        emit sourceError(tr("Remote Agent 订阅请求未被发送"));
+    }
+}
+
+void SerialSession::unsubscribeRemoteTopic(
+    lab::core::agent::SubscriptionRequest request) {
+    if (!remoteAgent_.unsubscribe(request)) {
+        emit sourceError(tr("Remote Agent 取消订阅请求未被发送"));
+    }
+}
+
 void SerialSession::sendBytes(const QByteArray& bytes) {
     const auto first = reinterpret_cast<const std::uint8_t*>(bytes.constData());
     const auto data = std::span(first, static_cast<std::size_t>(bytes.size()));
+    if (activeLiveSource_ == LiveSourceKind::RemoteAgent) {
+        emit sourceError(tr("Remote Agent 不接受原始字节发送，请使用 Topic 订阅控制"));
+        return;
+    }
     const auto accepted = activeLiveSource_ == LiveSourceKind::Network
                               ? network_.write(data)
                               : source_.write(data);
@@ -281,9 +458,7 @@ void SerialSession::loadProtocolFile(const QString& path) {
     recorder_.updateProtocolSnapshot(
         activeProtocolName_, activeProtocolJson_, lab::core::nowTimestampNs());
     recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                            activeLiveSource_ == LiveSourceKind::Network
-                                ? network_.sourceId()
-                                : source_.sourceId(),
+                            activeSourceId(),
                             "info",
                             "protocol",
                             "Protocol loaded: " + activeProtocolName_,
@@ -300,9 +475,7 @@ void SerialSession::clearProtocol() {
     activeProtocolName_.clear();
     activeProtocolJson_.clear();
     recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                            activeLiveSource_ == LiveSourceKind::Network
-                                ? network_.sourceId()
-                                : source_.sourceId(),
+                            activeSourceId(),
                             "info",
                             "protocol",
                             "Protocol disabled",
@@ -316,12 +489,13 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     if ((activeLiveSource_ == LiveSourceKind::Serial && lastSettings_.portName.empty()) ||
-        (activeLiveSource_ == LiveSourceKind::Network && !networkConfigured_)) {
+        (activeLiveSource_ == LiveSourceKind::Network && !networkConfigured_) ||
+        (activeLiveSource_ == LiveSourceKind::RemoteAgent && !remoteAgentConfigured_)) {
         emit recordingChanged(false, tr("请先配置并至少连接一次实时数据源"));
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.4.0";
+    options.softwareVersion = "0.5.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -339,7 +513,7 @@ bool SerialSession::startSession(const QString& directory) {
              {"stop_bits", std::to_string(static_cast<int>(lastSettings_.stopBits))},
              {"parity", std::to_string(static_cast<int>(lastSettings_.parity))},
              {"flow_control", std::to_string(static_cast<int>(lastSettings_.flowControl))}}});
-    } else {
+    } else if (activeLiveSource_ == LiveSourceKind::Network) {
         options.sources.push_back({
             network_.sourceId(),
             lab::adapters::network::toString(lastNetworkSettings_.mode),
@@ -348,6 +522,16 @@ bool SerialSession::startSession(const QString& directory) {
              {"remote_port", std::to_string(lastNetworkSettings_.remotePort)},
              {"bind_address", lastNetworkSettings_.bindAddress},
              {"local_port", std::to_string(lastNetworkSettings_.localPort)}}});
+    } else {
+        options.sources.push_back({
+            remoteAgent_.sourceId(),
+            "ros_remote_agent",
+            lastRemoteAgentSettings_.host + ':' +
+                std::to_string(lastRemoteAgentSettings_.port),
+            {{"host", lastRemoteAgentSettings_.host},
+             {"port", std::to_string(lastRemoteAgentSettings_.port)},
+             {"client_name", lastRemoteAgentSettings_.clientName},
+             {"client_version", lastRemoteAgentSettings_.clientVersion}}});
     }
 
     bool result = false;
@@ -363,9 +547,7 @@ bool SerialSession::startSession(const QString& directory) {
     emit recordingChanged(result, message);
     if (result) {
         recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                activeLiveSource_ == LiveSourceKind::Network
-                                    ? network_.sourceId()
-                                    : source_.sourceId(),
+                                activeSourceId(),
                                 "info",
                                 "session",
                                 "Session recording started",
@@ -382,9 +564,7 @@ void SerialSession::stopSession() {
         std::scoped_lock routeLock(routingMutex_);
         processing_.flush();
         recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                activeLiveSource_ == LiveSourceKind::Network
-                                    ? network_.sourceId()
-                                    : source_.sourceId(),
+                                activeSourceId(),
                                 "info",
                                 "session",
                                 "Session recording stopped",
@@ -413,6 +593,7 @@ bool SerialSession::openReplaySession(const QString& directory) {
 
     source_.close();
     network_.close();
+    remoteAgent_.close();
     replay_.close();
     timeSeries_.clear();
     {
@@ -585,7 +766,9 @@ void SerialSession::drainUiQueue() {
                            ? replay_.statistics()
                            : activeLiveSource_ == LiveSourceKind::Network
                                  ? network_.statistics()
-                                 : source_.statistics();
+                                 : activeLiveSource_ == LiveSourceKind::RemoteAgent
+                                       ? remoteAgent_.statistics()
+                                       : source_.statistics();
     emit statisticsChanged(
         stats.receivedBytes,
         stats.transmittedBytes,

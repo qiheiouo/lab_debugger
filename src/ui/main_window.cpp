@@ -1,6 +1,7 @@
 #include "ui/main_window.hpp"
 
 #include "ui/network_panel.hpp"
+#include "ui/remote_agent_panel.hpp"
 #include "ui/plot_widget.hpp"
 #include "ui/protocol_widget.hpp"
 #include "ui/replay_widget.hpp"
@@ -38,6 +39,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     serialPanel_ = new SerialPanel(this);
     networkPanel_ = new NetworkPanel(this);
+    remoteAgentPanel_ = new RemoteAgentPanel(this);
     terminal_ = new TerminalWidget(this);
     plot_ = new PlotWidget(&session_.timeSeries(), this);
     protocol_ = new ProtocolWidget(this);
@@ -60,7 +62,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* sources = new QTabWidget(this);
     sources->addTab(serialPanel_, tr("串口"));
     sources->addTab(networkPanel_, tr("网络"));
-    sources->setMinimumWidth(280);
+    sources->addTab(remoteAgentPanel_, tr("ROS Agent"));
+    sources->setMinimumWidth(340);
     splitter->addWidget(sources);
     splitter->addWidget(right);
     splitter->setStretchFactor(1, 1);
@@ -92,6 +95,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::disconnectNetwork);
     connect(networkPanel_, &NetworkPanel::reconnectRequested,
             &session_, &lab::app::SerialSession::reconnectNetwork);
+    connect(remoteAgentPanel_, &RemoteAgentPanel::connectRequested, this, [this] {
+        session_.connectRemoteAgent(remoteAgentPanel_->settings());
+    });
+    connect(remoteAgentPanel_, &RemoteAgentPanel::disconnectRequested,
+            &session_, &lab::app::SerialSession::disconnectRemoteAgent);
+    connect(remoteAgentPanel_, &RemoteAgentPanel::reconnectRequested,
+            &session_, &lab::app::SerialSession::reconnectRemoteAgent);
+    connect(remoteAgentPanel_, &RemoteAgentPanel::refreshTopicsRequested,
+            &session_, &lab::app::SerialSession::requestRemoteTopics);
+    connect(remoteAgentPanel_, &RemoteAgentPanel::subscribeRequested,
+            &session_, &lab::app::SerialSession::subscribeRemoteTopic);
+    connect(remoteAgentPanel_, &RemoteAgentPanel::unsubscribeRequested,
+            &session_, &lab::app::SerialSession::unsubscribeRemoteTopic);
     connect(sendPanel_, &SendPanel::sendRequested,
             &session_, &lab::app::SerialSession::sendBytes);
     connect(plot_, &PlotWidget::fieldsChanged,
@@ -118,6 +134,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             serialPanel_, &SerialPanel::setSourceState);
     connect(&session_, &lab::app::SerialSession::networkStateChanged,
             networkPanel_, &NetworkPanel::setSourceState);
+    connect(&session_, &lab::app::SerialSession::remoteAgentStateChanged,
+            remoteAgentPanel_, &RemoteAgentPanel::setSourceState);
+    connect(&session_, &lab::app::SerialSession::remoteAgentHello,
+            remoteAgentPanel_, &RemoteAgentPanel::setAgentHello);
+    connect(&session_, &lab::app::SerialSession::remoteTopicsChanged,
+            remoteAgentPanel_, &RemoteAgentPanel::setTopics);
+    connect(&session_, &lab::app::SerialSession::remoteFieldsDiscovered,
+            plot_, &PlotWidget::useExternalFields);
     connect(&session_, &lab::app::SerialSession::protocolLoaded,
             protocol_, &ProtocolWidget::setProtocolLoaded);
     connect(&session_, &lab::app::SerialSession::protocolLoaded,
@@ -174,6 +198,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     session_.stopSession();
     session_.disconnectSerial();
     session_.disconnectNetwork();
+    session_.disconnectRemoteAgent();
     session_.closeReplay();
     event->accept();
 }

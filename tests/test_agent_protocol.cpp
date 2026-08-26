@@ -124,6 +124,9 @@ void testChecksumAndHeaderRecovery() {
 }
 
 void testHandshakePayloads() {
+    require(isKnownMessageType(static_cast<std::uint8_t>(MessageType::TopicCatalogRequest)) &&
+                toString(MessageType::TopicCatalogRequest) == "topic_catalog_request",
+            "topic catalog refresh message is part of protocol v1");
     const Hello hello{
         "robot-main", "0.4.0", "robot-minipc",
         capabilityMask(Capability::TopicDiscovery) |

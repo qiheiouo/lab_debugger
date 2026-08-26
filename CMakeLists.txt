@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.4.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.5.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -80,6 +80,16 @@ if(LAB_DEBUGGER_BUILD_GUI)
             PUBLIC lab_core Qt6::Core Qt6::Network
         )
 
+        add_library(lab_remote_agent_adapter STATIC
+            src/adapters/remote_agent/src/remote_agent_source.cpp
+        )
+        target_include_directories(lab_remote_agent_adapter PUBLIC
+            src/adapters/remote_agent/include
+        )
+        target_link_libraries(lab_remote_agent_adapter
+            PUBLIC lab_core Qt6::Core Qt6::Network
+        )
+
         add_library(lab_app_ui STATIC
             src/app/serial_session.cpp
             src/app/serial_session.hpp
@@ -87,6 +97,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
             src/ui/main_window.hpp
             src/ui/network_panel.cpp
             src/ui/network_panel.hpp
+            src/ui/remote_agent_panel.cpp
+            src/ui/remote_agent_panel.hpp
             src/ui/plot_widget.cpp
             src/ui/plot_widget.hpp
             src/ui/protocol_widget.cpp
@@ -102,7 +114,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
         )
         target_include_directories(lab_app_ui PUBLIC src)
         target_link_libraries(lab_app_ui
-            PUBLIC lab_core lab_serial_adapter lab_network_adapter Qt6::Widgets
+            PUBLIC lab_core lab_serial_adapter lab_network_adapter
+                   lab_remote_agent_adapter Qt6::Widgets
         )
 
         qt_add_executable(lab_debugger WIN32 src/app/main.cpp)
@@ -148,6 +161,18 @@ if(LAB_DEBUGGER_BUILD_TESTS)
         set_tests_properties(lab_network_tests PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+        )
+    endif()
+    if(TARGET lab_remote_agent_adapter)
+        add_executable(lab_remote_agent_tests tests/test_remote_agent.cpp)
+        target_link_libraries(lab_remote_agent_tests
+            PRIVATE lab_remote_agent_adapter Qt6::Core Qt6::Network
+        )
+        add_test(NAME lab_remote_agent_tests COMMAND lab_remote_agent_tests)
+        set_tests_properties(lab_remote_agent_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 15
         )
     endif()
     if(TARGET lab_app_ui)

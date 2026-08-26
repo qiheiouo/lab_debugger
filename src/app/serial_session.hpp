@@ -2,6 +2,7 @@
 
 #include "lab/adapters/serial/serial_source.hpp"
 #include "lab/adapters/network/network_source.hpp"
+#include "lab/adapters/remote_agent/remote_agent_source.hpp"
 #include "lab/core/data_chunk.hpp"
 #include "lab/core/processing_pipeline.hpp"
 #include "lab/core/replay_source.hpp"
@@ -17,6 +18,7 @@
 
 #include <deque>
 #include <mutex>
+#include <set>
 #include <vector>
 
 namespace lab::app {
@@ -38,6 +40,12 @@ public slots:
     void connectNetwork(lab::adapters::network::NetworkSettings settings);
     void disconnectNetwork();
     void reconnectNetwork();
+    void connectRemoteAgent(lab::adapters::remote_agent::RemoteAgentSettings settings);
+    void disconnectRemoteAgent();
+    void reconnectRemoteAgent();
+    void requestRemoteTopics();
+    void subscribeRemoteTopic(lab::core::agent::SubscriptionRequest request);
+    void unsubscribeRemoteTopic(lab::core::agent::SubscriptionRequest request);
     void sendBytes(const QByteArray& bytes);
     void setCsvFields(const QStringList& fields);
     void loadProtocolFile(const QString& path);
@@ -55,6 +63,13 @@ signals:
     void chunkReady(QByteArray bytes, bool transmitted, qint64 timestampNs);
     void sourceStateChanged(int state);
     void networkStateChanged(int state);
+    void remoteAgentStateChanged(int state);
+    void remoteAgentHello(QString agentId,
+                          QString softwareVersion,
+                          QString hostName,
+                          quint32 capabilities);
+    void remoteTopicsChanged(QVariantList topics, quint64 graphRevision);
+    void remoteFieldsDiscovered(QStringList fields);
     void sourceError(QString message);
     void statisticsChanged(quint64 rxBytes, quint64 txBytes, qsizetype parserBacklog);
     void recordingChanged(bool active, QString message);
@@ -84,14 +99,19 @@ private slots:
     void drainUiQueue();
 
 private:
-    enum class LiveSourceKind { Serial, Network };
+    enum class LiveSourceKind { Serial, Network, RemoteAgent };
+
+    [[nodiscard]] std::string activeSourceId() const;
 
     lab::adapters::serial::SerialSource source_;
     lab::adapters::network::NetworkSource network_;
+    lab::adapters::remote_agent::RemoteAgentSource remoteAgent_;
     lab::core::ReplaySource replay_;
     lab::adapters::serial::SerialSettings lastSettings_;
     lab::adapters::network::NetworkSettings lastNetworkSettings_;
+    lab::adapters::remote_agent::RemoteAgentSettings lastRemoteAgentSettings_;
     bool networkConfigured_{};
+    bool remoteAgentConfigured_{};
     LiveSourceKind activeLiveSource_{LiveSourceKind::Serial};
     lab::core::TimeSeriesStore timeSeries_{120'000};
     std::mutex uiQueueMutex_;
@@ -99,6 +119,8 @@ private:
     std::mutex protocolQueueMutex_;
     std::deque<lab::core::FrameEvent> protocolQueue_;
     std::mutex routingMutex_;
+    std::mutex remoteFieldsMutex_;
+    std::set<std::string> remoteFieldNames_;
     lab::core::SessionRecorder recorder_;
     lab::core::ProcessingPipeline processing_{timeSeries_};
     std::string activeProtocolName_;

@@ -25,7 +25,8 @@ enum class MessageType : std::uint8_t {
     SampleBatch = 6,
     Error = 7,
     Ping = 8,
-    Pong = 9
+    Pong = 9,
+    TopicCatalogRequest = 10
 };
 
 enum class Capability : std::uint32_t {

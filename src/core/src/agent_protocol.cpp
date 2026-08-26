@@ -361,7 +361,7 @@ const StreamStatistics& StreamDecoder::statistics() const noexcept {
 
 bool isKnownMessageType(std::uint8_t value) noexcept {
     return value >= static_cast<std::uint8_t>(MessageType::Hello) &&
-           value <= static_cast<std::uint8_t>(MessageType::Pong);
+           value <= static_cast<std::uint8_t>(MessageType::TopicCatalogRequest);
 }
 
 std::string toString(MessageType type) {
@@ -375,6 +375,7 @@ std::string toString(MessageType type) {
     case MessageType::Error: return "error";
     case MessageType::Ping: return "ping";
     case MessageType::Pong: return "pong";
+    case MessageType::TopicCatalogRequest: return "topic_catalog_request";
     }
     return "unknown";
 }

@@ -1,0 +1,598 @@
+#include "lab/adapters/remote_agent/remote_agent_source.hpp"
+
+#include "lab/core/logger.hpp"
+#include "lab/core/timestamp.hpp"
+
+#include <QAbstractSocket>
+#include <QByteArray>
+#include <QMetaObject>
+#include <QTcpSocket>
+#include <QTimer>
+
+#include <algorithm>
+#include <optional>
+#include <utility>
+#include <variant>
+
+namespace lab::adapters::remote_agent {
+namespace {
+
+constexpr int handshakeTimeoutMs = 5000;
+
+constexpr std::uint32_t supportedCapabilities =
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::TopicDiscovery) |
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::SerializedMessages) |
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::NumericFields) |
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::TextFields) |
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::GraphUpdates);
+
+std::string protocolMessage(const lab::core::agent::DecodeIssue& issue) {
+    return "Remote Agent protocol: " + issue.message;
+}
+
+}  // namespace
+
+class RemoteAgentWorker final : public QObject {
+public:
+    using HelloHandler = std::function<void(const lab::core::agent::Hello&)>;
+    using CatalogHandler = std::function<void(const lab::core::agent::TopicCatalog&)>;
+    using SampleHandler = std::function<void(
+        const lab::core::agent::Frame&,
+        const lab::core::agent::SampleBatch&)>;
+    using IssueHandler = std::function<void(const lab::core::agent::DecodeIssue&)>;
+    using StateHandler = std::function<void(lab::core::SourceState, HandshakeState)>;
+    using ErrorHandler = std::function<void(std::string)>;
+    using WireHandler = std::function<void(lab::core::Direction, std::size_t)>;
+
+    RemoteAgentWorker(
+        HelloHandler onHello,
+        CatalogHandler onCatalog,
+        SampleHandler onSample,
+        IssueHandler onIssue,
+        StateHandler onState,
+        ErrorHandler onError,
+        WireHandler onWire)
+        : onHello_(std::move(onHello)),
+          onCatalog_(std::move(onCatalog)),
+          onSample_(std::move(onSample)),
+          onIssue_(std::move(onIssue)),
+          onState_(std::move(onState)),
+          onError_(std::move(onError)),
+          onWire_(std::move(onWire)) {}
+
+    bool openEndpoint(RemoteAgentSettings settings) {
+        closeEndpoint(false);
+        settings_ = std::move(settings);
+        if (settings_.host.empty() || settings_.port == 0 ||
+            settings_.clientName.empty() || settings_.clientVersion.empty()) {
+            fail("Remote Agent address and client identity must not be empty");
+            return false;
+        }
+
+        decoder_.reset();
+        lastInboundSequence_.reset();
+        outboundSequence_ = 0;
+        closing_ = false;
+        state_ = HandshakeState::Disconnected;
+
+        socket_ = new QTcpSocket(this);
+        timer_ = new QTimer(this);
+        timer_->setSingleShot(true);
+        QObject::connect(timer_, &QTimer::timeout, this, [this] {
+            failFatal("Remote Agent handshake timed out after 5 seconds");
+        });
+        QObject::connect(socket_, &QTcpSocket::connected, this, [this] {
+            state_ = HandshakeState::AwaitingHello;
+            onState_(lab::core::SourceState::Opening, state_);
+            timer_->start(handshakeTimeoutMs);
+        });
+        QObject::connect(socket_, &QTcpSocket::readyRead, this, [this] {
+            const auto bytes = socket_->readAll();
+            if (bytes.isEmpty()) {
+                return;
+            }
+            onWire_(lab::core::Direction::Rx, static_cast<std::size_t>(bytes.size()));
+            const auto first = reinterpret_cast<const std::uint8_t*>(bytes.constData());
+            const auto result = decoder_.consume(
+                std::span(first, static_cast<std::size_t>(bytes.size())));
+            for (const auto& issue : result.issues) {
+                onIssue_(issue);
+                onError_(protocolMessage(issue));
+            }
+            for (const auto& frame : result.frames) {
+                if (!processFrame(frame)) {
+                    break;
+                }
+            }
+        });
+        QObject::connect(socket_, &QTcpSocket::disconnected, this, [this] {
+            if (timer_) {
+                timer_->stop();
+            }
+            if (!closing_ && state_ == HandshakeState::AwaitingHello) {
+                fail("Remote Agent closed the connection before handshake completed");
+            } else if (!closing_ && state_ != HandshakeState::Error) {
+                state_ = HandshakeState::Disconnected;
+                onState_(lab::core::SourceState::Closed, state_);
+            }
+        });
+        QObject::connect(
+            socket_,
+            &QTcpSocket::errorOccurred,
+            this,
+            [this](QAbstractSocket::SocketError error) {
+                if (closing_ || error == QAbstractSocket::RemoteHostClosedError) {
+                    return;
+                }
+                fail(socket_ ? socket_->errorString().toStdString()
+                             : "Remote Agent socket error");
+            });
+
+        socket_->connectToHost(QString::fromStdString(settings_.host), settings_.port);
+        return true;
+    }
+
+    void closeEndpoint(bool announce = true) {
+        closing_ = true;
+        if (announce) {
+            onState_(lab::core::SourceState::Closing, state_);
+        }
+        if (timer_) {
+            timer_->stop();
+            delete timer_;
+            timer_ = nullptr;
+        }
+        if (socket_) {
+            socket_->abort();
+            delete socket_;
+            socket_ = nullptr;
+        }
+        decoder_.reset();
+        lastInboundSequence_.reset();
+        state_ = HandshakeState::Disconnected;
+        if (announce) {
+            onState_(lab::core::SourceState::Closed, state_);
+        }
+    }
+
+    bool requestTopicCatalog() {
+        return sendReadyFrame(lab::core::agent::MessageType::TopicCatalogRequest, {});
+    }
+
+    bool subscribe(const lab::core::agent::SubscriptionRequest& request) {
+        try {
+            return sendReadyFrame(
+                lab::core::agent::MessageType::Subscribe,
+                lab::core::agent::encodeSubscriptionRequest(request));
+        } catch (const std::exception& exception) {
+            onError_(exception.what());
+            return false;
+        }
+    }
+
+    bool unsubscribe(const lab::core::agent::SubscriptionRequest& request) {
+        try {
+            return sendReadyFrame(
+                lab::core::agent::MessageType::Unsubscribe,
+                lab::core::agent::encodeSubscriptionRequest(request));
+        } catch (const std::exception& exception) {
+            onError_(exception.what());
+            return false;
+        }
+    }
+
+private:
+    bool processFrame(const lab::core::agent::Frame& frame) {
+        if (frame.flags != 0) {
+            failFatal("Remote Agent sent unsupported non-zero frame flags");
+            return false;
+        }
+        if (lastInboundSequence_ && frame.sequence <= *lastInboundSequence_) {
+            failFatal("Remote Agent frame sequence is not strictly increasing");
+            return false;
+        }
+        lastInboundSequence_ = frame.sequence;
+
+        if (state_ == HandshakeState::AwaitingHello) {
+            if (frame.type != lab::core::agent::MessageType::Hello) {
+                failFatal("Remote Agent must send hello as its first frame");
+                return false;
+            }
+            return acceptHello(frame);
+        }
+        if (state_ != HandshakeState::Ready) {
+            return false;
+        }
+
+        std::string error;
+        switch (frame.type) {
+        case lab::core::agent::MessageType::TopicCatalog: {
+            const auto catalog = lab::core::agent::decodeTopicCatalog(frame.payload, &error);
+            if (!catalog) return malformed(frame, error);
+            onCatalog_(*catalog);
+            return true;
+        }
+        case lab::core::agent::MessageType::SampleBatch: {
+            const auto sample = lab::core::agent::decodeSampleBatch(frame.payload, &error);
+            if (!sample) return malformed(frame, error);
+            onSample_(frame, *sample);
+            return true;
+        }
+        case lab::core::agent::MessageType::Error: {
+            const auto value = lab::core::agent::decodeAgentError(frame.payload, &error);
+            if (!value) return malformed(frame, error);
+            onError_("Remote Agent error " + std::to_string(value->code) + " [" +
+                     value->context + "]: " + value->message);
+            return true;
+        }
+        case lab::core::agent::MessageType::Ping: {
+            const auto nonce = lab::core::agent::decodeNonce(frame.payload, &error);
+            if (!nonce) return malformed(frame, error);
+            return sendFrame(
+                lab::core::agent::MessageType::Pong,
+                lab::core::agent::encodeNonce(*nonce));
+        }
+        case lab::core::agent::MessageType::Pong:
+            if (!lab::core::agent::decodeNonce(frame.payload, &error)) {
+                return malformed(frame, error);
+            }
+            return true;
+        case lab::core::agent::MessageType::Hello:
+        case lab::core::agent::MessageType::HelloAck:
+        case lab::core::agent::MessageType::Subscribe:
+        case lab::core::agent::MessageType::Unsubscribe:
+        case lab::core::agent::MessageType::TopicCatalogRequest:
+            failFatal("Remote Agent sent a message that is invalid in the ready state: " +
+                      lab::core::agent::toString(frame.type));
+            return false;
+        }
+        return false;
+    }
+
+    bool acceptHello(const lab::core::agent::Frame& frame) {
+        std::string error;
+        const auto hello = lab::core::agent::decodeHello(frame.payload, &error);
+        if (!hello) {
+            return malformed(frame, error);
+        }
+        const lab::core::agent::HelloAck ack{
+            settings_.clientName,
+            settings_.clientVersion,
+            hello->capabilities & supportedCapabilities};
+        if (!sendFrame(
+                lab::core::agent::MessageType::HelloAck,
+                lab::core::agent::encodeHelloAck(ack))) {
+            failFatal("Failed to send Remote Agent hello acknowledgement");
+            return false;
+        }
+        timer_->stop();
+        onHello_(*hello);
+        state_ = HandshakeState::Ready;
+        onState_(lab::core::SourceState::Open, state_);
+        return requestTopicCatalog();
+    }
+
+    bool malformed(const lab::core::agent::Frame& frame, const std::string& error) {
+        failFatal("Malformed " + lab::core::agent::toString(frame.type) +
+                  " payload: " + error);
+        return false;
+    }
+
+    bool sendReadyFrame(
+        lab::core::agent::MessageType type,
+        std::vector<std::uint8_t> payload) {
+        if (state_ != HandshakeState::Ready) {
+            onError_("Remote Agent handshake is not ready");
+            return false;
+        }
+        return sendFrame(type, std::move(payload));
+    }
+
+    bool sendFrame(
+        lab::core::agent::MessageType type,
+        std::vector<std::uint8_t> payload) {
+        if (!socket_ || socket_->state() != QAbstractSocket::ConnectedState) {
+            onError_("Remote Agent socket is not connected");
+            return false;
+        }
+        const auto now = lab::core::nowTimestampNs();
+        const lab::core::agent::Frame frame{
+            type, 0, outboundSequence_++, now, now, std::move(payload)};
+        const auto encoded = lab::core::agent::encodeFrame(frame);
+        const QByteArray bytes(
+            reinterpret_cast<const char*>(encoded.data()),
+            static_cast<qsizetype>(encoded.size()));
+        const auto accepted = socket_->write(bytes);
+        if (accepted < 0) {
+            onError_(socket_->errorString().toStdString());
+            return false;
+        }
+        if (accepted > 0) {
+            onWire_(lab::core::Direction::Tx, static_cast<std::size_t>(accepted));
+        }
+        if (accepted != bytes.size()) {
+            onError_("Remote Agent socket accepted only part of a control frame");
+            return false;
+        }
+        return true;
+    }
+
+    void fail(std::string message) {
+        state_ = HandshakeState::Error;
+        onError_(std::move(message));
+        onState_(lab::core::SourceState::Error, state_);
+    }
+
+    void failFatal(std::string message) {
+        fail(std::move(message));
+        if (timer_) {
+            timer_->stop();
+        }
+        if (socket_) {
+            socket_->abort();
+        }
+    }
+
+    RemoteAgentSettings settings_;
+    QTcpSocket* socket_{};
+    QTimer* timer_{};
+    lab::core::agent::StreamDecoder decoder_;
+    std::optional<std::uint64_t> lastInboundSequence_;
+    std::uint64_t outboundSequence_{};
+    HandshakeState state_{HandshakeState::Disconnected};
+    bool closing_{};
+    HelloHandler onHello_;
+    CatalogHandler onCatalog_;
+    SampleHandler onSample_;
+    IssueHandler onIssue_;
+    StateHandler onState_;
+    ErrorHandler onError_;
+    WireHandler onWire_;
+};
+
+RemoteAgentSource::RemoteAgentSource() {
+    worker_ = new RemoteAgentWorker(
+        [this](const lab::core::agent::Hello& hello) { handleHello(hello); },
+        [this](const lab::core::agent::TopicCatalog& catalog) {
+            const auto callbacks = agentCallbacks();
+            if (callbacks.onTopicCatalog) callbacks.onTopicCatalog(catalog);
+        },
+        [this](const lab::core::agent::Frame& frame,
+               const lab::core::agent::SampleBatch& batch) {
+            handleSample(frame, batch);
+        },
+        [this](const lab::core::agent::DecodeIssue& issue) {
+            handleProtocolIssue(issue);
+        },
+        [this](lab::core::SourceState state, HandshakeState handshake) {
+            open_.store(state == lab::core::SourceState::Open);
+            handshakeState_.store(handshake);
+            publishState(state);
+        },
+        [this](std::string message) {
+            errors_.fetch_add(1);
+            lab::core::Logger::instance().log(
+                lab::core::LogLevel::Error, "RemoteAgent", message);
+            publishError(message);
+        },
+        [this](lab::core::Direction direction, std::size_t count) {
+            handleWireBytes(direction, count);
+        });
+    worker_->moveToThread(&ioThread_);
+    QObject::connect(&ioThread_, &QThread::finished, worker_, &QObject::deleteLater);
+    ioThread_.setObjectName(QStringLiteral("Remote Agent I/O"));
+    ioThread_.start();
+}
+
+RemoteAgentSource::~RemoteAgentSource() {
+    if (ioThread_.isRunning()) {
+        close();
+        ioThread_.quit();
+        ioThread_.wait();
+    }
+    worker_ = nullptr;
+}
+
+void RemoteAgentSource::setSettings(RemoteAgentSettings settings) {
+    std::scoped_lock lock(settingsMutex_);
+    settings_ = std::move(settings);
+}
+
+RemoteAgentSettings RemoteAgentSource::settings() const {
+    std::scoped_lock lock(settingsMutex_);
+    return settings_;
+}
+
+void RemoteAgentSource::setAgentCallbacks(RemoteAgentCallbacks callbacks) {
+    std::scoped_lock lock(agentCallbackMutex_);
+    agentCallbacks_ = std::move(callbacks);
+}
+
+bool RemoteAgentSource::open() {
+    if (!ioThread_.isRunning()) {
+        return false;
+    }
+    publishState(lab::core::SourceState::Opening);
+    const auto configuration = settings();
+    endpointCreated_.store(false);
+    {
+        std::scoped_lock lock(agentIdentityMutex_);
+        agentId_.clear();
+    }
+    bool accepted = false;
+    QMetaObject::invokeMethod(
+        worker_,
+        [this, configuration, &accepted] {
+            accepted = worker_->openEndpoint(configuration);
+        },
+        Qt::BlockingQueuedConnection);
+    if (accepted) {
+        endpointCreated_.store(true);
+        lab::core::Logger::instance().log(
+            lab::core::LogLevel::Info, "RemoteAgent", "Connecting to " + sourceId());
+    }
+    return accepted;
+}
+
+void RemoteAgentSource::close() {
+    if (!ioThread_.isRunning() || !endpointCreated_.exchange(false)) {
+        return;
+    }
+    QMetaObject::invokeMethod(
+        worker_, [this] { worker_->closeEndpoint(); }, Qt::BlockingQueuedConnection);
+}
+
+bool RemoteAgentSource::isOpen() const noexcept {
+    return open_.load();
+}
+
+bool RemoteAgentSource::write(std::span<const std::uint8_t> data) {
+    if (!data.empty()) {
+        errors_.fetch_add(1);
+        publishError("Remote Agent does not support raw writes; use subscribe controls");
+    }
+    return false;
+}
+
+std::string RemoteAgentSource::sourceId() const {
+    return agentSourceId();
+}
+
+lab::core::SourceStatistics RemoteAgentSource::statistics() const noexcept {
+    return {receivedBytes_.load(),
+            transmittedBytes_.load(),
+            receivedChunks_.load(),
+            transmittedChunks_.load(),
+            errors_.load()};
+}
+
+bool RemoteAgentSource::requestTopicCatalog() {
+    if (!ioThread_.isRunning()) return false;
+    bool result = false;
+    QMetaObject::invokeMethod(
+        worker_, [this, &result] { result = worker_->requestTopicCatalog(); },
+        Qt::BlockingQueuedConnection);
+    return result;
+}
+
+bool RemoteAgentSource::subscribe(
+    const lab::core::agent::SubscriptionRequest& request) {
+    if (!ioThread_.isRunning()) return false;
+    bool result = false;
+    QMetaObject::invokeMethod(
+        worker_, [this, request, &result] { result = worker_->subscribe(request); },
+        Qt::BlockingQueuedConnection);
+    return result;
+}
+
+bool RemoteAgentSource::unsubscribe(
+    const lab::core::agent::SubscriptionRequest& request) {
+    if (!ioThread_.isRunning()) return false;
+    bool result = false;
+    QMetaObject::invokeMethod(
+        worker_, [this, request, &result] { result = worker_->unsubscribe(request); },
+        Qt::BlockingQueuedConnection);
+    return result;
+}
+
+HandshakeState RemoteAgentSource::handshakeState() const noexcept {
+    return handshakeState_.load();
+}
+
+void RemoteAgentSource::handleHello(const lab::core::agent::Hello& hello) {
+    {
+        std::scoped_lock lock(agentIdentityMutex_);
+        agentId_ = hello.agentId;
+    }
+    const auto callbacks = agentCallbacks();
+    if (callbacks.onHello) callbacks.onHello(hello);
+}
+
+void RemoteAgentSource::handleSample(
+    const lab::core::agent::Frame& frame,
+    const lab::core::agent::SampleBatch& batch) {
+    const auto timestamp = frame.sourceTimestamp != 0
+                               ? frame.sourceTimestamp
+                               : (frame.agentReceiveTimestamp != 0
+                                      ? frame.agentReceiveTimestamp
+                                      : lab::core::nowTimestampNs());
+    const auto id = agentSourceId(batch.topic);
+    if (!batch.serializedData.empty()) {
+        publishData({id,
+                     frame.sourceTimestamp,
+                     lab::core::nowTimestampNs(),
+                     frame.sequence,
+                     lab::core::Direction::Rx,
+                     batch.serializedData});
+    }
+    for (const auto& field : batch.fields) {
+        double value = 0.0;
+        if (const auto* numeric = std::get_if<double>(&field.value)) {
+            value = *numeric;
+        } else if (const auto* boolean = std::get_if<bool>(&field.value)) {
+            value = *boolean ? 1.0 : 0.0;
+        } else {
+            continue;
+        }
+        publishSample({timestamp,
+                       id,
+                       batch.topic + "." + field.path,
+                       value,
+                       field.unit,
+                       frame.sequence});
+    }
+    const auto callbacks = agentCallbacks();
+    if (callbacks.onSampleBatch) callbacks.onSampleBatch(batch);
+}
+
+void RemoteAgentSource::handleProtocolIssue(
+    const lab::core::agent::DecodeIssue& issue) {
+    const auto callbacks = agentCallbacks();
+    if (callbacks.onProtocolIssue) callbacks.onProtocolIssue(issue);
+}
+
+void RemoteAgentSource::handleWireBytes(
+    lab::core::Direction direction,
+    std::size_t count) {
+    if (direction == lab::core::Direction::Rx) {
+        receivedBytes_.fetch_add(count);
+        receivedChunks_.fetch_add(1);
+    } else {
+        transmittedBytes_.fetch_add(count);
+        transmittedChunks_.fetch_add(1);
+    }
+}
+
+RemoteAgentCallbacks RemoteAgentSource::agentCallbacks() const {
+    std::scoped_lock lock(agentCallbackMutex_);
+    return agentCallbacks_;
+}
+
+std::string RemoteAgentSource::agentSourceId(const std::string& topic) const {
+    std::string id;
+    {
+        std::scoped_lock lock(agentIdentityMutex_);
+        id = agentId_;
+    }
+    if (id.empty()) {
+        const auto configuration = settings();
+        id = configuration.host + ':' + std::to_string(configuration.port);
+    }
+    auto result = "ros-agent:" + id;
+    if (!topic.empty()) {
+        result += ':' + topic;
+    }
+    return result;
+}
+
+std::string toString(HandshakeState state) {
+    switch (state) {
+    case HandshakeState::Disconnected: return "disconnected";
+    case HandshakeState::AwaitingHello: return "awaiting_hello";
+    case HandshakeState::Ready: return "ready";
+    case HandshakeState::Error: return "error";
+    }
+    return "unknown";
+}
+
+}  // namespace lab::adapters::remote_agent

@@ -25,7 +25,7 @@ Serial / TCP / UDP / Replay / ROS2 / Remote ROS Agent
                        Plot
 ```
 
-`IDataSource` 只表达打开、关闭、状态、写入、数据、错误与统计。上层从 `DataChunk` 中得到来源、方向、源时间、接收时间、序号和字节，不需要知道数据来自 COM、UDP 还是 ROS2。
+`IDataSource` 表达打开、关闭、状态、写入、原始数据、可选结构化样本、错误与统计。上层从 `DataChunk` 中得到来源、方向、源时间、接收时间、序号和字节；Remote Agent 还可直接发布已经由 Agent 展平的 `DataSample`，避免把 CDR 误送入 CSV 解析器。
 
 核心库不用 Qt 类型，便于独立测试、用于无界面 Agent，或未来抽成基础设施库。Qt 目前只出现在串口/网络适配器和桌面界面。
 
@@ -61,6 +61,7 @@ repeat:
 GUI thread                 只处理交互、33 ms 批量终端刷新和绘图快照
 Serial QThread             QSerialPort 的 open/read/write/error 生命周期
 Network QThread            QTcpSocket/QTcpServer/QUdpSocket 生命周期
+Remote Agent QThread       QTcpSocket、握手、帧解码、订阅控制和心跳
 Processing std::jthread    CSV/二进制帧解析、TimeSeries 追加、FrameEvent
 Recorder std::jthread      有序写入 RX/TX 原始记录
 Session std::jthread       异步写入数值、结构化帧、事件和配置快照
@@ -89,7 +90,7 @@ Windows remote mode:
 
 远程帧必须携带 topic、message type、源时间、Agent 接收时间、序号与负载。第一版 Agent 先支持常用消息的结构化字段；之后再增加 GenericSubscription、类型描述与 CDR introspection。ROS2 构建通过独立 CMake 选项和目标启用，不向核心传播头文件或链接依赖。
 
-Remote Agent v1 帧和负载编解码现已位于纯 C++ `lab_core`。固定帧包含版本、类型、长度、序号、源时间、Agent 接收时间和 CRC32；SampleBatch 同时保留原始 CDR 与数值/布尔/文本字段。详细字节格式、限制和握手状态机见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。Linux Agent、客户端数据源和 topic UI 尚未完成，因此当前不能把协议基础层视为已可连接 ROS2。
+Remote Agent v1 帧和负载编解码位于纯 C++ `lab_core`。Windows `RemoteAgentSource` 在独立 Qt 网络线程内执行 TCP 生命周期、5 秒握手超时、严格入站序号检查、目录/订阅命令和 Ping/Pong。SampleBatch 的原始 CDR 进入 Raw Recorder，数值与布尔字段直接进入 TimeSeries 和 Session，文本字段保留在批次回调中。详细格式见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。Linux Agent 尚未完成，因此当前仍需外部兼容 Agent 才能连接真实 ROS2 图。
 
 ## 5. 协议引擎边界
 
@@ -99,7 +100,7 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 
 ## 6. 生命周期与多数据源
 
-应用层将演进为 `SourceManager`：管理多个 `IDataSource`、独立状态和计数，并把数据扇出到 Recorder、Parser 与 Global Timeline。当前 UI 可在一个 `SerialSource` 与一个 `NetworkSource` 之间切换；两者和 `ReplaySource` 已复用统一的处理、显示和记录链路。核心事件和记录格式均带 `sourceId`，但“同时启用多个实时源”仍需 SourceManager 阶段完成。
+应用层将演进为 `SourceManager`：管理多个 `IDataSource`、独立状态和计数，并把数据扇出到 Recorder、Parser 与 Global Timeline。当前 UI 可在 `SerialSource`、`NetworkSource` 与 `RemoteAgentSource` 之间切换；它们和 `ReplaySource` 复用统一的显示、统计和记录边界。核心事件和记录格式均带 `sourceId`，但“同时启用多个实时源”仍需 SourceManager 阶段完成。
 
 ## 7. 当前已知边界
 

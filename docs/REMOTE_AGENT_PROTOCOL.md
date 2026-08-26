@@ -12,7 +12,7 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 
 协议核心位于 `lab_core`，不依赖 Qt、ROS2 或操作系统 API。这样 Windows 主程序不需要安装 ROS2，Linux Agent 也能复用同一套编解码器和测试向量。
 
-当前完成的是协议和流式解码基础层；ROS2 Agent 进程、`RemoteAgentSource` 和 topic UI 仍属于后续工作。
+当前已完成协议核心、Windows `RemoteAgentSource`、握手状态机、Topic 目录/订阅 UI 和 Session/曲线接线；Linux/ROS2 Humble Agent 进程仍属于后续工作。
 
 ## 1. TCP 帧
 
@@ -48,6 +48,7 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 | 7 | Error | 双向 | 错误码、上下文和消息 |
 | 8 | Ping | 双向 | 64 位 nonce 心跳 |
 | 9 | Pong | 双向 | 原样返回 nonce |
+| 10 | TopicCatalogRequest | Client → Agent | 主动请求最新 TopicCatalog，payload 为空 |
 
 字符串和字节数组采用 `uint32 length + bytes`；集合采用 `uint32 count`。字符串均为 UTF-8。
 
@@ -95,6 +96,7 @@ orientation.w
 TCP connected
   → Agent sends Hello
   → Client validates version/capabilities and sends HelloAck
+  → Client sends TopicCatalogRequest
   → Agent sends TopicCatalog
   → Client sends Subscribe / Unsubscribe
   → Agent streams SampleBatch and graph updates
@@ -126,3 +128,5 @@ TCP connected
 - CRC、版本、类型和超长错误后的重同步；
 - Hello、HelloAck、TopicCatalog、Subscribe、SampleBatch、Error、Ping/Pong；
 - 截断、尾随字节、非法布尔、非法队列深度和超长字符串拒绝。
+
+`lab_remote_agent_tests` 使用本机 TCP 模拟 Agent，覆盖分片 Hello、能力协商、初始/手动目录请求、CRC 损坏恢复、TopicCatalog 与 SampleBatch 粘包、原始 CDR、数值/布尔字段、订阅/取消订阅、Ping/Pong，以及重复序号导致的协议断线。

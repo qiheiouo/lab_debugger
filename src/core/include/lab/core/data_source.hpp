@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lab/core/data_chunk.hpp"
+#include "lab/core/data_sample.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -25,6 +26,7 @@ struct DataSourceCallbacks {
     std::function<void(const DataChunk&)> onData;
     std::function<void(SourceState)> onStateChanged;
     std::function<void(const std::string&)> onError;
+    std::function<void(const DataSample&)> onSample;
 };
 
 class IDataSource {
@@ -48,6 +50,17 @@ protected:
         auto callback = dataCallback();
         if (callback) {
             callback(chunk);
+        }
+    }
+
+    void publishSample(const DataSample& sample) const {
+        std::function<void(const DataSample&)> callback;
+        {
+            std::scoped_lock lock(callbackMutex_);
+            callback = callbacks_.onSample;
+        }
+        if (callback) {
+            callback(sample);
         }
     }
 
@@ -84,4 +97,3 @@ private:
 };
 
 }  // namespace lab::core
-

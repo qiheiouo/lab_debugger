@@ -65,17 +65,20 @@
 
 ## 进行中：Phase 6 — ROS2 / Remote Agent
 
-已完成基础层：
+已完成协议层与 Windows 客户端：
 
 - 无 Qt/ROS 依赖的 Remote Agent v1 帧与 payload 数据模型；
 - Hello/HelloAck、TopicCatalog、Subscribe/Unsubscribe、SampleBatch、Error 和心跳；
 - 原始 CDR 与数值/布尔/文本字段同时保留；
 - 源时间、Agent 接收时间、序号、CRC32 和固定长度上限；
 - TCP 分片/粘包、垃圾、错误 CRC/版本/类型/长度后的流式重同步测试。
+- 独立 `QThread` 的 Windows `RemoteAgentSource`、5 秒握手超时和严格入站序号检查；
+- Topic 目录、Agent 身份、订阅/取消订阅 UI 与手动刷新；
+- CDR 原始记录、结构化数值/布尔曲线与 Session 元数据接线；
+- 本机 TCP 模拟 Agent 回环测试覆盖握手、目录、样本、心跳和错误路径。
 
 下一批：
 
-- Windows `RemoteAgentSource`、握手状态机和 topic 选择 UI；
 - Linux/ROS2 Humble Agent 进程、graph discovery 与常用消息字段映射；
 - GenericSubscription 原始 CDR 转发和 introspection 能力探测；
 - Agent 心跳、重连、时钟偏移估计、认证与 TLS 部署方式。

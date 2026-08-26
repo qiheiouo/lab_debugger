@@ -28,6 +28,7 @@ public:
 
 public slots:
     void useProtocolFields(const QStringList& fields);
+    void useExternalFields(const QStringList& fields);
 
 signals:
     void fieldsChanged(QStringList fields);
@@ -40,6 +41,7 @@ private slots:
 
 private:
     [[nodiscard]] QStringList configuredFields() const;
+    void rebuildFieldControls(bool notifyParser);
 
     const lab::core::TimeSeriesStore* store_;
     PlotCanvas* canvas_{};

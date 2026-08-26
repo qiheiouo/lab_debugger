@@ -11,6 +11,7 @@ namespace lab::ui {
 
 class PlotWidget;
 class NetworkPanel;
+class RemoteAgentPanel;
 class ProtocolWidget;
 class ReplayWidget;
 class SendPanel;
@@ -33,6 +34,7 @@ private:
     lab::app::SerialSession session_;
     SerialPanel* serialPanel_{};
     NetworkPanel* networkPanel_{};
+    RemoteAgentPanel* remoteAgentPanel_{};
     TerminalWidget* terminal_{};
     PlotWidget* plot_{};
     ProtocolWidget* protocol_{};

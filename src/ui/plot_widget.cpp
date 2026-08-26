@@ -331,11 +331,23 @@ void PlotWidget::useProtocolFields(const QStringList& fields) {
     applyFields();
 }
 
+void PlotWidget::useExternalFields(const QStringList& fields) {
+    if (fields.isEmpty()) {
+        return;
+    }
+    fields_->setText(fields.join(QStringLiteral(",")));
+    rebuildFieldControls(false);
+}
+
 QStringList PlotWidget::fieldNames() const {
     return configuredFields();
 }
 
 void PlotWidget::applyFields() {
+    rebuildFieldControls(true);
+}
+
+void PlotWidget::rebuildFieldControls(bool notifyParser) {
     const auto names = configuredFields();
     visibleFields_->blockSignals(true);
     visibleFields_->clear();
@@ -345,7 +357,9 @@ void PlotWidget::applyFields() {
         item->setCheckState(Qt::Checked);
     }
     visibleFields_->blockSignals(false);
-    emit fieldsChanged(names);
+    if (notifyParser) {
+        emit fieldsChanged(names);
+    }
     updateSelectedFields();
 }
 
