@@ -1,4 +1,5 @@
 #include "lab/adapters/remote_agent/remote_agent_source.hpp"
+#include "lab/core/remote_agent_session.hpp"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -307,6 +308,92 @@ void testHandshakeCatalogSamplesAndControls() {
     peer->deleteLater();
 }
 
+void testClientAndServerStateMachinesAreCompatible() {
+    QTcpServer server;
+    require(server.listen(QHostAddress::LocalHost, 0), "compatibility fixture listens");
+    RemoteAgentSource source;
+    Events events;
+    source.setCallbacks(events.sourceCallbacks());
+    source.setAgentCallbacks(events.agentCallbacks());
+    source.setSettings({"127.0.0.1", server.serverPort(), "Compatibility client", "0.5.0"});
+    require(source.open(), "compatibility client starts");
+    require(waitFor([&] { return server.hasPendingConnections(); }),
+            "compatibility server accepts client");
+    auto* peer = server.nextPendingConnection();
+
+    ServerSession agent({
+        "compat-agent",
+        "0.1.0",
+        "fixture",
+        capabilityMask(Capability::TopicDiscovery) |
+            capabilityMask(Capability::SerializedMessages) |
+            capabilityMask(Capability::NumericFields)});
+    send(*peer, agent.start());
+
+    std::vector<ServerAction> actions;
+    const auto consumeClient = [&] {
+        const auto bytes = peer->readAll();
+        if (bytes.isEmpty()) return;
+        const auto first = reinterpret_cast<const std::uint8_t*>(bytes.constData());
+        const auto result = agent.consume(
+            std::span(first, static_cast<std::size_t>(bytes.size())));
+        require(!result.fatalError, "client output is accepted by server state machine");
+        for (const auto& outbound : result.outboundFrames) send(*peer, outbound);
+        actions.insert(actions.end(), result.actions.begin(), result.actions.end());
+    };
+    require(waitFor([&] {
+                consumeClient();
+                return agent.state() == ServerSessionState::Ready &&
+                       std::any_of(actions.begin(), actions.end(), [](const auto& action) {
+                           return std::holds_alternative<CatalogRequestAction>(action);
+                       });
+            }),
+            "client hello ack and initial catalog request reach server session");
+
+    const TopicCatalog catalog{
+        1,
+        {{"/temperature", "std_msgs/msg/Float64", Reliability::Reliable,
+          Durability::Volatile}}};
+    const auto catalogFrame = agent.makeTopicCatalog(catalog);
+    require(catalogFrame.has_value(), "ready Agent makes catalog");
+    send(*peer, *catalogFrame);
+    require(waitFor([&] {
+                std::scoped_lock lock(events.mutex);
+                return events.catalogs.size() == 1;
+            }),
+            "client accepts catalog produced by server session");
+
+    const SubscriptionRequest request{
+        9, "/temperature", "std_msgs/msg/Float64", Reliability::Reliable, 10};
+    actions.clear();
+    require(source.subscribe(request), "compatibility subscription sent");
+    require(waitFor([&] {
+                consumeClient();
+                return std::any_of(actions.begin(), actions.end(), [&](const auto& action) {
+                    const auto* subscribe = std::get_if<SubscribeAction>(&action);
+                    return subscribe && subscribe->request == request;
+                });
+            }),
+            "server session exposes exact subscription action");
+
+    const auto sampleFrame = agent.makeSample(
+        {"/temperature", "std_msgs/msg/Float64", {0, 1, 2, 3}, {{"data", "C", 24.5}}},
+        123,
+        456);
+    require(sampleFrame.has_value(), "ready Agent makes sample");
+    send(*peer, *sampleFrame);
+    require(waitFor([&] {
+                std::scoped_lock lock(events.mutex);
+                return events.chunks.size() == 1 && events.samples.size() == 1 &&
+                       events.samples[0].value == 24.5;
+            }),
+            "client accepts CDR and field produced by server session");
+
+    source.close();
+    agent.reset();
+    peer->deleteLater();
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -315,6 +402,7 @@ int main(int argc, char* argv[]) {
         testIdleCloseIsSilent();
         testDisconnectBeforeHelloIsError();
         testHandshakeCatalogSamplesAndControls();
+        testClientAndServerStateMachinesAreCompatible();
         std::cout << "All Remote Agent source tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

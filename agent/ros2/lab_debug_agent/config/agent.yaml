@@ -1,0 +1,5 @@
+lab_debug_agent:
+  ros__parameters:
+    bind_address: "127.0.0.1"
+    port: 9750
+    agent_id: "lab-agent"

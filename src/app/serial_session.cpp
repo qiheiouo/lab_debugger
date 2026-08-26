@@ -495,7 +495,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.5.0";
+    options.softwareVersion = "0.6.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();

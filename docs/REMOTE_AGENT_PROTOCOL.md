@@ -12,7 +12,7 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 
 协议核心位于 `lab_core`，不依赖 Qt、ROS2 或操作系统 API。这样 Windows 主程序不需要安装 ROS2，Linux Agent 也能复用同一套编解码器和测试向量。
 
-当前已完成协议核心、Windows `RemoteAgentSource`、握手状态机、Topic 目录/订阅 UI 和 Session/曲线接线；Linux/ROS2 Humble Agent 进程仍属于后续工作。
+当前已完成协议核心、Windows `RemoteAgentSource`、Topic UI、Session/曲线接线，以及 Ubuntu/ROS2 Humble Agent 源码。共享服务端状态机已自动测试；由于当前开发机没有 WSL/ROS2，ament 包仍需在 Ubuntu 22.04 + Humble 上完成首次实机构建和联调。
 
 ## 1. TCP 帧
 
@@ -61,7 +61,7 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 - reliability：unknown / best effort / reliable；
 - durability：unknown / volatile / transient local。
 
-Linux Agent 将使用 ROS2 Humble 的 `get_topic_names_and_types()` 建立目录。订阅请求包含独立 `requestId`，响应失败时 `Error.context` 应包含该请求或 topic。队列深度范围固定为 1..1000000。
+Linux Agent 使用 ROS2 Humble 的 `get_topic_names_and_types()` 建立目录，并结合发布端 endpoint QoS 生成可靠性与持久性提示。订阅请求包含独立 `requestId`，响应失败时 `Error.context` 包含 topic。队列深度范围固定为 1..1000000。
 
 ## 4. SampleBatch
 
@@ -130,3 +130,5 @@ TCP connected
 - 截断、尾随字节、非法布尔、非法队列深度和超长字符串拒绝。
 
 `lab_remote_agent_tests` 使用本机 TCP 模拟 Agent，覆盖分片 Hello、能力协商、初始/手动目录请求、CRC 损坏恢复、TopicCatalog 与 SampleBatch 粘包、原始 CDR、数值/布尔字段、订阅/取消订阅、Ping/Pong，以及重复序号导致的协议断线。
+
+`lab_agent_server_session_tests` 覆盖 Agent 侧 Hello/HelloAck、能力拒绝、客户端命令动作化、服务端统一序号、时间戳、心跳、CRC 恢复、结构化错误和重复客户端序号。ROS2 包的构建与实机联调步骤见 [`agent/ros2/lab_debug_agent/README.md`](../agent/ros2/lab_debug_agent/README.md)。

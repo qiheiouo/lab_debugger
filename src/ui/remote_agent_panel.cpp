@@ -146,7 +146,7 @@ lab::adapters::remote_agent::RemoteAgentSettings RemoteAgentPanel::settings() co
     return {host_->text().trimmed().toStdString(),
             static_cast<std::uint16_t>(port_->value()),
             clientName_->text().trimmed().toStdString(),
-            "0.5.0"};
+            "0.6.0"};
 }
 
 void RemoteAgentPanel::setSourceState(int rawState) {

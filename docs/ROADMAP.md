@@ -76,11 +76,15 @@
 - Topic 目录、Agent 身份、订阅/取消订阅 UI 与手动刷新；
 - CDR 原始记录、结构化数值/布尔曲线与 Session 元数据接线；
 - 本机 TCP 模拟 Agent 回环测试覆盖握手、目录、样本、心跳和错误路径。
+- 可移植的 Agent 服务端会话状态机及独立自动测试；
+- Ubuntu/ROS2 Humble ament 包、POSIX TCP 单客户端服务端与 graph revision 推送；
+- `GenericSubscription` 任意类型 CDR 转发；
+- std_msgs、Twist/Pose、Imu/JointState、Odometry 常见字段映射。
 
 下一批：
 
-- Linux/ROS2 Humble Agent 进程、graph discovery 与常用消息字段映射；
-- GenericSubscription 原始 CDR 转发和 introspection 能力探测；
+- Ubuntu 22.04 + Humble 首次实机构建、真实 graph/CDR 联调与兼容性修正；
+- 通用 ROS introspection 字段树与类型支持能力探测；
 - Agent 心跳、重连、时钟偏移估计、认证与 TLS 部署方式。
 
 后续：

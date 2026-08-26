@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.5.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.6.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -35,6 +35,7 @@ add_library(lab_core STATIC
     src/core/src/raw_log_reader.cpp
     src/core/src/raw_log_recorder.cpp
     src/core/src/replay_source.cpp
+    src/core/src/remote_agent_session.cpp
     src/core/src/session_recorder.cpp
     src/core/src/time_series_store.cpp
 )
@@ -154,6 +155,9 @@ if(LAB_DEBUGGER_BUILD_TESTS)
     add_executable(lab_agent_protocol_tests tests/test_agent_protocol.cpp)
     target_link_libraries(lab_agent_protocol_tests PRIVATE lab_core)
     add_test(NAME lab_agent_protocol_tests COMMAND lab_agent_protocol_tests)
+    add_executable(lab_agent_server_session_tests tests/test_agent_server_session.cpp)
+    target_link_libraries(lab_agent_server_session_tests PRIVATE lab_core)
+    add_test(NAME lab_agent_server_session_tests COMMAND lab_agent_server_session_tests)
     if(TARGET lab_network_adapter)
         add_executable(lab_network_tests tests/test_network.cpp)
         target_link_libraries(lab_network_tests PRIVATE lab_network_adapter Qt6::Core Qt6::Network)

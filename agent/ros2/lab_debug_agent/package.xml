@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>lab_debug_agent</name>
+  <version>0.1.0</version>
+  <description>Remote ROS 2 bridge for Lab Debugger.</description>
+  <maintainer email="maintainer@example.com">Lab Debugger Maintainers</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

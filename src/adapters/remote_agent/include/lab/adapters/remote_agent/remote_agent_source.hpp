@@ -18,7 +18,7 @@ struct RemoteAgentSettings {
     std::string host{"127.0.0.1"};
     std::uint16_t port{9750};
     std::string clientName{"Lab Debugger"};
-    std::string clientVersion{"0.5.0"};
+    std::string clientVersion{"0.6.0"};
 };
 
 enum class HandshakeState { Disconnected, AwaitingHello, Ready, Error };

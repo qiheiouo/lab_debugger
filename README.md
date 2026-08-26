@@ -1,6 +1,6 @@
 # Lab Debugger / 实验室调试助手
 
-Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路、Phase 5 网络数据源，并完成 Phase 6 的 Windows Remote ROS Agent 客户端：
+Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路、Phase 5 网络数据源，并已进入 Phase 6：Windows Remote ROS Agent 客户端、可移植服务端会话核心与 ROS2 Humble Agent 源码均已落地：
 
 - 与 Qt UI 解耦的 C++20 数据核心；
 - 多数据源友好的 `IDataSource` 抽象；
@@ -19,6 +19,8 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 独立 TCP 线程的 `RemoteAgentSource`、5 秒握手超时、严格序号检查与 Ping/Pong；
 - ROS Agent 身份、Topic 目录、订阅/取消订阅 UI，以及 CDR/结构化字段双路记录；
 - Remote Agent 本机模拟服务器回环测试；
+- Ubuntu/ROS2 Humble `lab_debug_agent` ament 包、单客户端 TCP 服务端和 graph 更新；
+- 基于 `GenericSubscription` 的任意类型 CDR 转发，以及常见消息的结构化字段映射；
 - 可测试的 `MockDataSource` 与核心测试。
 
 详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
@@ -77,4 +79,4 @@ cmake --install build --config Release --prefix dist/LabDebugger
 
 左侧切换到“ROS Agent”页，填写 Linux Agent 地址和端口后连接。客户端必须在 5 秒内收到合法 `Hello`，随后才会显示为就绪并自动请求 Topic 目录。选择 Topic、可靠性与队列深度后可订阅或取消订阅；收到的原始 CDR 进入终端和 Session 原始流，数值及布尔字段直接进入实时曲线和 `values.csv`。
 
-当前仓库尚未包含 Linux/ROS2 Humble Agent 可执行程序，因此这一客户端需配合遵循 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md) 的 Agent 使用。协议暂不提供认证或加密，只应部署在受信实验室网络或 VPN/SSH 隧道内。
+Linux/ROS2 Humble Agent 位于 [`agent/ros2/lab_debug_agent`](agent/ros2/lab_debug_agent/README.md)。当前开发机没有 WSL/ROS2，因此共享协议与服务端状态机已经完成 Windows 自动测试，ament 包仍需在 Ubuntu 22.04 + Humble 上完成首次实机构建和联调。协议暂不提供认证或加密，推荐让 Agent 只监听回环地址并通过 SSH 隧道连接。
