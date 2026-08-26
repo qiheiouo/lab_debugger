@@ -1,0 +1,43 @@
+{
+  "name": "STM32 状态帧示例",
+  "maximum_frame_length": 4096,
+  "frame": {
+    "header": ["0xAA", "0x55"],
+    "length": 12
+  },
+  "fields": [
+    {
+      "name": "speed",
+      "type": "float32",
+      "endian": "little",
+      "unit": "m/s"
+    },
+    {
+      "name": "voltage",
+      "type": "uint16",
+      "endian": "little",
+      "scale": 0.01,
+      "unit": "V"
+    },
+    {
+      "name": "mode",
+      "type": "uint8",
+      "enum": {
+        "0": "idle",
+        "1": "ready",
+        "2": "run"
+      }
+    },
+    {
+      "name": "ready",
+      "type": "bool"
+    }
+  ],
+  "checksum": {
+    "type": "crc16_modbus",
+    "offset": 10,
+    "range_start": 0,
+    "range_length": 10,
+    "endian": "little"
+  }
+}

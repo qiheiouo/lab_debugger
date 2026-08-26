@@ -1,0 +1,197 @@
+#include "ui/protocol_widget.hpp"
+
+#include <QAbstractItemView>
+#include <QColor>
+#include <QDateTime>
+#include <QFileDialog>
+#include <QFontDatabase>
+#include <QHeaderView>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSplitter>
+#include <QTableWidget>
+#include <QVBoxLayout>
+#include <QVariantMap>
+
+namespace lab::ui {
+namespace {
+
+QString eventLabel(const QString& kind) {
+    if (kind == QStringLiteral("frame")) {
+        return QObject::tr("有效帧");
+    }
+    if (kind == QStringLiteral("garbage")) {
+        return QObject::tr("跳过字节");
+    }
+    if (kind == QStringLiteral("checksum_error")) {
+        return QObject::tr("校验失败");
+    }
+    if (kind == QStringLiteral("length_error")) {
+        return QObject::tr("长度异常");
+    }
+    return QObject::tr("解析失败");
+}
+
+}  // namespace
+
+ProtocolWidget::ProtocolWidget(QWidget* parent) : QWidget(parent) {
+    auto* root = new QVBoxLayout(this);
+    auto* toolbar = new QHBoxLayout;
+    auto* loadButton = new QPushButton(tr("加载 JSON 协议"), this);
+    auto* disableButton = new QPushButton(tr("停用协议"), this);
+    statusLabel_ = new QLabel(tr("尚未加载协议"), this);
+    statusLabel_->setStyleSheet(QStringLiteral("color: #7c8799;"));
+    toolbar->addWidget(loadButton);
+    toolbar->addWidget(disableButton);
+    toolbar->addSpacing(12);
+    toolbar->addWidget(statusLabel_, 1);
+    root->addLayout(toolbar);
+
+    auto* summary = new QHBoxLayout;
+    decodedLabel_ = new QLabel(tr("有效帧 0"), this);
+    discardedLabel_ = new QLabel(tr("跳过字节 0"), this);
+    checksumLabel_ = new QLabel(tr("校验错误 0"), this);
+    lengthLabel_ = new QLabel(tr("长度错误 0"), this);
+    decodeLabel_ = new QLabel(tr("解析错误 0"), this);
+    fieldsLabel_ = new QLabel(tr("曲线字段：—"), this);
+    for (auto* label : {decodedLabel_, discardedLabel_, checksumLabel_, lengthLabel_, decodeLabel_}) {
+        label->setStyleSheet(
+            QStringLiteral("padding: 4px 8px; background: #192130; border-radius: 4px;"));
+        summary->addWidget(label);
+    }
+    summary->addStretch();
+    root->addLayout(summary);
+    root->addWidget(fieldsLabel_);
+
+    auto* splitter = new QSplitter(Qt::Horizontal, this);
+    packets_ = new QTableWidget(0, 4, splitter);
+    packets_->setHorizontalHeaderLabels({tr("时间"), tr("结果"), tr("字节数"), tr("说明")});
+    packets_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    packets_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    packets_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    packets_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    packets_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    packets_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    auto* detail = new QWidget(splitter);
+    auto* detailLayout = new QVBoxLayout(detail);
+    detailLayout->setContentsMargins(0, 0, 0, 0);
+    fields_ = new QTableWidget(0, 4, detail);
+    fields_->setHorizontalHeaderLabels({tr("字段"), tr("值"), tr("单位"), tr("类型")});
+    fields_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    fields_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    fields_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    fields_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    fields_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    rawHex_ = new QPlainTextEdit(detail);
+    rawHex_->setReadOnly(true);
+    rawHex_->setPlaceholderText(tr("最近一帧的原始十六进制数据"));
+    rawHex_->setMaximumBlockCount(32);
+    rawHex_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    detailLayout->addWidget(new QLabel(tr("最近有效帧字段"), detail));
+    detailLayout->addWidget(fields_, 3);
+    detailLayout->addWidget(new QLabel(tr("原始帧"), detail));
+    detailLayout->addWidget(rawHex_, 1);
+
+    splitter->addWidget(packets_);
+    splitter->addWidget(detail);
+    splitter->setStretchFactor(0, 3);
+    splitter->setStretchFactor(1, 2);
+    root->addWidget(splitter, 1);
+
+    connect(loadButton, &QPushButton::clicked, this, [this] {
+        const auto path = QFileDialog::getOpenFileName(
+            this, tr("选择协议定义"), {}, tr("JSON 协议 (*.json);;所有文件 (*.*)"));
+        if (!path.isEmpty()) {
+            emit loadProtocolRequested(path);
+        }
+    });
+    connect(disableButton, &QPushButton::clicked,
+            this, &ProtocolWidget::disableProtocolRequested);
+}
+
+void ProtocolWidget::setProtocolLoaded(const QString& name, const QStringList& numericFields) {
+    statusLabel_->setText(tr("已启用：%1").arg(name));
+    statusLabel_->setStyleSheet(QStringLiteral("color: #5fd19a;"));
+    fieldsLabel_->setText(tr("曲线字段：%1").arg(
+        numericFields.isEmpty() ? tr("无数值字段")
+                                : numericFields.join(QStringLiteral(", "))));
+    packets_->setRowCount(0);
+    fields_->setRowCount(0);
+    rawHex_->clear();
+}
+
+void ProtocolWidget::setProtocolCleared() {
+    statusLabel_->setText(tr("协议已停用（CSV 解析仍可使用）"));
+    statusLabel_->setStyleSheet(QStringLiteral("color: #7c8799;"));
+    fieldsLabel_->setText(tr("曲线字段：—"));
+    setStatistics(0, 0, 0, 0, 0);
+}
+
+void ProtocolWidget::showLoadErrors(const QStringList& issues) {
+    statusLabel_->setText(tr("协议加载失败：%1").arg(issues.value(0)));
+    statusLabel_->setStyleSheet(QStringLiteral("color: #ff7875;"));
+    QMessageBox::warning(this, tr("协议定义无效"), issues.join(QLatin1Char('\n')));
+}
+
+void ProtocolWidget::appendEvents(const QVariantList& events) {
+    constexpr int maximumRows = 2000;
+    for (const auto& value : events) {
+        const auto event = value.toMap();
+        const auto kind = event.value(QStringLiteral("kind")).toString();
+        const auto raw = event.value(QStringLiteral("raw")).toByteArray();
+        while (packets_->rowCount() >= maximumRows) {
+            packets_->removeRow(0);
+        }
+        const auto row = packets_->rowCount();
+        packets_->insertRow(row);
+        const auto timestampMs = event.value(QStringLiteral("timestampNs")).toLongLong() / 1'000'000;
+        packets_->setItem(
+            row, 0,
+            new QTableWidgetItem(QDateTime::fromMSecsSinceEpoch(timestampMs)
+                                     .toString(QStringLiteral("HH:mm:ss.zzz"))));
+        auto* status = new QTableWidgetItem(eventLabel(kind));
+        status->setForeground(kind == QStringLiteral("frame")
+                                  ? QColor(QStringLiteral("#5fd19a"))
+                                  : QColor(QStringLiteral("#ff7875")));
+        packets_->setItem(row, 1, status);
+        packets_->setItem(row, 2, new QTableWidgetItem(tr("%1 B").arg(raw.size())));
+        packets_->setItem(
+            row, 3, new QTableWidgetItem(event.value(QStringLiteral("message")).toString()));
+
+        if (kind == QStringLiteral("frame")) {
+            const auto fieldList = event.value(QStringLiteral("fields")).toList();
+            fields_->setRowCount(static_cast<int>(fieldList.size()));
+            for (qsizetype index = 0; index < fieldList.size(); ++index) {
+                const auto field = fieldList.at(index).toMap();
+                fields_->setItem(static_cast<int>(index), 0,
+                                 new QTableWidgetItem(field.value("name").toString()));
+                fields_->setItem(static_cast<int>(index), 1,
+                                 new QTableWidgetItem(field.value("value").toString()));
+                fields_->setItem(static_cast<int>(index), 2,
+                                 new QTableWidgetItem(field.value("unit").toString()));
+                fields_->setItem(static_cast<int>(index), 3,
+                                 new QTableWidgetItem(field.value("type").toString()));
+            }
+            rawHex_->setPlainText(QString::fromLatin1(raw.toHex(' ').toUpper()));
+        }
+    }
+    packets_->scrollToBottom();
+}
+
+void ProtocolWidget::setStatistics(quint64 decoded,
+                                   quint64 discardedBytes,
+                                   quint64 checksumErrors,
+                                   quint64 lengthErrors,
+                                   quint64 decodeErrors) {
+    decodedLabel_->setText(tr("有效帧 %1").arg(decoded));
+    discardedLabel_->setText(tr("跳过字节 %1").arg(discardedBytes));
+    checksumLabel_->setText(tr("校验错误 %1").arg(checksumErrors));
+    lengthLabel_->setText(tr("长度错误 %1").arg(lengthErrors));
+    decodeLabel_->setText(tr("解析错误 %1").arg(decodeErrors));
+}
+
+}  // namespace lab::ui

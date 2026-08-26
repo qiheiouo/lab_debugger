@@ -14,8 +14,9 @@ Serial / TCP / UDP / Replay / ROS2 / Remote ROS Agent
              ▼           ▼            ▼
         Raw recorder  Processing   UI event queue
                          │            │ 30 Hz batch
-                         ▼            ▼
-                    DataSample     Terminal
+                    ┌────┴────┐       ▼
+                    ▼         ▼    Terminal
+               DataSample  FrameEvent
                          │
                          ▼
                   TimeSeriesStore
@@ -59,7 +60,7 @@ repeat:
 ```text
 GUI thread                 只处理交互、33 ms 批量终端刷新和绘图快照
 Serial QThread             QSerialPort 的 open/read/write/error 生命周期
-Processing std::jthread    字节分行、CSV 字段解析、TimeSeries 追加
+Processing std::jthread    CSV/二进制帧解析、TimeSeries 追加、FrameEvent
 Recorder std::jthread      有序写入 RX/TX 原始记录
 ```
 
@@ -86,9 +87,9 @@ Windows remote mode:
 
 ## 5. 协议引擎边界
 
-后续 `IStreamDecoder` 消费 `DataChunk` 并产生 `Frame`；`IFieldDecoder` 按 JSON/YAML 描述把 `Frame` 变成 `DataSample`。帧同步、长度、CRC 与字段解码分层，避免每个 STM32 协议写一套硬编码状态机。
+`FrameStreamParser` 消费 `DataChunk`，处理固定帧头、固定/动态长度、校验与流重新同步；`ProtocolDecoder` 再按经过严格校验的 `ProtocolDefinition` 解码字段。两层分开，避免每个 STM32 协议重复实现状态机，也使 CRC 错误不会污染字段层。
 
-推荐协议描述先选 JSON 作为内建零依赖格式，再增加 YAML 前端；加载后统一编译为经过边界检查的不可变 `ProtocolDefinition`。表达式引擎使用受限 AST 和白名单函数，不执行任意脚本。
+JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不替换运行中的协议。处理线程把数值字段写入 `TimeSeriesStore`，同时把批量 `FrameEvent` 交给 GUI Packet Inspector。热切换会丢弃模式切换前尚未解析的旧队列，原始 `.ldraw` 记录不受影响。未来可增加 YAML 前端并统一转换为同一个 `ProtocolDefinition`；表达式功能仍应使用受限 AST 和白名单函数，不执行任意脚本。
 
 ## 6. 生命周期与多数据源
 
@@ -98,7 +99,6 @@ Windows remote mode:
 
 - 当前最小绘图是自绘 Qt Widget，不依赖 Qt Charts；适合 10~20 条常规曲线，但尚未实现高密度 LTTB/min-max downsampling。
 - `.ldraw` 是 Phase 1 原始流格式，不等同于 Phase 4 完整 Session。
-- CSV 解析器只处理换行分隔的数值，不处理二进制帧、单位和校验。
+- CSV 解析器只处理换行分隔的数值；二进制帧、单位和校验由独立协议引擎处理。
 - 串口断开后提供手动重连；自动退避重连和端口热插拔恢复留到后续。
 - 时钟目前使用系统 Unix 时间。多机 ROS Agent 需要记录时钟偏移估计和同步质量。
-

@@ -26,7 +26,7 @@
 
 尚需补齐：历史拖动、区间框选、CSV 导出、可靠的高密度降采样、完善的坐标交互与长时间性能基准。
 
-## 已实现核心：Phase 3 — Protocol Engine
+## 已实现：Phase 3 — Protocol Engine
 
 - 不可变 `ProtocolDefinition` 与严格 JSON 加载；
 - 流式 frame synchronizer：半帧、粘包、垃圾字节、错误长度、CRC 错误和重同步；
@@ -34,8 +34,10 @@
 - sum8、CRC8/ATM、CRC16/MODBUS、CRC16/CCITT-FALSE；
 - 固定长度与 `uint8/16/32` 动态长度字段；
 - 首字节时间戳保留和解析统计。
-
-尚需完成：把协议核心接入 GUI、Packet Inspector、协议文件热切换，以及解析字段自动进入实时曲线。
+- GUI 协议文件加载与停用、Packet Inspector、原始帧和字段查看；
+- 有效帧、丢弃字节、校验/长度/解码错误统计；
+- 数值字段自动进入统一时序存储与实时曲线；
+- 协议热切换清空旧解析队列，原始记录链路保持独立。
 
 ## 后续顺序
 

@@ -29,6 +29,40 @@ void ProcessingPipeline::setSampleHandler(SampleHandler handler) {
     sampleHandler_ = std::move(handler);
 }
 
+void ProcessingPipeline::setProtocolDefinition(ProtocolDefinition definition) {
+    std::scoped_lock lock(parserMutex_, queueMutex_);
+    queue_.clear();
+    frameParser_ = std::make_unique<FrameStreamParser>(std::move(definition));
+    parser_.reset();
+    csvEnabled_ = false;
+}
+
+void ProcessingPipeline::clearProtocolDefinition() {
+    std::scoped_lock lock(parserMutex_, queueMutex_);
+    queue_.clear();
+    frameParser_.reset();
+    parser_.reset();
+    csvEnabled_ = true;
+}
+
+void ProcessingPipeline::setFrameHandler(FrameHandler handler) {
+    std::scoped_lock lock(frameHandlerMutex_);
+    frameHandler_ = std::move(handler);
+}
+
+bool ProcessingPipeline::protocolEnabled() const {
+    std::scoped_lock lock(parserMutex_);
+    return frameParser_ != nullptr;
+}
+
+std::optional<FrameParserStatistics> ProcessingPipeline::protocolStatistics() const {
+    std::scoped_lock lock(parserMutex_);
+    if (!frameParser_) {
+        return std::nullopt;
+    }
+    return frameParser_->statistics();
+}
+
 std::size_t ProcessingPipeline::pendingChunks() const {
     std::scoped_lock lock(queueMutex_);
     return queue_.size();
@@ -55,13 +89,19 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
         }
 
         std::vector<DataSample> samples;
+        std::vector<FrameEvent> frameEvents;
         {
             std::scoped_lock lock(parserMutex_);
-            samples = parser_.consume(
-                chunk.payload,
-                chunk.sourceTimestamp,
-                chunk.sourceId,
-                chunk.sequence);
+            if (csvEnabled_) {
+                samples = parser_.consume(
+                    chunk.payload,
+                    chunk.sourceTimestamp,
+                    chunk.sourceId,
+                    chunk.sequence);
+            }
+            if (frameParser_) {
+                frameEvents = frameParser_->consume(chunk);
+            }
         }
 
         for (const auto& sample : samples) {
@@ -75,8 +115,32 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
                 handler(sample);
             }
         }
+
+        for (const auto& event : frameEvents) {
+            if (event.kind == FrameEventKind::FrameDecoded) {
+                for (const auto& field : event.fields) {
+                    if (!field.numericValue) {
+                        continue;
+                    }
+                    store_.append({
+                        event.sourceTimestamp,
+                        event.sourceId,
+                        field.name,
+                        *field.numericValue,
+                        field.unit,
+                        event.sequence});
+                }
+            }
+            FrameHandler handler;
+            {
+                std::scoped_lock lock(frameHandlerMutex_);
+                handler = frameHandler_;
+            }
+            if (handler) {
+                handler(event);
+            }
+        }
     }
 }
 
 }  // namespace lab::core
-

@@ -9,6 +9,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - RX/TX 时间戳终端、暂停显示、保存、复制；
 - CSV 风格数值流解析、时序环形缓冲、统计与实时曲线；
 - 严格 JSON 二进制协议描述、流式帧同步、字段解码和 CRC；
+- 协议加载界面、逐帧检查器、错误统计，以及数值字段自动接入曲线；
 - 可测试的 `MockDataSource` 与核心测试。
 
 详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
@@ -39,6 +40,10 @@ ctest --test-dir build -C Release --output-on-failure
 3. STM32 以换行结尾发送 `1.24,3.56,23.80\n`。
 4. 在“实时曲线”页把字段设为 `speed,current,voltage` 并点击“应用”。
 5. 勾选需要观察的字段；曲线以 30 FPS 刷新，采集和解析仍按原始速率进行。
+
+若 STM32 输出二进制帧，打开“协议解析”页并加载
+`examples/protocols/stm32_status.json`。有效帧、丢弃字节和校验错误会分别统计，
+最近一帧的字段与原始 HEX 会显示在检查器中，所有数值字段会自动出现在实时曲线页。
 
 ## 原始记录格式
 

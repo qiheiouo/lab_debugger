@@ -323,6 +323,14 @@ PlotWidget::PlotWidget(
     applyFields();
 }
 
+void PlotWidget::useProtocolFields(const QStringList& fields) {
+    if (fields.isEmpty()) {
+        return;
+    }
+    fields_->setText(fields.join(QStringLiteral(",")));
+    applyFields();
+}
+
 void PlotWidget::applyFields() {
     const auto names = configuredFields();
     visibleFields_->blockSignals(true);

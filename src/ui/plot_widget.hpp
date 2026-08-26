@@ -25,6 +25,9 @@ public:
         const lab::core::TimeSeriesStore* store,
         QWidget* parent = nullptr);
 
+public slots:
+    void useProtocolFields(const QStringList& fields);
+
 signals:
     void fieldsChanged(QStringList fields);
 
@@ -51,4 +54,3 @@ private:
 };
 
 }  // namespace lab::ui
-

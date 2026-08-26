@@ -1,15 +1,19 @@
 #include "lab/core/checksum.hpp"
 #include "lab/core/frame_stream_parser.hpp"
+#include "lab/core/processing_pipeline.hpp"
 #include "lab/core/protocol_decoder.hpp"
 #include "lab/core/protocol_json_loader.hpp"
 
 #include <bit>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <random>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -264,6 +268,38 @@ void testAllFieldTypesAndByteArray() {
             "byte array");
 }
 
+void testProtocolProcessingPipeline() {
+    const auto loaded = lab::core::loadProtocolJson(fixedProtocolJson());
+    require(loaded.success(), "pipeline protocol loads");
+
+    lab::core::TimeSeriesStore store(100);
+    lab::core::ProcessingPipeline pipeline(store);
+    std::atomic_int decodedFrames{};
+    pipeline.setFrameHandler([&decodedFrames](const lab::core::FrameEvent& event) {
+        if (event.kind == lab::core::FrameEventKind::FrameDecoded) {
+            decodedFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    pipeline.setProtocolDefinition(*loaded.definition);
+    pipeline.push(chunk(fixedFrame(), 42, 1'000'000));
+
+    for (int attempt = 0; attempt < 100 && store.snapshot("speed").empty(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    const auto speed = store.snapshot("speed");
+    const auto voltage = store.snapshot("voltage");
+    require(speed.size() == 1 && std::abs(speed.front().value - 1.5) < 1e-6,
+            "pipeline publishes decoded speed to time series");
+    require(voltage.size() == 1 && std::abs(voltage.front().value - 24.0) < 1e-9,
+            "pipeline publishes scaled voltage to time series");
+    require(speed.front().timestamp == 1'000'000,
+            "pipeline preserves source timestamp");
+    require(decodedFrames.load(std::memory_order_relaxed) == 1,
+            "pipeline forwards frame event");
+    const auto stats = pipeline.protocolStatistics();
+    require(stats && stats->decodedFrames == 1, "pipeline exposes parser statistics");
+}
+
 void testInvalidDefinitions() {
     auto loaded = lab::core::loadProtocolJson("{ invalid json }");
     require(!loaded.success() && loaded.issues[0].code == "json.syntax", "syntax error");
@@ -296,5 +332,6 @@ void runProtocolTests() {
     testRandomChunkBoundaries();
     testDynamicLengthAndLengthError();
     testAllFieldTypesAndByteArray();
+    testProtocolProcessingPipeline();
     testInvalidDefinitions();
 }

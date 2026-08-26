@@ -10,6 +10,7 @@ class QLabel;
 namespace lab::ui {
 
 class PlotWidget;
+class ProtocolWidget;
 class SendPanel;
 class SerialPanel;
 class TerminalWidget;
@@ -31,6 +32,7 @@ private:
     SerialPanel* serialPanel_{};
     TerminalWidget* terminal_{};
     PlotWidget* plot_{};
+    ProtocolWidget* protocol_{};
     SendPanel* sendPanel_{};
     QLabel* traffic_{};
     QLabel* parserStatus_{};
@@ -38,4 +40,3 @@ private:
 };
 
 }  // namespace lab::ui
-

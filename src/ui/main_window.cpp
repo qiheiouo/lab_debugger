@@ -1,6 +1,7 @@
 #include "ui/main_window.hpp"
 
 #include "ui/plot_widget.hpp"
+#include "ui/protocol_widget.hpp"
 #include "ui/send_panel.hpp"
 #include "ui/serial_panel.hpp"
 #include "ui/terminal_widget.hpp"
@@ -35,11 +36,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     serialPanel_ = new SerialPanel(this);
     terminal_ = new TerminalWidget(this);
     plot_ = new PlotWidget(&session_.timeSeries(), this);
+    protocol_ = new ProtocolWidget(this);
     sendPanel_ = new SendPanel(this);
 
     auto* tabs = new QTabWidget(this);
     tabs->addTab(terminal_, tr("终端"));
     tabs->addTab(plot_, tr("实时曲线"));
+    tabs->addTab(protocol_, tr("协议解析"));
 
     auto* right = new QWidget(this);
     auto* rightLayout = new QVBoxLayout(right);
@@ -76,10 +79,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::sendBytes);
     connect(plot_, &PlotWidget::fieldsChanged,
             &session_, &lab::app::SerialSession::setCsvFields);
+    connect(protocol_, &ProtocolWidget::loadProtocolRequested,
+            &session_, &lab::app::SerialSession::loadProtocolFile);
+    connect(protocol_, &ProtocolWidget::disableProtocolRequested,
+            &session_, &lab::app::SerialSession::clearProtocol);
     connect(&session_, &lab::app::SerialSession::chunkReady,
             terminal_, &TerminalWidget::appendChunk);
     connect(&session_, &lab::app::SerialSession::sourceStateChanged,
             serialPanel_, &SerialPanel::setSourceState);
+    connect(&session_, &lab::app::SerialSession::protocolLoaded,
+            protocol_, &ProtocolWidget::setProtocolLoaded);
+    connect(&session_, &lab::app::SerialSession::protocolLoaded,
+            this, [this](const QString&, const QStringList& fields) {
+                plot_->useProtocolFields(fields);
+                statusBar()->showMessage(tr("协议已加载，数值字段已接入实时曲线"), 4000);
+            });
+    connect(&session_, &lab::app::SerialSession::protocolCleared,
+            protocol_, &ProtocolWidget::setProtocolCleared);
+    connect(&session_, &lab::app::SerialSession::protocolLoadFailed,
+            protocol_, &ProtocolWidget::showLoadErrors);
+    connect(&session_, &lab::app::SerialSession::protocolEventsReady,
+            protocol_, &ProtocolWidget::appendEvents);
+    connect(&session_, &lab::app::SerialSession::protocolStatisticsChanged,
+            protocol_, &ProtocolWidget::setStatistics);
     connect(&session_, &lab::app::SerialSession::sourceError, this, [this](const QString& message) {
         statusBar()->showMessage(tr("错误：%1").arg(message), 8000);
     });
@@ -96,7 +118,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         QMessageBox::information(
             this,
             tr("线程与数据状态"),
-            tr("串口 I/O、CSV 处理、原始记录分别运行在独立线程。\n"
+            tr("串口 I/O、CSV/二进制协议处理、原始记录分别运行在独立线程。\n"
                "GUI 每 33 ms 批量刷新；暂停显示不会暂停采集或记录。\n"
                "所有数据均携带 sourceId、源时间、接收时间和序号。"));
     });
@@ -136,4 +158,3 @@ void MainWindow::toggleRecording(bool enabled) {
 }
 
 }  // namespace lab::ui
-

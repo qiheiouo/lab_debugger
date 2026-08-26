@@ -67,6 +67,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
             src/ui/main_window.hpp
             src/ui/plot_widget.cpp
             src/ui/plot_widget.hpp
+            src/ui/protocol_widget.cpp
+            src/ui/protocol_widget.hpp
             src/ui/send_panel.cpp
             src/ui/send_panel.hpp
             src/ui/serial_panel.cpp

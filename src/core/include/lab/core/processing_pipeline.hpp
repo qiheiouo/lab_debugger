@@ -2,6 +2,7 @@
 
 #include "lab/core/csv_stream_parser.hpp"
 #include "lab/core/data_chunk.hpp"
+#include "lab/core/frame_stream_parser.hpp"
 #include "lab/core/time_series_store.hpp"
 
 #include <condition_variable>
@@ -9,6 +10,8 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <memory>
+#include <optional>
 #include <stop_token>
 #include <thread>
 #include <vector>
@@ -18,6 +21,7 @@ namespace lab::core {
 class ProcessingPipeline {
 public:
     using SampleHandler = std::function<void(const DataSample&)>;
+    using FrameHandler = std::function<void(const FrameEvent&)>;
 
     explicit ProcessingPipeline(TimeSeriesStore& store);
     ~ProcessingPipeline();
@@ -28,6 +32,11 @@ public:
     void push(DataChunk chunk);
     void setFieldNames(std::vector<std::string> names);
     void setSampleHandler(SampleHandler handler);
+    void setProtocolDefinition(ProtocolDefinition definition);
+    void clearProtocolDefinition();
+    void setFrameHandler(FrameHandler handler);
+    [[nodiscard]] bool protocolEnabled() const;
+    [[nodiscard]] std::optional<FrameParserStatistics> protocolStatistics() const;
     [[nodiscard]] std::size_t pendingChunks() const;
 
 private:
@@ -38,13 +47,16 @@ private:
     std::condition_variable_any queueReady_;
     std::deque<DataChunk> queue_;
 
-    std::mutex parserMutex_;
+    mutable std::mutex parserMutex_;
     CsvStreamParser parser_;
+    std::unique_ptr<FrameStreamParser> frameParser_;
+    bool csvEnabled_{true};
 
     std::mutex handlerMutex_;
     SampleHandler sampleHandler_;
+    std::mutex frameHandlerMutex_;
+    FrameHandler frameHandler_;
     std::jthread worker_;
 };
 
 }  // namespace lab::core
-
