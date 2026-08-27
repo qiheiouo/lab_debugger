@@ -7,15 +7,16 @@
 - 发现 topic、消息类型与发布端 QoS，并维护单调递增的 graph revision；
 - 使用 `rclcpp::GenericSubscription` 接收运行时指定类型的序列化消息；
 - 所有已订阅消息都保留原始 CDR；
-- 为以下常用类型额外生成结构化字段：
+- 对以下常用类型优先生成带单位或专用语义的结构化字段：
   - `std_msgs/msg/Bool`、`Float32`、`Float64`、`Int32`、`UInt32`、`String`；
   - `geometry_msgs/msg/Twist`、`TwistStamped`、`PoseStamped`；
   - `sensor_msgs/msg/Imu`、`JointState`；
   - `nav_msgs/msg/Odometry`；
+- 对其余已安装 C++ 与 introspection typesupport 的消息，在运行时反序列化并递归展开数值、布尔、UTF-8/UTF-16 字符串、嵌套消息、定长数组和序列；
 - 支持目录主动刷新、graph 更新推送、订阅/取消订阅、协议错误和 Ping/Pong；
 - 单客户端 TCP 会话，客户端断开时自动释放其 ROS 订阅。
 
-未知消息类型仍会正常转发 CDR，只是暂时没有结构化曲线字段。自定义消息的类型支持库必须已经安装，并且其工作空间已在启动 Agent 前 `source`；否则 `GenericSubscription` 会返回明确错误。
+自定义消息的类型支持库必须已经安装，并且其工作空间已在启动 Agent 前 `source`。普通 C++ typesupport 缺失时 `GenericSubscription` 会返回明确错误；introspection typesupport 缺失或反序列化失败时，Agent 记录限频告警并继续发送原始 CDR，不会把不可靠结果伪装成字段。
 
 ## 构建
 
@@ -41,7 +42,7 @@ colcon test \
 colcon test-result --test-result-base build/lab_debug_agent --verbose
 ```
 
-测试会启动只监听随机回环端口的 Agent 子进程，创建 Float64、Bool、String、Twist、TwistStamped、Imu、JointState、Odometry、未知映射 Point 和同名多类型等真实 ROS graph 端点，并验证协议数据而非只检查日志。
+测试会启动只监听随机回环端口的 Agent 子进程，创建 Float64、Bool、String、Twist、TwistStamped、Imu、JointState、Odometry、运行时 introspection Point 和同名多类型等真实 ROS graph 端点，并验证协议数据而非只检查日志。字段单元测试还覆盖嵌套消息数组、变长数值数组、标准 Header 时间戳、缺失 typesupport、损坏 CDR、资源上限和不能精确转换为 `double` 的 64 位整数。
 
 若需要订阅自定义消息，应先 source 对应工作空间，再构建和运行：
 
@@ -80,7 +81,8 @@ Lab Debugger 中填写 `127.0.0.1:9750`。若实验室受信局域网确实需�
 - 只允许一个活动 Lab Debugger 客户端；
 - 订阅可靠性按客户端请求设置；未知可靠性使用 best effort，以兼容 best-effort 与 reliable 发布端；
 - 订阅持久性当前固定为 volatile，因此不会补收 transient-local 历史样本；
-- 常见消息字段映射使用已编译类型，其他类型只转发 CDR；通用 introspection 字段树仍待实现；
+- 常见消息字段映射使用已编译类型保留单位与语义，其余类型使用运行时 introspection；通用展开限制为 32 层、每个数组 1024 项、每条样本 4096 个字段，超限部分只保留在原始 CDR；
+- Remote Agent v1 目录尚未携带每个 topic/type 的“结构化可用/仅原始”能力标记；缺失 introspection 的原因目前通过 Agent 告警呈现；
 - 活动订阅按 topic/type 区分；相同 QoS 的重复请求幂等，不同 QoS 会替换该 topic/type，取消订阅不会误删同名其他类型；
 - ROS graph 可列出同名多类型，但 Humble RMW 不支持在同一 Agent participant 内同时创建不同类型的 GenericSubscription；Agent 会在进入 RMW 前返回清晰错误并保留已有订阅；
-- 已在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下完成构建、launch、真实 graph/CDR、字段、QoS、错误恢复、重连与 SIGINT 自动验证。
+- 上一阶段已在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下完成构建、launch、真实 graph/CDR、字段、QoS、错误恢复、重连与 SIGINT 自动验证；本次通用 introspection 变更需重新执行上面的 Humble 测试命令。

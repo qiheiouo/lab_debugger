@@ -129,11 +129,15 @@ uncertainty = round_trip / 2
 
 ## 7. ROS2 Humble 映射
 
-第一阶段 Agent 使用 `rclcpp::NodeGraphInterface::get_topic_names_and_types()` 做发现，并针对常用消息类型做字段映射。对于运行时未知类型，Humble 的 `rclcpp::GenericSubscription` 可以接收 `rclcpp::SerializedMessage`，所以原始 CDR 转发不需要在编译期知道所有自定义消息。
+Agent 使用 `rclcpp::NodeGraphInterface::get_topic_names_and_types()` 做发现，并用 Humble 的 `rclcpp::GenericSubscription` 接收运行时指定类型的 `rclcpp::SerializedMessage`，所以原始 CDR 转发不需要在编译期知道所有自定义消息。
 
-任意自定义消息都必须在 Agent 环境中安装相应 ROS typesupport，`GenericSubscription` 才能创建；缺少 typesupport 时订阅失败并返回明确错误。typesupport 已安装但没有内建字段映射时，Agent 正常转发原始 CDR，字段集合为空，不能伪造解析结果。
+常用消息先走编译期映射，保留 `m`、`rad/s` 等单位以及 JointState 按关节名展开的语义。其他消息按类型名分别加载 `rosidl_typesupport_cpp` 与 `rosidl_typesupport_introspection_cpp` 动态库：前者把 CDR 反序列化为 C++ 消息对象，后者提供成员名称、类型、偏移、数组访问器与嵌套消息描述。动态库在缓存条目生命周期内保持加载，消息对象严格调用 introspection 的初始化与清理函数。
 
-常见带 `Header` 的消息使用 `header.stamp` 作为 source timestamp；stamp 为零或消息没有 Header 时，由服务端回退到 Agent 收到 ROS 回调的时间。结构化反序列化失败会清空字段并记录告警，但已经复制的原始 CDR 仍继续转发。
+通用路径支持浮点、可安全转换为 `double` 的整数、布尔、窄/宽字符串、嵌套消息、定长数组、bounded/unbounded sequence，路径采用 `poses[1].position.x` 形式。标准 `std_msgs/msg/Header` 的 `stamp` 继续作为 source timestamp。为避免单条传感器消息淹没曲线与协议，递归深度最多 32 层，每个数组最多 1024 项，每条样本最多 4096 个字段；UTF-8 文本遵守 v1 的 1 MiB 字符串上限。超限项、不能精确表示为 `double` 的 64 位整数或无法支持的成员会被跳过并产生限频告警，未经修改的原始 CDR 仍然发送。
+
+任意自定义消息都必须在 Agent 环境中安装普通 C++ typesupport，`GenericSubscription` 才能创建；缺少时订阅失败并返回明确错误。introspection typesupport 缺失、元数据异常或结构化反序列化失败时，字段集合清空且 Agent 记录告警，但已复制的原始 CDR 继续转发，不能伪造解析结果。
+
+`header.stamp` 为零或消息没有标准 Header 时，由服务端回退到 Agent 收到 ROS 回调的时间。
 
 ROS graph 可以报告同名 topic 的多个类型，目录会逐类型保留。Humble RMW 不支持同一个 Agent participant 同时为同名 topic 创建不同类型的 `GenericSubscription`；Agent 会在进入 RMW 前返回明确的订阅错误，并保留此前已经成功创建的订阅。取消订阅仍按 topic/type 精确匹配。
 
@@ -163,4 +167,4 @@ ROS graph 可以报告同名 topic 的多个类型，目录会逐类型保留。
 
 `lab_agent_tcp_server_tests` 在 Linux loopback socket 上覆盖连接、并发发送严格序号、目录、订阅/取消订阅、Ping/Pong、CRC 恢复、协议断线、清理回调和重连。
 
-ROS2 包内的 `lab_debug_agent_field_mapper_tests` 与 `lab_debug_agent_ros_integration_tests` 覆盖 Humble 序列化字段映射，以及真实 graph、reliable/best-effort QoS、GraphUpdates、原始 CDR、常见消息、未知映射类型、Header 时间戳、订阅生命周期、错误、断线清理、重连和 SIGINT。构建与运行步骤见 [`agent/ros2/lab_debug_agent/README.md`](../agent/ros2/lab_debug_agent/README.md)。
+ROS2 包内的 `lab_debug_agent_field_mapper_tests` 与 `lab_debug_agent_ros_integration_tests` 覆盖 Humble 序列化字段映射、运行时 Point/数组/嵌套消息 introspection、精度与资源边界，以及真实 graph、reliable/best-effort QoS、GraphUpdates、原始 CDR、Header 时间戳、订阅生命周期、错误、断线清理、重连和 SIGINT。构建与运行步骤见 [`agent/ros2/lab_debug_agent/README.md`](../agent/ros2/lab_debug_agent/README.md)。

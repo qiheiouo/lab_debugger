@@ -1,6 +1,7 @@
 #include "lab_debug_agent/field_mapper.hpp"
 
 #include <geometry_msgs/msg/point.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -9,6 +10,8 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/int64.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include <iostream>
@@ -38,6 +41,13 @@ const FieldValue& field(const MappedFields& mapped, const std::string& path) {
         if (value.path == path) return value;
     }
     throw std::runtime_error("field mapper: missing field " + path);
+}
+
+bool hasField(const MappedFields& mapped, const std::string& path) {
+    for (const auto& value : mapped.fields) {
+        if (value.path == path) return true;
+    }
+    return false;
 }
 
 double number(const MappedFields& mapped, const std::string& path) {
@@ -146,13 +156,79 @@ void testSensorAndOdometryTypes() {
             "Odometry nested pose and twist map exactly");
 }
 
-void testUnknownAndMalformedTypes() {
+void testGenericIntrospection() {
     geometry_msgs::msg::Point point;
     point.x = 8.0;
-    const auto unknown = lab_debug_agent::mapSerializedFields(
+    point.y = -2.5;
+    point.z = 0.125;
+    const auto mappedPoint = lab_debug_agent::mapSerializedFields(
         "geometry_msgs/msg/Point", serialize(point));
-    require(unknown.fields.empty() && unknown.warning.empty(),
-            "unmapped but valid message has no fabricated fields or warning");
+    require(mappedPoint.warning.empty() && mappedPoint.fields.size() == 3 &&
+                number(mappedPoint, "x") == 8.0 &&
+                number(mappedPoint, "y") == -2.5 &&
+                number(mappedPoint, "z") == 0.125,
+            "runtime introspection maps an otherwise unknown message");
+
+    std_msgs::msg::Float64MultiArray array;
+    array.layout.data_offset = 7;
+    array.data = {1.25, -4.5, 9.0};
+    const auto mappedArray = lab_debug_agent::mapSerializedFields(
+        "std_msgs/msg/Float64MultiArray", serialize(array));
+    require(mappedArray.warning.empty() &&
+                number(mappedArray, "layout.data_offset") == 7.0 &&
+                number(mappedArray, "data[0]") == 1.25 &&
+                number(mappedArray, "data[1]") == -4.5 &&
+                number(mappedArray, "data[2]") == 9.0,
+            "runtime introspection maps nested members and variable arrays");
+
+    array.data.resize(1025, 3.0);
+    const auto limitedArray = lab_debug_agent::mapSerializedFields(
+        "std_msgs/msg/Float64MultiArray", serialize(array));
+    require(hasField(limitedArray, "data[1023]") &&
+                !hasField(limitedArray, "data[1024]") &&
+                limitedArray.warning.find("limited to 1024 elements") !=
+                    std::string::npos,
+            "large arrays are bounded explicitly instead of overwhelming one sample");
+
+    geometry_msgs::msg::PoseArray poses;
+    poses.header.stamp.sec = 44;
+    poses.header.stamp.nanosec = 55;
+    poses.header.frame_id = "map";
+    poses.poses.resize(2);
+    poses.poses[1].position.y = 6.5;
+    poses.poses[1].orientation.w = 1.0;
+    const auto mappedPoses = lab_debug_agent::mapSerializedFields(
+        "geometry_msgs/msg/PoseArray", serialize(poses));
+    require(mappedPoses.sourceTimestamp == 44'000'000'055LL &&
+                number(mappedPoses, "poses[1].position.y") == 6.5 &&
+                number(mappedPoses, "poses[1].orientation.w") == 1.0,
+            "runtime introspection maps nested message arrays and standard Header time");
+
+    std_msgs::msg::Int64 exactInteger;
+    exactInteger.data = 9'007'199'254'740'992LL;
+    const auto mappedExactInteger = lab_debug_agent::mapSerializedFields(
+        "std_msgs/msg/Int64", serialize(exactInteger));
+    require(number(mappedExactInteger, "data") ==
+                static_cast<double>(exactInteger.data),
+            "largest exactly representable Int64 remains numeric");
+
+    exactInteger.data = 9'007'199'254'740'993LL;
+    const auto unsafeInteger = lab_debug_agent::mapSerializedFields(
+        "std_msgs/msg/Int64", serialize(exactInteger));
+    require(unsafeInteger.fields.empty() &&
+                unsafeInteger.warning.find("outside exact double range") !=
+                    std::string::npos,
+            "Int64 values that would lose precision are not fabricated");
+}
+
+void testMissingTypesupportAndMalformedData() {
+    geometry_msgs::msg::Point point;
+    const auto missing = lab_debug_agent::mapSerializedFields(
+        "missing_msgs/msg/Unavailable", serialize(point));
+    require(missing.fields.empty() &&
+                missing.warning.find("Structured field mapping failed") !=
+                    std::string::npos,
+            "missing runtime typesupport returns a clear warning");
 
     auto malformed = serialize(std_msgs::msg::Float64{});
     malformed.get_rcl_serialized_message().buffer_length = 1;
@@ -162,6 +238,15 @@ void testUnknownAndMalformedTypes() {
                 failed.warning.find("Structured field mapping failed") !=
                     std::string::npos,
             "deserialization failure clears fields and returns a clear warning");
+
+    auto malformedGeneric = serialize(point);
+    malformedGeneric.get_rcl_serialized_message().buffer_length = 4;
+    const auto genericFailure = lab_debug_agent::mapSerializedFields(
+        "geometry_msgs/msg/Point", malformedGeneric);
+    require(genericFailure.fields.empty() && genericFailure.sourceTimestamp == 0 &&
+                genericFailure.warning.find("Structured field mapping failed") !=
+                    std::string::npos,
+            "generic deserialization failure also preserves the raw-only fallback");
 }
 
 }  // namespace
@@ -171,7 +256,8 @@ int main() {
         testScalarTypes();
         testGeometryAndHeaderTimestamp();
         testSensorAndOdometryTypes();
-        testUnknownAndMalformedTypes();
+        testGenericIntrospection();
+        testMissingTypesupportAndMalformedData();
         std::cout << "All ROS field mapper tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

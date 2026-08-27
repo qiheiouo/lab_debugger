@@ -108,7 +108,7 @@ RosAgentNode::RosAgentNode() : rclcpp::Node("lab_debug_agent") {
 
     server_ = std::make_unique<AgentTcpServer>(
         TcpServerSettings{bindAddress, static_cast<std::uint16_t>(portValue)},
-        lab::core::agent::Hello{agentId, "0.1.0", defaultHostName(), agentCapabilities},
+        lab::core::agent::Hello{agentId, "0.9.0", defaultHostName(), agentCapabilities},
         std::move(callbacks));
     std::string error;
     if (!server_->start(&error)) throw std::runtime_error(error);

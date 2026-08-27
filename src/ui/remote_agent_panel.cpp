@@ -154,7 +154,7 @@ lab::adapters::remote_agent::RemoteAgentSettings RemoteAgentPanel::settings() co
     return {host_->text().trimmed().toStdString(),
             static_cast<std::uint16_t>(port_->value()),
             clientName_->text().trimmed().toStdString(),
-            "0.8.0",
+            "0.9.0",
             autoReconnect_->isChecked()};
 }
 

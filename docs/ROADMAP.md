@@ -82,18 +82,19 @@
 - Ubuntu/ROS2 Humble ament 包、POSIX TCP 单客户端服务端与 graph revision 推送；
 - `GenericSubscription` 任意类型 CDR 转发；
 - std_msgs、Twist/Pose、Imu/JointState、Odometry 常见字段映射。
+- 未内置消息的运行时 C++/introspection typesupport 加载、递归字段展开、标准 Header 时间戳与原始 CDR 安全回退；
 - Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 构建、launch 与 SIGINT 验证；
 - 真实 ROS graph、reliable/best-effort QoS、GraphUpdates、CDR、字段映射、订阅清理和重连自动联调；
 - Linux loopback TCP 并发严格序号、CRC 恢复与协议错误自动测试。
 
 下一批：
 
-- 通用 ROS introspection 字段树与类型支持能力探测；
+- Topic 目录中的结构化类型支持能力标记与失败原因展示；
 - 认证与 TLS 部署方式。
 
 后续：
 
-- Phase 7：generic ROS introspection 与 rosbag2；
+- Phase 7：rosbag2 导入、索引与回放；
 - Phase 8：派生字段、滤波、marker、告警、多源同步分析。
 
 每阶段必须先补数据格式、线程与错误路径测试，再扩 UI。性能验证重点是 921600 baud、1000 Hz 数值流、数小时记录和 UI 暂停期间的数据完整性。

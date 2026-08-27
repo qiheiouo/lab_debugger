@@ -662,7 +662,7 @@ void runIntegration(
     require(waitFor([&] { return odometryPublisher->get_subscription_count() == 1; }),
             "Odometry GenericSubscription is created");
     require(waitFor([&] { return pointPublisher->get_subscription_count() == 1; }),
-            "unmapped Point GenericSubscription is created");
+            "runtime-introspected Point GenericSubscription is created");
     require(waitFor([&] { return multiFloatPublisher->get_subscription_count() == 1; }),
             "duplicate request ID-independent Float64 subscribe remains idempotent");
     progress("all mapped and raw subscriptions matched");
@@ -776,12 +776,16 @@ void runIntegration(
 
     geometry_msgs::msg::Point pointMessage;
     pointMessage.x = 99.0;
+    pointMessage.y = -5.5;
+    pointMessage.z = 0.25;
     const auto [pointFrame, pointSample] = publishAndReceive(
         client, pointPublisher, pointMessage, topic("raw_point"));
     static_cast<void>(pointFrame);
-    require(pointSample.fields.empty(),
-            "unmapped Point forwards raw CDR without fabricated structured fields");
-    progress("all real ROS sample mappings and raw CDR verified");
+    require(number(pointSample, "x") == 99.0 &&
+                number(pointSample, "y") == -5.5 &&
+                number(pointSample, "z") == 0.25,
+            "Point is structured through runtime introspection while retaining raw CDR");
+    progress("all real ROS sample mappings, generic introspection, and raw CDR verified");
 
     client.send(
         MessageType::Unsubscribe,

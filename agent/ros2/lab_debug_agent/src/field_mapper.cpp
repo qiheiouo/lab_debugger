@@ -1,5 +1,7 @@
 #include "lab_debug_agent/field_mapper.hpp"
 
+#include "lab_debug_agent/generic_field_mapper.hpp"
+
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
@@ -90,6 +92,7 @@ MappedFields mapSerializedFields(
         return result;
     }
     try {
+        bool builtInMapping = true;
         if (type == "std_msgs/msg/Float64") {
             result.fields.push_back({"data", "", deserialize<std_msgs::msg::Float64>(serialized).data});
         } else if (type == "std_msgs/msg/Float32") {
@@ -152,7 +155,10 @@ MappedFields mapSerializedFields(
             result.fields.push_back({"child_frame_id", "", message.child_frame_id});
             pose(result.fields, "pose.pose", message.pose.pose);
             twist(result.fields, "twist.twist", message.twist.twist);
+        } else {
+            builtInMapping = false;
         }
+        if (!builtInMapping) return mapGenericSerializedFields(type, serialized);
     } catch (const std::exception& exception) {
         if (rcutils_error_is_set()) rcutils_reset_error();
         result.fields.clear();

@@ -88,9 +88,9 @@ Windows remote mode:
        -> IDataSource
 ```
 
-远程帧必须携带 topic、message type、源时间、Agent 接收时间、序号与负载。当前 Agent 已使用 GenericSubscription 转发任意已安装 typesupport 的原始 CDR，并为常用消息提供结构化字段；通用类型描述与 CDR introspection 仍是后续阶段。ROS2 构建通过独立 ament 包启用，不向核心传播头文件或链接依赖。
+远程帧必须携带 topic、message type、源时间、Agent 接收时间、序号与负载。当前 Agent 使用 GenericSubscription 转发任意已安装 typesupport 的原始 CDR；常用消息先走带单位和专用语义的编译期映射，其余消息由运行时 C++ typesupport 反序列化，再根据 introspection metadata 递归展开字段。ROS2 构建通过独立 ament 包启用，不向核心传播头文件或链接依赖。
 
-Remote Agent v1 帧和负载编解码位于纯 C++ `lab_core`。Windows `RemoteAgentSource` 在独立 Qt 网络线程内执行客户端状态机、指数退避重连、同端点订阅恢复和 Ping/Pong 时钟测量；纯核心 `ClockSyncEstimator` 在最近 16 个样本中选择最低 RTT 样本，给出 Agent 相对客户端的时钟偏移和不确定度。同一核心中的 `ServerSession` 执行 Agent 侧能力协商、客户端命令、统一序号和错误状态机。Ubuntu ament 包把 POSIX TCP 传输、ROS graph、`GenericSubscription` 与常见字段映射组合在服务端状态机外部。SampleBatch 的原始 CDR 进入 Raw Recorder，数值与布尔字段直接进入 TimeSeries 和 Session；时钟质量进入 Session 事件。详细格式见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。Linux 包已经在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下完成自动构建和真实 ROS/DDS/TCP 联调。
+Remote Agent v1 帧和负载编解码位于纯 C++ `lab_core`。Windows `RemoteAgentSource` 在独立 Qt 网络线程内执行客户端状态机、指数退避重连、同端点订阅恢复和 Ping/Pong 时钟测量；纯核心 `ClockSyncEstimator` 在最近 16 个样本中选择最低 RTT 样本，给出 Agent 相对客户端的时钟偏移和不确定度。同一核心中的 `ServerSession` 执行 Agent 侧能力协商、客户端命令、统一序号和错误状态机。Ubuntu ament 包把 POSIX TCP 传输、ROS graph、`GenericSubscription`、常见消息语义映射与通用 introspection 组合在服务端状态机外部。SampleBatch 的原始 CDR 进入 Raw Recorder，数值与布尔字段直接进入 TimeSeries 和 Session；时钟质量进入 Session 事件。详细格式见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。Linux 包此前已经在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下完成自动构建和真实 ROS/DDS/TCP 联调。
 
 ## 5. 协议引擎边界
 
@@ -111,3 +111,4 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 - TCP 当前服务一个活动客户端；UDP 远端目前要求数字 IPv4/IPv6 地址。自动重连、TLS、组播和多客户端管理留到后续。
 - 多机时钟偏移采用单次 Ping/Pong 的对称链路近似；界面显示的 ±RTT/2 是误差上界提示，不能替代 NTP/PTP，也不会修改任一主机的系统时钟。
 - Remote Agent v1 暂无认证或加密，只允许受信网络/VPN/SSH 隧道；TLS 与访问控制留在 Agent 联调阶段。
+- 通用 ROS 字段展开限制为 32 层、每个数组 1024 项、每条样本 4096 个字段；达到边界时保留已验证字段、记录告警并继续发送原始 CDR。

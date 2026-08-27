@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(lab_debug_agent VERSION 0.1.0 LANGUAGES CXX)
+project(lab_debug_agent VERSION 0.9.0 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 20)
@@ -9,7 +9,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcpputils REQUIRED)
 find_package(rcutils REQUIRED)
+find_package(rosidl_typesupport_cpp REQUIRED)
+find_package(rosidl_typesupport_introspection_cpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -28,6 +31,7 @@ target_compile_features(lab_agent_protocol_core PUBLIC cxx_std_20)
 
 add_executable(lab_debug_agent_node
   src/field_mapper.cpp
+  src/generic_field_mapper.cpp
   src/main.cpp
   src/ros_agent_node.cpp
   src/tcp_server.cpp
@@ -36,7 +40,10 @@ target_include_directories(lab_debug_agent_node PRIVATE include)
 target_link_libraries(lab_debug_agent_node lab_agent_protocol_core)
 ament_target_dependencies(lab_debug_agent_node
   rclcpp
+  rcpputils
   rcutils
+  rosidl_typesupport_cpp
+  rosidl_typesupport_introspection_cpp
   std_msgs
   geometry_msgs
   sensor_msgs
@@ -49,12 +56,16 @@ if(BUILD_TESTING)
   add_executable(lab_debug_agent_field_mapper_tests
     test/test_field_mapper.cpp
     src/field_mapper.cpp
+    src/generic_field_mapper.cpp
   )
   target_include_directories(lab_debug_agent_field_mapper_tests PRIVATE include)
   target_link_libraries(lab_debug_agent_field_mapper_tests lab_agent_protocol_core)
   ament_target_dependencies(lab_debug_agent_field_mapper_tests
     rclcpp
+    rcpputils
     rcutils
+    rosidl_typesupport_cpp
+    rosidl_typesupport_introspection_cpp
     std_msgs
     geometry_msgs
     sensor_msgs
