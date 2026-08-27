@@ -90,7 +90,7 @@ Windows remote mode:
 
 远程帧必须携带 topic、message type、源时间、Agent 接收时间、序号与负载。第一版 Agent 先支持常用消息的结构化字段；之后再增加 GenericSubscription、类型描述与 CDR introspection。ROS2 构建通过独立 CMake 选项和目标启用，不向核心传播头文件或链接依赖。
 
-Remote Agent v1 帧和负载编解码位于纯 C++ `lab_core`。Windows `RemoteAgentSource` 在独立 Qt 网络线程内执行客户端状态机；同一核心中的 `ServerSession` 执行 Agent 侧能力协商、客户端命令、统一序号和错误状态机。Ubuntu ament 包把 POSIX TCP 传输、ROS graph、`GenericSubscription` 与常见字段映射组合在服务端状态机外部。SampleBatch 的原始 CDR 进入 Raw Recorder，数值与布尔字段直接进入 TimeSeries 和 Session。详细格式见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。当前开发机没有 ROS2，因此 Linux 包需要在 Ubuntu 22.04 + Humble 上完成首次实机构建验证。
+Remote Agent v1 帧和负载编解码位于纯 C++ `lab_core`。Windows `RemoteAgentSource` 在独立 Qt 网络线程内执行客户端状态机；同一核心中的 `ServerSession` 执行 Agent 侧能力协商、客户端命令、统一序号和错误状态机。Ubuntu ament 包把 POSIX TCP 传输、ROS graph、`GenericSubscription` 与常见字段映射组合在服务端状态机外部。SampleBatch 的原始 CDR 进入 Raw Recorder，数值与布尔字段直接进入 TimeSeries 和 Session。详细格式见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。Linux 包已经在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下完成自动构建和真实 ROS/DDS/TCP 联调。
 
 ## 5. 协议引擎边界
 

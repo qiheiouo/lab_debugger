@@ -86,11 +86,15 @@ void AgentTcpServer::stop() {
     closeListener();
     closeClient();
     if (thread_.joinable()) thread_.join();
-    session_.reset();
+    {
+        std::scoped_lock lock(sessionIoMutex_);
+        session_.reset();
+    }
 }
 
 bool AgentTcpServer::publishCatalog(
     const lab::core::agent::TopicCatalog& catalog) {
+    std::scoped_lock lock(sessionIoMutex_);
     try {
         const auto bytes = session_.makeTopicCatalog(catalog);
         return bytes && sendEncoded(*bytes);
@@ -104,6 +108,7 @@ bool AgentTcpServer::publishSample(
     const lab::core::agent::SampleBatch& sample,
     lab::core::Timestamp sourceTimestamp,
     lab::core::Timestamp agentReceiveTimestamp) {
+    std::scoped_lock lock(sessionIoMutex_);
     try {
         const auto bytes = session_.makeSample(
             sample, sourceTimestamp, agentReceiveTimestamp);
@@ -115,6 +120,7 @@ bool AgentTcpServer::publishSample(
 }
 
 bool AgentTcpServer::publishError(const lab::core::agent::AgentError& error) {
+    std::scoped_lock lock(sessionIoMutex_);
     try {
         const auto bytes = session_.makeError(error);
         return bytes && sendEncoded(*bytes);
@@ -125,6 +131,7 @@ bool AgentTcpServer::publishError(const lab::core::agent::AgentError& error) {
 }
 
 bool AgentTcpServer::publishPing(std::uint64_t nonce) {
+    std::scoped_lock lock(sessionIoMutex_);
     try {
         const auto bytes = session_.makePing(nonce);
         return bytes && sendEncoded(*bytes);
@@ -164,14 +171,20 @@ void AgentTcpServer::run(std::stop_token stopToken) {
              std::to_string(ntohs(peerAddress.sin_port)));
         serveClient(accepted, stopToken);
         closeClient();
-        session_.reset();
+        {
+            std::scoped_lock lock(sessionIoMutex_);
+            session_.reset();
+        }
         if (callbacks_.onClientDisconnected) callbacks_.onClientDisconnected();
         info("Client disconnected");
     }
 }
 
 void AgentTcpServer::serveClient(int client, std::stop_token stopToken) {
-    if (!sendEncoded(session_.start())) return;
+    {
+        std::scoped_lock lock(sessionIoMutex_);
+        if (!sendEncoded(session_.start())) return;
+    }
     std::array<std::uint8_t, 64U * 1024U> buffer{};
     while (!stopToken.stop_requested() && client_.load() == client) {
         const auto received = ::recv(client, buffer.data(), buffer.size(), 0);
@@ -181,13 +194,17 @@ void AgentTcpServer::serveClient(int client, std::stop_token stopToken) {
             warning(socketError("recv"));
             return;
         }
-        const auto result = session_.consume(
-            std::span(buffer.data(), static_cast<std::size_t>(received)));
+        lab::core::agent::ServerConsumeResult result;
+        {
+            std::scoped_lock lock(sessionIoMutex_);
+            result = session_.consume(
+                std::span(buffer.data(), static_cast<std::size_t>(received)));
+            for (const auto& bytes : result.outboundFrames) {
+                if (!sendEncoded(bytes)) return;
+            }
+        }
         for (const auto& issue : result.decodeIssues) {
             warning("Protocol stream issue: " + issue.message);
-        }
-        for (const auto& bytes : result.outboundFrames) {
-            if (!sendEncoded(bytes)) return;
         }
         for (const auto& action : result.actions) processAction(action);
         if (result.fatalError) {

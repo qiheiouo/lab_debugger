@@ -2,9 +2,22 @@
 
 #include "lab/core/timestamp.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace lab::core::agent {
+namespace {
+
+constexpr std::uint32_t sampleCapabilityMask =
+    capabilityMask(Capability::SerializedMessages) |
+    capabilityMask(Capability::NumericFields) |
+    capabilityMask(Capability::TextFields);
+
+bool hasCapability(std::uint32_t capabilities, Capability capability) {
+    return (capabilities & capabilityMask(capability)) != 0U;
+}
+
+}  // namespace
 
 ServerSession::ServerSession(Hello identity) : identity_(std::move(identity)) {}
 
@@ -56,6 +69,15 @@ ServerConsumeResult ServerSession::consume(std::span<const std::uint8_t> bytes) 
                 failLocked(result, "Client requested capabilities not offered by Agent");
                 break;
             }
+            if (hasCapability(
+                    ack->requestedCapabilities, Capability::GraphUpdates) &&
+                !hasCapability(
+                    ack->requestedCapabilities, Capability::TopicDiscovery)) {
+                failLocked(
+                    result,
+                    "Graph updates require the topic discovery capability");
+                break;
+            }
             clientIdentity_ = *ack;
             negotiatedCapabilities_ = ack->requestedCapabilities;
             state_ = ServerSessionState::Ready;
@@ -64,13 +86,24 @@ ServerConsumeResult ServerSession::consume(std::span<const std::uint8_t> bytes) 
 
         switch (frame.type) {
         case MessageType::TopicCatalogRequest:
-            if (!frame.payload.empty()) {
+            if (!hasCapability(
+                    negotiatedCapabilities_, Capability::TopicDiscovery)) {
+                failLocked(
+                    result,
+                    "Client requested a topic catalog without negotiating topic discovery");
+            } else if (!frame.payload.empty()) {
                 failLocked(result, "Topic catalog request payload must be empty");
             } else {
                 result.actions.emplace_back(CatalogRequestAction{});
             }
             break;
         case MessageType::Subscribe: {
+            if ((negotiatedCapabilities_ & sampleCapabilityMask) == 0U) {
+                failLocked(
+                    result,
+                    "Client subscribed without negotiating any sample capability");
+                break;
+            }
             const auto request = decodeSubscriptionRequest(frame.payload, &error);
             if (!request) {
                 failLocked(result, "Malformed subscribe payload: " + error);
@@ -80,6 +113,12 @@ ServerConsumeResult ServerSession::consume(std::span<const std::uint8_t> bytes) 
             break;
         }
         case MessageType::Unsubscribe: {
+            if ((negotiatedCapabilities_ & sampleCapabilityMask) == 0U) {
+                failLocked(
+                    result,
+                    "Client unsubscribed without negotiating any sample capability");
+                break;
+            }
             const auto request = decodeSubscriptionRequest(frame.payload, &error);
             if (!request) {
                 failLocked(result, "Malformed unsubscribe payload: " + error);
@@ -141,7 +180,10 @@ void ServerSession::reset() {
 std::optional<std::vector<std::uint8_t>> ServerSession::makeTopicCatalog(
     const TopicCatalog& catalog) {
     std::scoped_lock lock(mutex_);
-    if (state_ != ServerSessionState::Ready) return std::nullopt;
+    if (state_ != ServerSessionState::Ready ||
+        !hasCapability(negotiatedCapabilities_, Capability::TopicDiscovery)) {
+        return std::nullopt;
+    }
     const auto now = nowTimestampNs();
     return encodeReadyLocked(
         MessageType::TopicCatalog, encodeTopicCatalog(catalog), now, now);
@@ -152,12 +194,32 @@ std::optional<std::vector<std::uint8_t>> ServerSession::makeSample(
     Timestamp sourceTimestamp,
     Timestamp agentReceiveTimestamp) {
     std::scoped_lock lock(mutex_);
-    if (state_ != ServerSessionState::Ready) return std::nullopt;
+    if (state_ != ServerSessionState::Ready ||
+        (negotiatedCapabilities_ & sampleCapabilityMask) == 0U) {
+        return std::nullopt;
+    }
+    auto filtered = sample;
+    if (!hasCapability(
+            negotiatedCapabilities_, Capability::SerializedMessages)) {
+        filtered.serializedData.clear();
+    }
+    const auto numericFields = hasCapability(
+        negotiatedCapabilities_, Capability::NumericFields);
+    const auto textFields = hasCapability(
+        negotiatedCapabilities_, Capability::TextFields);
+    std::erase_if(filtered.fields, [&](const FieldValue& field) {
+        return std::holds_alternative<std::string>(field.value)
+                   ? !textFields
+                   : !numericFields;
+    });
+    if (filtered.serializedData.empty() && filtered.fields.empty()) {
+        return std::nullopt;
+    }
     if (agentReceiveTimestamp == 0) agentReceiveTimestamp = nowTimestampNs();
     if (sourceTimestamp == 0) sourceTimestamp = agentReceiveTimestamp;
     return encodeReadyLocked(
         MessageType::SampleBatch,
-        encodeSampleBatch(sample),
+        encodeSampleBatch(filtered),
         sourceTimestamp,
         agentReceiveTimestamp);
 }

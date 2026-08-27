@@ -20,6 +20,11 @@ public:
     ~RosAgentNode() override;
 
 private:
+    struct ActiveSubscription {
+        lab::core::agent::SubscriptionRequest request;
+        std::shared_ptr<rclcpp::GenericSubscription> subscription;
+    };
+
     [[nodiscard]] lab::core::agent::TopicCatalog buildCatalog();
     [[nodiscard]] std::optional<std::string> subscribeTopic(
         const lab::core::agent::SubscriptionRequest& request);
@@ -35,11 +40,11 @@ private:
 
     std::unique_ptr<AgentTcpServer> server_;
     std::mutex subscriptionsMutex_;
-    std::unordered_map<std::string, std::shared_ptr<rclcpp::GenericSubscription>>
-        subscriptions_;
+    std::unordered_map<std::string, ActiveSubscription> subscriptions_;
     std::mutex catalogMutex_;
     std::string catalogSignature_;
     std::uint64_t catalogRevision_{};
+    bool catalogInitialized_{};
     std::atomic_uint64_t lastSentRevision_{};
     std::atomic_uint64_t heartbeatNonce_{};
     rclcpp::TimerBase::SharedPtr graphTimer_;

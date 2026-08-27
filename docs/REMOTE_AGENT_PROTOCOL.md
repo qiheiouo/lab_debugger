@@ -12,7 +12,7 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 
 协议核心位于 `lab_core`，不依赖 Qt、ROS2 或操作系统 API。这样 Windows 主程序不需要安装 ROS2，Linux Agent 也能复用同一套编解码器和测试向量。
 
-当前已完成协议核心、Windows `RemoteAgentSource`、Topic UI、Session/曲线接线，以及 Ubuntu/ROS2 Humble Agent 源码。共享服务端状态机已自动测试；由于当前开发机没有 WSL/ROS2，ament 包仍需在 Ubuntu 22.04 + Humble 上完成首次实机构建和联调。
+当前已完成协议核心、Windows `RemoteAgentSource`、Topic UI、Session/曲线接线，以及 Ubuntu/ROS2 Humble Agent。共享状态机、Linux TCP 服务端和真实 ROS/DDS/TCP 链路均已有自动测试；ament 包已在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下验证。
 
 ## 1. TCP 帧
 
@@ -61,7 +61,9 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 - reliability：unknown / best effort / reliable；
 - durability：unknown / volatile / transient local。
 
-Linux Agent 使用 ROS2 Humble 的 `get_topic_names_and_types()` 建立目录，并结合发布端 endpoint QoS 生成可靠性与持久性提示。订阅请求包含独立 `requestId`，响应失败时 `Error.context` 包含 topic。队列深度范围固定为 1..1000000。
+Linux Agent 使用 ROS2 Humble 的 `get_topic_names_and_types()` 建立目录，并按 topic/type 分别汇总发布端 endpoint QoS，生成可靠性与持久性提示。首次目录（包括空目录）的 revision 从 1 开始；topic、type 或汇总 QoS 变化时递增。
+
+订阅请求包含独立 `requestId`，用于标识控制请求，不作为活动订阅的唯一键。活动订阅按 `topic + type` 区分：相同 QoS 的重复订阅是幂等操作，更改 QoS/queueDepth 会替换该 topic/type 的订阅，取消订阅只移除完全匹配的 topic/type，不会误删同名的其他类型。响应失败时 `Error.context` 包含 topic。队列深度范围固定为 1..1000000。
 
 ## 4. SampleBatch
 
@@ -88,6 +90,8 @@ orientation.w
 
 保留原始 CDR 是为了未来修复 introspection 或字段映射后能够重新分析，而不是只相信当时的扁平化结果。
 
+Agent 只发送客户端已协商的内容：`SerializedMessages` 控制原始 CDR，`NumericFields` 控制数值和布尔字段，`TextFields` 控制字符串字段。没有协商 `TopicDiscovery` 时不发送目录；`GraphUpdates` 必须与 `TopicDiscovery` 一起协商。过滤后没有任何内容的样本不会发送。
+
 ## 5. 连接状态机
 
 推荐顺序：
@@ -103,13 +107,17 @@ TCP connected
   ↔ Ping / Pong
 ```
 
-尚未完成 Hello/HelloAck 时不应接受订阅命令。sequence 必须按连接递增；重连后可从 0 或 1 重新开始。客户端用 `agentId + topic` 构造稳定来源标识，不能只用 TCP 端点区分字段。
+尚未完成 Hello/HelloAck 时不应接受订阅命令。客户端不得请求 Agent 未提供的能力，也不得在未协商任何样本能力时订阅。sequence 必须按连接递增；重连后可从 0 或 1 重新开始。客户端用 `agentId + topic` 构造稳定来源标识，不能只用 TCP 端点区分字段。
 
 ## 6. ROS2 Humble 映射
 
 第一阶段 Agent 使用 `rclcpp::NodeGraphInterface::get_topic_names_and_types()` 做发现，并针对常用消息类型做字段映射。对于运行时未知类型，Humble 的 `rclcpp::GenericSubscription` 可以接收 `rclcpp::SerializedMessage`，所以原始 CDR 转发不需要在编译期知道所有自定义消息。
 
-任意自定义消息的字段树仍需要 ROS introspection typesupport。若目标机器缺少相应 typesupport，Agent 仍可转发原始 CDR 并报告“无结构化字段”，不能伪造解析结果。
+任意自定义消息都必须在 Agent 环境中安装相应 ROS typesupport，`GenericSubscription` 才能创建；缺少 typesupport 时订阅失败并返回明确错误。typesupport 已安装但没有内建字段映射时，Agent 正常转发原始 CDR，字段集合为空，不能伪造解析结果。
+
+常见带 `Header` 的消息使用 `header.stamp` 作为 source timestamp；stamp 为零或消息没有 Header 时，由服务端回退到 Agent 收到 ROS 回调的时间。结构化反序列化失败会清空字段并记录告警，但已经复制的原始 CDR 仍继续转发。
+
+ROS graph 可以报告同名 topic 的多个类型，目录会逐类型保留。Humble RMW 不支持同一个 Agent participant 同时为同名 topic 创建不同类型的 `GenericSubscription`；Agent 会在进入 RMW 前返回明确的订阅错误，并保留此前已经成功创建的订阅。取消订阅仍按 topic/type 精确匹配。
 
 ## 7. 安全与当前边界
 
@@ -131,4 +139,8 @@ TCP connected
 
 `lab_remote_agent_tests` 使用本机 TCP 模拟 Agent，覆盖分片 Hello、能力协商、初始/手动目录请求、CRC 损坏恢复、TopicCatalog 与 SampleBatch 粘包、原始 CDR、数值/布尔字段、订阅/取消订阅、Ping/Pong，以及重复序号导致的协议断线。
 
-`lab_agent_server_session_tests` 覆盖 Agent 侧 Hello/HelloAck、能力拒绝、客户端命令动作化、服务端统一序号、时间戳、心跳、CRC 恢复、结构化错误和重复客户端序号。ROS2 包的构建与实机联调步骤见 [`agent/ros2/lab_debug_agent/README.md`](../agent/ros2/lab_debug_agent/README.md)。
+`lab_agent_server_session_tests` 覆盖 Agent 侧 Hello/HelloAck、能力拒绝、客户端命令动作化、服务端统一序号、时间戳、心跳、CRC 恢复、结构化错误和重复客户端序号。
+
+`lab_agent_tcp_server_tests` 在 Linux loopback socket 上覆盖连接、并发发送严格序号、目录、订阅/取消订阅、Ping/Pong、CRC 恢复、协议断线、清理回调和重连。
+
+ROS2 包内的 `lab_debug_agent_field_mapper_tests` 与 `lab_debug_agent_ros_integration_tests` 覆盖 Humble 序列化字段映射，以及真实 graph、reliable/best-effort QoS、GraphUpdates、原始 CDR、常见消息、未知映射类型、Header 时间戳、订阅生命周期、错误、断线清理、重连和 SIGINT。构建与运行步骤见 [`agent/ros2/lab_debug_agent/README.md`](../agent/ros2/lab_debug_agent/README.md)。

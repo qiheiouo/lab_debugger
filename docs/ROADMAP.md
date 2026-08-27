@@ -80,10 +80,12 @@
 - Ubuntu/ROS2 Humble ament 包、POSIX TCP 单客户端服务端与 graph revision 推送；
 - `GenericSubscription` 任意类型 CDR 转发；
 - std_msgs、Twist/Pose、Imu/JointState、Odometry 常见字段映射。
+- Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 构建、launch 与 SIGINT 验证；
+- 真实 ROS graph、reliable/best-effort QoS、GraphUpdates、CDR、字段映射、订阅清理和重连自动联调；
+- Linux loopback TCP 并发严格序号、CRC 恢复与协议错误自动测试。
 
 下一批：
 
-- Ubuntu 22.04 + Humble 首次实机构建、真实 graph/CDR 联调与兼容性修正；
 - 通用 ROS introspection 字段树与类型支持能力探测；
 - Agent 心跳、重连、时钟偏移估计、认证与 TLS 部署方式。
 

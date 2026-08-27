@@ -44,19 +44,29 @@ Hello agentHello() {
                 capabilityMask(Capability::TextFields)};
 }
 
-void finishHandshake(ServerSession& session, std::uint64_t sequence = 0) {
+void finishHandshakeWithCapabilities(
+    ServerSession& session,
+    std::uint32_t capabilities,
+    std::uint64_t sequence = 0) {
     const HelloAck ack{
         "Lab Debugger",
         "0.5.0",
-        capabilityMask(Capability::TopicDiscovery) |
-            capabilityMask(Capability::SerializedMessages) |
-            capabilityMask(Capability::NumericFields)};
+        capabilities};
     const auto result = session.consume(
         encodeFrame(clientFrame(MessageType::HelloAck, sequence, encodeHelloAck(ack))));
     require(!result.fatalError && session.state() == ServerSessionState::Ready,
             "valid hello ack completes server handshake");
     require(session.clientIdentity() == ack,
             "server retains client identity");
+}
+
+void finishHandshake(ServerSession& session, std::uint64_t sequence = 0) {
+    finishHandshakeWithCapabilities(
+        session,
+        capabilityMask(Capability::TopicDiscovery) |
+            capabilityMask(Capability::SerializedMessages) |
+            capabilityMask(Capability::NumericFields),
+        sequence);
 }
 
 void testStartAndFragmentedHandshake() {
@@ -184,6 +194,74 @@ void testOutputRequiresReadyState() {
             "awaiting session rejects sample output");
 }
 
+void testNegotiatedCapabilitiesAreEnforced() {
+    const SampleBatch sample{
+        "/mixed",
+        "custom_msgs/msg/Mixed",
+        {1, 2, 3, 4},
+        {{"number", "", 2.5},
+         {"valid", "", true},
+         {"label", "", std::string("ready")}}};
+    std::string error;
+
+    ServerSession serializedOnly(agentHello());
+    static_cast<void>(serializedOnly.start());
+    finishHandshakeWithCapabilities(
+        serializedOnly, capabilityMask(Capability::SerializedMessages));
+    require(!serializedOnly.makeTopicCatalog({1, {}}),
+            "topic catalog is not sent without topic discovery negotiation");
+    const auto rawFrame = serializedOnly.makeSample(sample, 0, 456);
+    require(rawFrame.has_value(), "serialized-only client receives raw samples");
+    const auto rawFrames = decodeAll({*rawFrame});
+    const auto rawSample = decodeSampleBatch(rawFrames[0].payload, &error);
+    require(rawSample && rawSample->serializedData == sample.serializedData &&
+                rawSample->fields.empty(),
+            "serialized-only sample strips all structured fields");
+    require(rawFrames[0].sourceTimestamp == 456 &&
+                rawFrames[0].agentReceiveTimestamp == 456,
+            "zero source timestamp falls back to Agent receive time");
+
+    ServerSession numericOnly(agentHello());
+    static_cast<void>(numericOnly.start());
+    finishHandshakeWithCapabilities(
+        numericOnly, capabilityMask(Capability::NumericFields));
+    const auto numericFrame = numericOnly.makeSample(sample, 100, 200);
+    require(numericFrame.has_value(), "numeric-only client receives mapped samples");
+    const auto numericFrames = decodeAll({*numericFrame});
+    const auto numericSample = decodeSampleBatch(numericFrames[0].payload, &error);
+    require(numericSample && numericSample->serializedData.empty() &&
+                numericSample->fields.size() == 2 &&
+                std::holds_alternative<double>(numericSample->fields[0].value) &&
+                std::holds_alternative<bool>(numericSample->fields[1].value),
+            "numeric-only sample strips raw CDR and text fields");
+
+    ServerSession discoveryOnly(agentHello());
+    static_cast<void>(discoveryOnly.start());
+    finishHandshakeWithCapabilities(
+        discoveryOnly, capabilityMask(Capability::TopicDiscovery));
+    const SubscriptionRequest request{
+        9, "/x", "std_msgs/msg/Float64", Reliability::Reliable, 10};
+    const auto invalidSubscribe = discoveryOnly.consume(encodeFrame(
+        clientFrame(MessageType::Subscribe, 1, encodeSubscriptionRequest(request))));
+    require(invalidSubscribe.fatalError &&
+                invalidSubscribe.fatalError->find("sample capability") !=
+                    std::string::npos,
+            "subscribe is rejected when no sample capability was negotiated");
+
+    auto graphIdentity = agentHello();
+    graphIdentity.capabilities |= capabilityMask(Capability::GraphUpdates);
+    ServerSession invalidGraphDependency(graphIdentity);
+    static_cast<void>(invalidGraphDependency.start());
+    const HelloAck graphOnly{
+        "Lab Debugger", "0.5.0", capabilityMask(Capability::GraphUpdates)};
+    const auto invalidGraphAck = invalidGraphDependency.consume(encodeFrame(
+        clientFrame(MessageType::HelloAck, 0, encodeHelloAck(graphOnly))));
+    require(invalidGraphAck.fatalError &&
+                invalidGraphAck.fatalError->find("topic discovery") !=
+                    std::string::npos,
+            "graph updates cannot be negotiated without topic discovery");
+}
+
 }  // namespace
 
 int main() {
@@ -192,6 +270,7 @@ int main() {
         testActionsHeartbeatAndServerMessages();
         testProtocolFailuresAndRecoveryIssues();
         testOutputRequiresReadyState();
+        testNegotiatedCapabilitiesAreEnforced();
         std::cout << "All Remote Agent server session tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

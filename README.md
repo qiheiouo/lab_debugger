@@ -19,7 +19,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 独立 TCP 线程的 `RemoteAgentSource`、5 秒握手超时、严格序号检查与 Ping/Pong；
 - ROS Agent 身份、Topic 目录、订阅/取消订阅 UI，以及 CDR/结构化字段双路记录；
 - Remote Agent 本机模拟服务器回环测试；
-- Ubuntu/ROS2 Humble `lab_debug_agent` ament 包、单客户端 TCP 服务端和 graph 更新；
+- 已在 Ubuntu 22.04/ROS2 Humble + GCC 11 验证的 `lab_debug_agent` ament 包、单客户端 TCP 服务端和 graph 更新；
 - 基于 `GenericSubscription` 的任意类型 CDR 转发，以及常见消息的结构化字段映射；
 - 可测试的 `MockDataSource` 与核心测试。
 
@@ -79,4 +79,4 @@ cmake --install build --config Release --prefix dist/LabDebugger
 
 左侧切换到“ROS Agent”页，填写 Linux Agent 地址和端口后连接。客户端必须在 5 秒内收到合法 `Hello`，随后才会显示为就绪并自动请求 Topic 目录。选择 Topic、可靠性与队列深度后可订阅或取消订阅；收到的原始 CDR 进入终端和 Session 原始流，数值及布尔字段直接进入实时曲线和 `values.csv`。
 
-Linux/ROS2 Humble Agent 位于 [`agent/ros2/lab_debug_agent`](agent/ros2/lab_debug_agent/README.md)。当前开发机没有 WSL/ROS2，因此共享协议与服务端状态机已经完成 Windows 自动测试，ament 包仍需在 Ubuntu 22.04 + Humble 上完成首次实机构建和联调。协议暂不提供认证或加密，推荐让 Agent 只监听回环地址并通过 SSH 隧道连接。
+Linux/ROS2 Humble Agent 位于 [`agent/ros2/lab_debug_agent`](agent/ros2/lab_debug_agent/README.md)。ament 包已在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 环境完成构建、launch、真实 ROS graph/CDR、常见字段映射、QoS、订阅生命周期、错误恢复、断线重连和 SIGINT 自动测试。协议暂不提供认证或加密，推荐让 Agent 只监听回环地址并通过 SSH 隧道连接。

@@ -5,6 +5,7 @@
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/serialization.hpp>
+#include <rcutils/error_handling.h>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -81,6 +82,13 @@ MappedFields mapSerializedFields(
     const std::string& type,
     const rclcpp::SerializedMessage& serialized) {
     MappedFields result;
+    const auto& raw = serialized.get_rcl_serialized_message();
+    if (!raw.buffer || raw.buffer_length < 4) {
+        result.warning =
+            "Structured field mapping failed for " + type +
+            ": serialized CDR is shorter than its 4-byte encapsulation header";
+        return result;
+    }
     try {
         if (type == "std_msgs/msg/Float64") {
             result.fields.push_back({"data", "", deserialize<std_msgs::msg::Float64>(serialized).data});
@@ -146,6 +154,7 @@ MappedFields mapSerializedFields(
             twist(result.fields, "twist.twist", message.twist.twist);
         }
     } catch (const std::exception& exception) {
+        if (rcutils_error_is_set()) rcutils_reset_error();
         result.fields.clear();
         result.sourceTimestamp = 0;
         result.warning = "Structured field mapping failed for " + type + ": " + exception.what();

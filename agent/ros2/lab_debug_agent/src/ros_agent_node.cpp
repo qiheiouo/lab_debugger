@@ -61,6 +61,15 @@ Value commonPolicy(const std::vector<Value>& values, Value unknown) {
                : unknown;
 }
 
+std::string subscriptionKey(const std::string& topic, const std::string& type) {
+    std::string key;
+    key.reserve(topic.size() + type.size() + 1);
+    key.append(topic);
+    key.push_back('\0');
+    key.append(type);
+    return key;
+}
+
 }  // namespace
 
 RosAgentNode::RosAgentNode() : rclcpp::Node("lab_debug_agent") {
@@ -86,7 +95,10 @@ RosAgentNode::RosAgentNode() : rclcpp::Node("lab_debug_agent") {
     callbacks.onUnsubscribe = [this](const auto& request) {
         return unsubscribeTopic(request);
     };
-    callbacks.onClientDisconnected = [this] { clearSubscriptions(); };
+    callbacks.onClientDisconnected = [this] {
+        lastSentRevision_.store(0);
+        clearSubscriptions();
+    };
     callbacks.onInfo = [this](const std::string& message) {
         RCLCPP_INFO(get_logger(), "%s", message.c_str());
     };
@@ -117,20 +129,21 @@ lab::core::agent::TopicCatalog RosAgentNode::buildCatalog() {
     const auto graph = get_topic_names_and_types();
     for (const auto& [name, types] : graph) {
         const auto endpoints = get_publishers_info_by_topic(name);
-        std::vector<lab::core::agent::Reliability> reliabilities;
-        std::vector<lab::core::agent::Durability> durabilities;
-        reliabilities.reserve(endpoints.size());
-        durabilities.reserve(endpoints.size());
-        for (const auto& endpoint : endpoints) {
-            const auto& qos = endpoint.qos_profile().get_rmw_qos_profile();
-            reliabilities.push_back(reliability(qos.reliability));
-            durabilities.push_back(durability(qos.durability));
-        }
-        const auto topicReliability = commonPolicy(
-            reliabilities, lab::core::agent::Reliability::Unknown);
-        const auto topicDurability = commonPolicy(
-            durabilities, lab::core::agent::Durability::Unknown);
         for (const auto& type : types) {
+            std::vector<lab::core::agent::Reliability> reliabilities;
+            std::vector<lab::core::agent::Durability> durabilities;
+            reliabilities.reserve(endpoints.size());
+            durabilities.reserve(endpoints.size());
+            for (const auto& endpoint : endpoints) {
+                if (endpoint.topic_type() != type) continue;
+                const auto& qos = endpoint.qos_profile().get_rmw_qos_profile();
+                reliabilities.push_back(reliability(qos.reliability));
+                durabilities.push_back(durability(qos.durability));
+            }
+            const auto topicReliability = commonPolicy(
+                reliabilities, lab::core::agent::Reliability::Unknown);
+            const auto topicDurability = commonPolicy(
+                durabilities, lab::core::agent::Durability::Unknown);
             topics.push_back({name, type, topicReliability, topicDurability});
         }
     }
@@ -145,8 +158,10 @@ lab::core::agent::TopicCatalog RosAgentNode::buildCatalog() {
                   << static_cast<int>(topic.durability) << '\n';
     }
     std::scoped_lock lock(catalogMutex_);
-    if (signature.str() != catalogSignature_) {
-        catalogSignature_ = signature.str();
+    const auto currentSignature = signature.str();
+    if (!catalogInitialized_ || currentSignature != catalogSignature_) {
+        catalogInitialized_ = true;
+        catalogSignature_ = currentSignature;
         ++catalogRevision_;
     }
     return {catalogRevision_, std::move(topics)};
@@ -160,6 +175,27 @@ std::optional<std::string> RosAgentNode::subscribeTopic(
         std::find(topic->second.begin(), topic->second.end(), request.type) ==
             topic->second.end()) {
         return "Topic/type is not present in the ROS graph";
+    }
+
+    const auto key = subscriptionKey(request.topic, request.type);
+    {
+        std::scoped_lock lock(subscriptionsMutex_);
+        const auto incompatible = std::find_if(
+            subscriptions_.begin(), subscriptions_.end(), [&](const auto& active) {
+                return active.second.request.topic == request.topic &&
+                       active.second.request.type != request.type;
+            });
+        if (incompatible != subscriptions_.end()) {
+            return "ROS2 Humble cannot subscribe to the same topic with multiple "
+                   "message types in one Agent; active type is " +
+                   incompatible->second.request.type;
+        }
+        const auto existing = subscriptions_.find(key);
+        if (existing != subscriptions_.end() &&
+            existing->second.request.reliability == request.reliability &&
+            existing->second.request.queueDepth == request.queueDepth) {
+            return std::nullopt;
+        }
     }
 
     try {
@@ -178,10 +214,20 @@ std::optional<std::string> RosAgentNode::subscribeTopic(
                 std::shared_ptr<rclcpp::SerializedMessage> message) {
                 handleSerializedMessage(topicName, type, message);
             });
-        std::scoped_lock lock(subscriptionsMutex_);
-        subscriptions_[request.topic] = std::move(subscription);
+        std::shared_ptr<rclcpp::GenericSubscription> previous;
+        {
+            std::scoped_lock lock(subscriptionsMutex_);
+            auto& active = subscriptions_[key];
+            previous = std::move(active.subscription);
+            active = ActiveSubscription{request, std::move(subscription)};
+        }
+        previous.reset();
         RCLCPP_INFO(
-            get_logger(), "Subscribed to %s [%s]", request.topic.c_str(), request.type.c_str());
+            get_logger(),
+            "Subscribed to %s [%s] (request %lu)",
+            request.topic.c_str(),
+            request.type.c_str(),
+            static_cast<unsigned long>(request.requestId));
         return std::nullopt;
     } catch (const std::exception& exception) {
         return std::string("Failed to create GenericSubscription: ") + exception.what();
@@ -190,10 +236,24 @@ std::optional<std::string> RosAgentNode::subscribeTopic(
 
 std::optional<std::string> RosAgentNode::unsubscribeTopic(
     const lab::core::agent::SubscriptionRequest& request) {
-    std::scoped_lock lock(subscriptionsMutex_);
-    const auto erased = subscriptions_.erase(request.topic);
-    if (erased == 0) return "Topic is not currently subscribed";
-    RCLCPP_INFO(get_logger(), "Unsubscribed from %s", request.topic.c_str());
+    std::shared_ptr<rclcpp::GenericSubscription> removed;
+    {
+        std::scoped_lock lock(subscriptionsMutex_);
+        const auto key = subscriptionKey(request.topic, request.type);
+        const auto active = subscriptions_.find(key);
+        if (active == subscriptions_.end()) {
+            return "Topic/type is not currently subscribed";
+        }
+        removed = std::move(active->second.subscription);
+        subscriptions_.erase(active);
+    }
+    removed.reset();
+    RCLCPP_INFO(
+        get_logger(),
+        "Unsubscribed from %s [%s] (request %lu)",
+        request.topic.c_str(),
+        request.type.c_str(),
+        static_cast<unsigned long>(request.requestId));
     return std::nullopt;
 }
 
@@ -220,8 +280,12 @@ void RosAgentNode::handleSerializedMessage(
 }
 
 void RosAgentNode::clearSubscriptions() {
-    std::scoped_lock lock(subscriptionsMutex_);
-    subscriptions_.clear();
+    decltype(subscriptions_) removed;
+    {
+        std::scoped_lock lock(subscriptionsMutex_);
+        removed.swap(subscriptions_);
+    }
+    removed.clear();
 }
 
 void RosAgentNode::refreshGraph() {

@@ -70,6 +70,11 @@ private:
     std::jthread thread_;
     std::atomic_int listener_{-1};
     std::atomic_int client_{-1};
+    // Keep outbound sequence allocation and the corresponding socket write in
+    // one critical section. ServerSession protects its own state, but without
+    // this lock concurrent ROS callbacks could allocate N and N+1 and then
+    // write them to the TCP stream in the opposite order.
+    std::mutex sessionIoMutex_;
     std::mutex sendMutex_;
 };
 

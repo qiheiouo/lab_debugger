@@ -158,6 +158,21 @@ if(LAB_DEBUGGER_BUILD_TESTS)
     add_executable(lab_agent_server_session_tests tests/test_agent_server_session.cpp)
     target_link_libraries(lab_agent_server_session_tests PRIVATE lab_core)
     add_test(NAME lab_agent_server_session_tests COMMAND lab_agent_server_session_tests)
+    if(UNIX)
+        add_executable(lab_agent_tcp_server_tests
+            tests/test_agent_tcp_server.cpp
+            agent/ros2/lab_debug_agent/src/tcp_server.cpp
+        )
+        target_include_directories(lab_agent_tcp_server_tests PRIVATE
+            agent/ros2/lab_debug_agent/include
+        )
+        target_link_libraries(lab_agent_tcp_server_tests PRIVATE lab_core)
+        target_compile_options(lab_agent_tcp_server_tests PRIVATE
+            -Wall -Wextra -Wpedantic
+        )
+        add_test(NAME lab_agent_tcp_server_tests COMMAND lab_agent_tcp_server_tests)
+        set_tests_properties(lab_agent_tcp_server_tests PROPERTIES TIMEOUT 20)
+    endif()
     if(TARGET lab_network_adapter)
         add_executable(lab_network_tests tests/test_network.cpp)
         target_link_libraries(lab_network_tests PRIVATE lab_network_adapter Qt6::Core Qt6::Network)
