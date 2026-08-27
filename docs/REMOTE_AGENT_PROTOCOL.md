@@ -107,7 +107,9 @@ TCP connected
   ↔ Ping / Pong
 ```
 
-尚未完成 Hello/HelloAck 时不应接受订阅命令。客户端不得请求 Agent 未提供的能力，也不得在未协商任何样本能力时订阅。sequence 必须按连接递增；重连后可从 0 或 1 重新开始。客户端用 `agentId + topic` 构造稳定来源标识，不能只用 TCP 端点区分字段。
+尚未完成 Hello/HelloAck 时不应接受订阅命令。客户端不得请求 Agent 未提供的能力，也不得在未协商任何样本能力时订阅；若 Agent 错误地只声明 `GraphUpdates` 而没有 `TopicDiscovery`，客户端会主动移除前者。sequence 必须按连接递增；重连后可从 0 或 1 重新开始。客户端用 `agentId + topic` 构造稳定来源标识，不能只用 TCP 端点区分字段。
+
+Windows 客户端可以启用自动恢复。传输断开、连接失败或握手超时会按 250 ms、500 ms、1 s 逐步退避，单次最长 8 s；合法 Hello 到达后退避计数复位，并在同一 host/port 上重新请求目录、恢复此前成功发送的 topic/type 订阅。手动断开会取消定时器；严格序号、非法消息等协议错误进入 Error，不自动形成错误重连循环。切换 host/port 会清空旧端点的订阅恢复集合。
 
 ## 6. ROS2 Humble 映射
 
@@ -137,7 +139,7 @@ ROS graph 可以报告同名 topic 的多个类型，目录会逐类型保留。
 - Hello、HelloAck、TopicCatalog、Subscribe、SampleBatch、Error、Ping/Pong；
 - 截断、尾随字节、非法布尔、非法队列深度和超长字符串拒绝。
 
-`lab_remote_agent_tests` 使用本机 TCP 模拟 Agent，覆盖分片 Hello、能力协商、初始/手动目录请求、CRC 损坏恢复、TopicCatalog 与 SampleBatch 粘包、原始 CDR、数值/布尔字段、订阅/取消订阅、Ping/Pong，以及重复序号导致的协议断线。
+`lab_remote_agent_tests` 使用本机 TCP 模拟 Agent，覆盖分片 Hello、能力协商、无发现能力时禁止目录请求、初始/手动目录请求、CRC 损坏恢复、TopicCatalog 与 SampleBatch 粘包、原始 CDR、数值/布尔字段、订阅/取消订阅、Ping/Pong、自动重连与订阅恢复，以及重复序号导致协议断线且不自动重试。
 
 `lab_agent_server_session_tests` 覆盖 Agent 侧 Hello/HelloAck、能力拒绝、客户端命令动作化、服务端统一序号、时间戳、心跳、CRC 恢复、结构化错误和重复客户端序号。
 

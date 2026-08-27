@@ -9,6 +9,7 @@
 #include <optional>
 
 class QLabel;
+class QCheckBox;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
@@ -52,6 +53,7 @@ private:
     QLineEdit* host_{};
     QSpinBox* port_{};
     QLineEdit* clientName_{};
+    QCheckBox* autoReconnect_{};
     QLabel* state_{};
     QLabel* agentIdentity_{};
     QLabel* catalogRevision_{};

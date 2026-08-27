@@ -17,6 +17,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 无 Qt/ROS 依赖的 Remote Agent 帧、握手、topic、订阅和样本编解码；
 - Remote Agent CRC32、长度防护、流式分片/粘包处理与错误重同步；
 - 独立 TCP 线程的 `RemoteAgentSource`、5 秒握手超时、严格序号检查与 Ping/Pong；
+- 可选指数退避自动重连、同端点订阅恢复与手动断开取消重试；
 - ROS Agent 身份、Topic 目录、订阅/取消订阅 UI，以及 CDR/结构化字段双路记录；
 - Remote Agent 本机模拟服务器回环测试；
 - 已在 Ubuntu 22.04/ROS2 Humble + GCC 11 验证的 `lab_debug_agent` ament 包、单客户端 TCP 服务端和 graph 更新；
@@ -77,6 +78,6 @@ cmake --install build --config Release --prefix dist/LabDebugger
 
 ## Remote ROS Agent 客户端
 
-左侧切换到“ROS Agent”页，填写 Linux Agent 地址和端口后连接。客户端必须在 5 秒内收到合法 `Hello`，随后才会显示为就绪并自动请求 Topic 目录。选择 Topic、可靠性与队列深度后可订阅或取消订阅；收到的原始 CDR 进入终端和 Session 原始流，数值及布尔字段直接进入实时曲线和 `values.csv`。
+左侧切换到“ROS Agent”页，填写 Linux Agent 地址和端口后连接。客户端必须在 5 秒内收到合法 `Hello`，随后才会显示为就绪；Agent 提供发现能力时客户端自动请求 Topic 目录。选择 Topic、可靠性与队列深度后可订阅或取消订阅；收到的原始 CDR 进入终端和 Session 原始流，数值及布尔字段直接进入实时曲线和 `values.csv`。启用自动重连后，临时网络故障按 250 ms 至 8 s 指数退避，同一端点重新握手成功后会刷新目录并恢复已订阅的 topic/type；手动断开会立即取消重试，协议错误不会无限重连。
 
 Linux/ROS2 Humble Agent 位于 [`agent/ros2/lab_debug_agent`](agent/ros2/lab_debug_agent/README.md)。ament 包已在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 环境完成构建、launch、真实 ROS graph/CDR、常见字段映射、QoS、订阅生命周期、错误恢复、断线重连和 SIGINT 自动测试。协议暂不提供认证或加密，推荐让 Agent 只监听回环地址并通过 SSH 隧道连接。

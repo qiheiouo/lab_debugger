@@ -308,6 +308,191 @@ void testHandshakeCatalogSamplesAndControls() {
     peer->deleteLater();
 }
 
+void testCapabilityAwareHandshakeWithoutTopicDiscovery() {
+    QTcpServer server;
+    require(server.listen(QHostAddress::LocalHost, 0), "capability fixture listens");
+    RemoteAgentSource source;
+    Events events;
+    source.setCallbacks(events.sourceCallbacks());
+    source.setSettings(
+        {"127.0.0.1", server.serverPort(), "Capability client", "0.7.0", false});
+    require(source.open(), "capability-aware connection starts");
+    require(waitFor([&] { return server.hasPendingConnections(); }),
+            "capability fixture accepts client");
+    auto* peer = server.nextPendingConnection();
+
+    const Hello hello{
+        "sample-only-agent",
+        "0.1.0",
+        "fixture",
+        capabilityMask(Capability::SerializedMessages) |
+            capabilityMask(Capability::GraphUpdates)};
+    send(*peer, encodeFrame(serverFrame(MessageType::Hello, 0, encodeHello(hello))));
+    StreamDecoder decoder;
+    const auto frames = receiveFrames(*peer, decoder, 1);
+    std::string error;
+    const auto ack = decodeHelloAck(frames[0].payload, &error);
+    require(ack &&
+                (ack->requestedCapabilities &
+                 capabilityMask(Capability::SerializedMessages)) != 0U &&
+                (ack->requestedCapabilities &
+                 capabilityMask(Capability::GraphUpdates)) == 0U,
+            "client removes graph updates when topic discovery is unavailable");
+    require(waitFor([&] { return source.isOpen(); }),
+            "sample-only Agent still completes the handshake");
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    require(peer->bytesAvailable() == 0,
+            "client does not request a catalog without topic discovery");
+    require(!source.requestTopicCatalog(),
+            "manual catalog request is rejected when capability was not negotiated");
+    source.close();
+    peer->deleteLater();
+}
+
+void testAutomaticReconnectRestoresSubscriptions() {
+    QTcpServer server;
+    require(server.listen(QHostAddress::LocalHost, 0), "reconnect fixture listens");
+    RemoteAgentSource source;
+    Events events;
+    source.setCallbacks(events.sourceCallbacks());
+    source.setAgentCallbacks(events.agentCallbacks());
+    source.setSettings(
+        {"127.0.0.1", server.serverPort(), "Reconnect client", "0.7.0", true});
+    require(source.open(), "automatic reconnect connection starts");
+    require(waitFor([&] { return server.hasPendingConnections(); }),
+            "reconnect fixture accepts initial client");
+    auto* firstPeer = server.nextPendingConnection();
+
+    const auto identity = Hello{
+        "reconnect-agent",
+        "0.1.0",
+        "fixture",
+        capabilityMask(Capability::TopicDiscovery) |
+            capabilityMask(Capability::SerializedMessages) |
+            capabilityMask(Capability::NumericFields) |
+            capabilityMask(Capability::GraphUpdates)};
+    ServerSession firstAgent(identity);
+    send(*firstPeer, firstAgent.start());
+    std::vector<ServerAction> firstActions;
+    const auto consumeFirst = [&] {
+        const auto bytes = firstPeer->readAll();
+        if (bytes.isEmpty()) return;
+        const auto first = reinterpret_cast<const std::uint8_t*>(bytes.constData());
+        const auto result = firstAgent.consume(
+            std::span(first, static_cast<std::size_t>(bytes.size())));
+        require(!result.fatalError, "initial reconnect session accepts client controls");
+        for (const auto& outbound : result.outboundFrames) send(*firstPeer, outbound);
+        firstActions.insert(firstActions.end(), result.actions.begin(), result.actions.end());
+    };
+    require(waitFor([&] {
+                consumeFirst();
+                return firstAgent.state() == ServerSessionState::Ready &&
+                       std::any_of(firstActions.begin(), firstActions.end(), [](const auto& action) {
+                           return std::holds_alternative<CatalogRequestAction>(action);
+                       });
+            }),
+            "initial session reaches ready and requests a catalog");
+
+    const SubscriptionRequest request{
+        81, "/temperature", "std_msgs/msg/Float64", Reliability::Reliable, 20};
+    require(source.subscribe(request), "subscription is registered before disconnect");
+    require(waitFor([&] {
+                consumeFirst();
+                return std::any_of(firstActions.begin(), firstActions.end(), [&](const auto& action) {
+                    const auto* subscribe = std::get_if<SubscribeAction>(&action);
+                    return subscribe && subscribe->request == request;
+                });
+            }),
+            "initial Agent receives subscription");
+
+    firstPeer->disconnectFromHost();
+    require(waitFor([&] { return server.hasPendingConnections(); }, 3500),
+            "client reconnects after an unexpected transport loss");
+    firstPeer->deleteLater();
+    auto* secondPeer = server.nextPendingConnection();
+    ServerSession secondAgent(identity);
+    send(*secondPeer, secondAgent.start());
+    std::vector<ServerAction> secondActions;
+    const auto consumeSecond = [&] {
+        const auto bytes = secondPeer->readAll();
+        if (bytes.isEmpty()) return;
+        const auto first = reinterpret_cast<const std::uint8_t*>(bytes.constData());
+        const auto result = secondAgent.consume(
+            std::span(first, static_cast<std::size_t>(bytes.size())));
+        require(!result.fatalError, "reconnected session accepts restored controls");
+        for (const auto& outbound : result.outboundFrames) send(*secondPeer, outbound);
+        secondActions.insert(secondActions.end(), result.actions.begin(), result.actions.end());
+    };
+    require(waitFor([&] {
+                consumeSecond();
+                const auto hasCatalog = std::any_of(
+                    secondActions.begin(), secondActions.end(), [](const auto& action) {
+                        return std::holds_alternative<CatalogRequestAction>(action);
+                    });
+                const auto hasSubscription = std::any_of(
+                    secondActions.begin(), secondActions.end(), [&](const auto& action) {
+                        const auto* subscribe = std::get_if<SubscribeAction>(&action);
+                        return subscribe && subscribe->request == request;
+                    });
+                return secondAgent.state() == ServerSessionState::Ready && hasCatalog &&
+                       hasSubscription;
+            }),
+            "reconnected client requests a catalog and restores its subscription");
+
+    source.close();
+    secondPeer->deleteLater();
+    QElapsedTimer quietPeriod;
+    quietPeriod.start();
+    while (quietPeriod.elapsed() < 500) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        QThread::msleep(1);
+    }
+    require(!server.hasPendingConnections(),
+            "manual close cancels all pending automatic reconnects");
+}
+
+void testProtocolFailureDoesNotAutoReconnect() {
+    QTcpServer server;
+    require(server.listen(QHostAddress::LocalHost, 0), "fatal protocol fixture listens");
+    RemoteAgentSource source;
+    Events events;
+    source.setCallbacks(events.sourceCallbacks());
+    source.setSettings(
+        {"127.0.0.1", server.serverPort(), "Protocol client", "0.7.0", true});
+    require(source.open(), "protocol failure connection starts");
+    require(waitFor([&] { return server.hasPendingConnections(); }),
+            "protocol failure fixture accepts client");
+    auto* peer = server.nextPendingConnection();
+    const Hello hello{
+        "protocol-agent",
+        "0.1.0",
+        "fixture",
+        capabilityMask(Capability::TopicDiscovery) |
+            capabilityMask(Capability::SerializedMessages)};
+    send(*peer, encodeFrame(serverFrame(MessageType::Hello, 0, encodeHello(hello))));
+    StreamDecoder decoder;
+    static_cast<void>(receiveFrames(*peer, decoder, 2));
+
+    send(*peer, encodeFrame(serverFrame(MessageType::Ping, 1, encodeNonce(1))));
+    static_cast<void>(receiveFrames(*peer, decoder, 1));
+    send(*peer, encodeFrame(serverFrame(MessageType::Ping, 1, encodeNonce(2))));
+    require(waitFor([&] {
+                return source.handshakeState() == HandshakeState::Error &&
+                       events.hasSequenceError();
+            }),
+            "strict sequence violation enters a fatal protocol state");
+    peer->deleteLater();
+    QElapsedTimer quietPeriod;
+    quietPeriod.start();
+    while (quietPeriod.elapsed() < 600) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        QThread::msleep(1);
+    }
+    require(!server.hasPendingConnections(),
+            "fatal protocol errors do not enter an automatic reconnect loop");
+    source.close();
+}
+
 void testClientAndServerStateMachinesAreCompatible() {
     QTcpServer server;
     require(server.listen(QHostAddress::LocalHost, 0), "compatibility fixture listens");
@@ -402,6 +587,9 @@ int main(int argc, char* argv[]) {
         testIdleCloseIsSilent();
         testDisconnectBeforeHelloIsError();
         testHandshakeCatalogSamplesAndControls();
+        testCapabilityAwareHandshakeWithoutTopicDiscovery();
+        testAutomaticReconnectRestoresSubscriptions();
+        testProtocolFailureDoesNotAutoReconnect();
         testClientAndServerStateMachinesAreCompatible();
         std::cout << "All Remote Agent source tests passed.\n";
         return 0;

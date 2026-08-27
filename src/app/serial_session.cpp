@@ -495,7 +495,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.6.0";
+    options.softwareVersion = "0.7.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -531,7 +531,9 @@ bool SerialSession::startSession(const QString& directory) {
             {{"host", lastRemoteAgentSettings_.host},
              {"port", std::to_string(lastRemoteAgentSettings_.port)},
              {"client_name", lastRemoteAgentSettings_.clientName},
-             {"client_version", lastRemoteAgentSettings_.clientVersion}}});
+             {"client_version", lastRemoteAgentSettings_.clientVersion},
+             {"auto_reconnect",
+              lastRemoteAgentSettings_.autoReconnect ? "true" : "false"}}});
     }
 
     bool result = false;

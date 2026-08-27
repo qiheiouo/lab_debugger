@@ -3,6 +3,7 @@
 #include "lab/core/data_source.hpp"
 
 #include <QAbstractItemView>
+#include <QCheckBox>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -52,11 +53,14 @@ RemoteAgentPanel::RemoteAgentPanel(QWidget* parent) : QWidget(parent) {
     port_->setRange(1, 65535);
     port_->setValue(9750);
     clientName_ = new QLineEdit(QStringLiteral("Lab Debugger"), this);
+    autoReconnect_ = new QCheckBox(tr("掉线后自动重连并恢复订阅"), this);
+    autoReconnect_->setChecked(true);
 
     auto* form = new QFormLayout;
     form->addRow(tr("Agent 地址"), host_);
     form->addRow(tr("Agent 端口"), port_);
     form->addRow(tr("客户端名称"), clientName_);
+    form->addRow(tr("连接恢复"), autoReconnect_);
 
     state_ = new QLabel(tr("● 未连接"), this);
     state_->setStyleSheet(QStringLiteral("color: #9aa4b2;"));
@@ -146,7 +150,8 @@ lab::adapters::remote_agent::RemoteAgentSettings RemoteAgentPanel::settings() co
     return {host_->text().trimmed().toStdString(),
             static_cast<std::uint16_t>(port_->value()),
             clientName_->text().trimmed().toStdString(),
-            "0.6.0"};
+            "0.7.0",
+            autoReconnect_->isChecked()};
 }
 
 void RemoteAgentPanel::setSourceState(int rawState) {
@@ -160,8 +165,11 @@ void RemoteAgentPanel::setSourceState(int rawState) {
     refreshButton_->setEnabled(ready_);
     switch (sourceState) {
     case lab::core::SourceState::Opening:
-        state_->setText(tr("● TCP 已连接，等待 Agent 握手"));
+        state_->setText(tr("● 正在连接、等待重试或等待 Agent 握手"));
         state_->setStyleSheet(QStringLiteral("color: #e5b567;"));
+        agentIdentity_->setText(tr("等待新的 Agent 身份"));
+        topics_->setRowCount(0);
+        catalogRevision_->setText(tr("Topic 目录：等待握手"));
         break;
     case lab::core::SourceState::Open:
         state_->setText(tr("● Agent 已就绪"));

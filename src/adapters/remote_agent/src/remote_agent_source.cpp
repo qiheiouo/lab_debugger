@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 
@@ -18,6 +19,8 @@ namespace lab::adapters::remote_agent {
 namespace {
 
 constexpr int handshakeTimeoutMs = 5000;
+constexpr int reconnectInitialDelayMs = 250;
+constexpr int reconnectMaximumDelayMs = 8000;
 
 constexpr std::uint32_t supportedCapabilities =
     lab::core::agent::capabilityMask(lab::core::agent::Capability::TopicDiscovery) |
@@ -26,8 +29,26 @@ constexpr std::uint32_t supportedCapabilities =
     lab::core::agent::capabilityMask(lab::core::agent::Capability::TextFields) |
     lab::core::agent::capabilityMask(lab::core::agent::Capability::GraphUpdates);
 
+constexpr std::uint32_t sampleCapabilityMask =
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::SerializedMessages) |
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::NumericFields) |
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::TextFields);
+
 std::string protocolMessage(const lab::core::agent::DecodeIssue& issue) {
     return "Remote Agent protocol: " + issue.message;
+}
+
+bool hasCapability(std::uint32_t capabilities, lab::core::agent::Capability capability) {
+    return (capabilities & lab::core::agent::capabilityMask(capability)) != 0U;
+}
+
+std::string subscriptionKey(const lab::core::agent::SubscriptionRequest& request) {
+    std::string key;
+    key.reserve(request.topic.size() + request.type.size() + 1);
+    key.append(request.topic);
+    key.push_back('\0');
+    key.append(request.type);
+    return key;
 }
 
 }  // namespace
@@ -61,6 +82,8 @@ public:
           onWire_(std::move(onWire)) {}
 
     bool openEndpoint(RemoteAgentSettings settings) {
+        const auto sameEndpoint = settings_.host == settings.host &&
+                                  settings_.port == settings.port;
         closeEndpoint(false);
         settings_ = std::move(settings);
         if (settings_.host.empty() || settings_.port == 0 ||
@@ -68,29 +91,128 @@ public:
             fail("Remote Agent address and client identity must not be empty");
             return false;
         }
+        if (!sameEndpoint) {
+            desiredSubscriptions_.clear();
+        }
+        desiredOpen_ = true;
+        closing_ = false;
+        reconnectAttempt_ = 0;
+        handshakeTimer_ = new QTimer(this);
+        handshakeTimer_->setSingleShot(true);
+        QObject::connect(handshakeTimer_, &QTimer::timeout, this, [this] {
+            recoverTransport(
+                "Remote Agent handshake timed out after 5 seconds", true);
+            if (socket_) socket_->abort();
+        });
+        reconnectTimer_ = new QTimer(this);
+        reconnectTimer_->setSingleShot(true);
+        QObject::connect(reconnectTimer_, &QTimer::timeout, this, [this] {
+            startConnection();
+        });
+        startConnection();
+        return true;
+    }
 
+    void closeEndpoint(bool announce = true) {
+        desiredOpen_ = false;
+        closing_ = true;
+        if (announce) {
+            onState_(lab::core::SourceState::Closing, state_);
+        }
+        if (handshakeTimer_) {
+            handshakeTimer_->stop();
+            delete handshakeTimer_;
+            handshakeTimer_ = nullptr;
+        }
+        if (reconnectTimer_) {
+            reconnectTimer_->stop();
+            delete reconnectTimer_;
+            reconnectTimer_ = nullptr;
+        }
+        if (socket_) {
+            QObject::disconnect(socket_, nullptr, this, nullptr);
+            socket_->abort();
+            delete socket_;
+            socket_ = nullptr;
+        }
+        decoder_.reset();
+        lastInboundSequence_.reset();
+        negotiatedCapabilities_ = 0;
+        state_ = HandshakeState::Disconnected;
+        if (announce) {
+            onState_(lab::core::SourceState::Closed, state_);
+        }
+    }
+
+    bool requestTopicCatalog() {
+        if (!hasCapability(
+                negotiatedCapabilities_, lab::core::agent::Capability::TopicDiscovery)) {
+            onError_("Remote Agent did not negotiate topic discovery");
+            return false;
+        }
+        return sendReadyFrame(lab::core::agent::MessageType::TopicCatalogRequest, {});
+    }
+
+    bool subscribe(const lab::core::agent::SubscriptionRequest& request) {
+        if ((negotiatedCapabilities_ & sampleCapabilityMask) == 0U) {
+            onError_("Remote Agent did not negotiate any sample capability");
+            return false;
+        }
+        try {
+            const auto sent = sendReadyFrame(
+                lab::core::agent::MessageType::Subscribe,
+                lab::core::agent::encodeSubscriptionRequest(request));
+            if (sent) desiredSubscriptions_[subscriptionKey(request)] = request;
+            return sent;
+        } catch (const std::exception& exception) {
+            onError_(exception.what());
+            return false;
+        }
+    }
+
+    bool unsubscribe(const lab::core::agent::SubscriptionRequest& request) {
+        if ((negotiatedCapabilities_ & sampleCapabilityMask) == 0U) {
+            onError_("Remote Agent did not negotiate any sample capability");
+            return false;
+        }
+        try {
+            const auto sent = sendReadyFrame(
+                lab::core::agent::MessageType::Unsubscribe,
+                lab::core::agent::encodeSubscriptionRequest(request));
+            if (sent) desiredSubscriptions_.erase(subscriptionKey(request));
+            return sent;
+        } catch (const std::exception& exception) {
+            onError_(exception.what());
+            return false;
+        }
+    }
+
+private:
+    void startConnection() {
+        if (!desiredOpen_) return;
+        if (socket_) {
+            QObject::disconnect(socket_, nullptr, this, nullptr);
+            socket_->abort();
+            delete socket_;
+            socket_ = nullptr;
+        }
         decoder_.reset();
         lastInboundSequence_.reset();
         outboundSequence_ = 0;
+        negotiatedCapabilities_ = 0;
         closing_ = false;
         state_ = HandshakeState::Disconnected;
+        onState_(lab::core::SourceState::Opening, state_);
 
         socket_ = new QTcpSocket(this);
-        timer_ = new QTimer(this);
-        timer_->setSingleShot(true);
-        QObject::connect(timer_, &QTimer::timeout, this, [this] {
-            failFatal("Remote Agent handshake timed out after 5 seconds");
-        });
         QObject::connect(socket_, &QTcpSocket::connected, this, [this] {
             state_ = HandshakeState::AwaitingHello;
             onState_(lab::core::SourceState::Opening, state_);
-            timer_->start(handshakeTimeoutMs);
+            if (handshakeTimer_) handshakeTimer_->start(handshakeTimeoutMs);
         });
         QObject::connect(socket_, &QTcpSocket::readyRead, this, [this] {
             const auto bytes = socket_->readAll();
-            if (bytes.isEmpty()) {
-                return;
-            }
+            if (bytes.isEmpty()) return;
             onWire_(lab::core::Direction::Rx, static_cast<std::size_t>(bytes.size()));
             const auto first = reinterpret_cast<const std::uint8_t*>(bytes.constData());
             const auto result = decoder_.consume(
@@ -100,88 +222,67 @@ public:
                 onError_(protocolMessage(issue));
             }
             for (const auto& frame : result.frames) {
-                if (!processFrame(frame)) {
-                    break;
-                }
+                if (!processFrame(frame)) break;
             }
         });
         QObject::connect(socket_, &QTcpSocket::disconnected, this, [this] {
-            if (timer_) {
-                timer_->stop();
+            if (handshakeTimer_) handshakeTimer_->stop();
+            if (closing_ || !desiredOpen_ || state_ == HandshakeState::Error ||
+                (reconnectTimer_ && reconnectTimer_->isActive())) {
+                return;
             }
-            if (!closing_ && state_ == HandshakeState::AwaitingHello) {
-                fail("Remote Agent closed the connection before handshake completed");
-            } else if (!closing_ && state_ != HandshakeState::Error) {
-                state_ = HandshakeState::Disconnected;
-                onState_(lab::core::SourceState::Closed, state_);
-            }
+            const auto handshakeFailure = state_ == HandshakeState::AwaitingHello;
+            recoverTransport(
+                handshakeFailure
+                    ? "Remote Agent closed the connection before handshake completed"
+                    : "Remote Agent connection closed",
+                handshakeFailure);
         });
         QObject::connect(
             socket_,
             &QTcpSocket::errorOccurred,
             this,
             [this](QAbstractSocket::SocketError error) {
-                if (closing_ || error == QAbstractSocket::RemoteHostClosedError) {
+                if (closing_ || !desiredOpen_ || state_ == HandshakeState::Error ||
+                    error == QAbstractSocket::RemoteHostClosedError) {
                     return;
                 }
-                fail(socket_ ? socket_->errorString().toStdString()
-                             : "Remote Agent socket error");
+                recoverTransport(
+                    socket_ ? socket_->errorString().toStdString()
+                            : "Remote Agent socket error",
+                    true);
             });
-
         socket_->connectToHost(QString::fromStdString(settings_.host), settings_.port);
-        return true;
     }
 
-    void closeEndpoint(bool announce = true) {
-        closing_ = true;
-        if (announce) {
-            onState_(lab::core::SourceState::Closing, state_);
+    void recoverTransport(std::string message, bool errorWithoutReconnect) {
+        if (closing_ || !desiredOpen_ || state_ == HandshakeState::Error) return;
+        if (settings_.autoReconnect) {
+            if (reconnectTimer_ && reconnectTimer_->isActive()) return;
+            onError_(std::move(message));
+            scheduleReconnect();
+            return;
         }
-        if (timer_) {
-            timer_->stop();
-            delete timer_;
-            timer_ = nullptr;
-        }
-        if (socket_) {
-            socket_->abort();
-            delete socket_;
-            socket_ = nullptr;
-        }
-        decoder_.reset();
-        lastInboundSequence_.reset();
-        state_ = HandshakeState::Disconnected;
-        if (announce) {
+        if (errorWithoutReconnect) {
+            fail(std::move(message));
+        } else {
+            state_ = HandshakeState::Disconnected;
             onState_(lab::core::SourceState::Closed, state_);
         }
     }
 
-    bool requestTopicCatalog() {
-        return sendReadyFrame(lab::core::agent::MessageType::TopicCatalogRequest, {});
+    void scheduleReconnect() {
+        if (!desiredOpen_ || !reconnectTimer_ || reconnectTimer_->isActive()) return;
+        if (handshakeTimer_) handshakeTimer_->stop();
+        const auto exponent = std::min(reconnectAttempt_, 5U);
+        const auto delay = std::min(
+            reconnectInitialDelayMs * (1 << exponent), reconnectMaximumDelayMs);
+        ++reconnectAttempt_;
+        state_ = HandshakeState::Disconnected;
+        onState_(lab::core::SourceState::Opening, state_);
+        reconnectTimer_->start(delay);
     }
 
-    bool subscribe(const lab::core::agent::SubscriptionRequest& request) {
-        try {
-            return sendReadyFrame(
-                lab::core::agent::MessageType::Subscribe,
-                lab::core::agent::encodeSubscriptionRequest(request));
-        } catch (const std::exception& exception) {
-            onError_(exception.what());
-            return false;
-        }
-    }
-
-    bool unsubscribe(const lab::core::agent::SubscriptionRequest& request) {
-        try {
-            return sendReadyFrame(
-                lab::core::agent::MessageType::Unsubscribe,
-                lab::core::agent::encodeSubscriptionRequest(request));
-        } catch (const std::exception& exception) {
-            onError_(exception.what());
-            return false;
-        }
-    }
-
-private:
     bool processFrame(const lab::core::agent::Frame& frame) {
         if (frame.flags != 0) {
             failFatal("Remote Agent sent unsupported non-zero frame flags");
@@ -255,21 +356,55 @@ private:
         if (!hello) {
             return malformed(frame, error);
         }
+        negotiatedCapabilities_ = hello->capabilities & supportedCapabilities;
+        if (!hasCapability(
+                negotiatedCapabilities_,
+                lab::core::agent::Capability::TopicDiscovery)) {
+            negotiatedCapabilities_ &= ~lab::core::agent::capabilityMask(
+                lab::core::agent::Capability::GraphUpdates);
+        }
         const lab::core::agent::HelloAck ack{
             settings_.clientName,
             settings_.clientVersion,
-            hello->capabilities & supportedCapabilities};
+            negotiatedCapabilities_};
         if (!sendFrame(
                 lab::core::agent::MessageType::HelloAck,
                 lab::core::agent::encodeHelloAck(ack))) {
             failFatal("Failed to send Remote Agent hello acknowledgement");
             return false;
         }
-        timer_->stop();
+        if (handshakeTimer_) handshakeTimer_->stop();
         onHello_(*hello);
         state_ = HandshakeState::Ready;
+        reconnectAttempt_ = 0;
         onState_(lab::core::SourceState::Open, state_);
-        return requestTopicCatalog();
+        if (hasCapability(
+                negotiatedCapabilities_,
+                lab::core::agent::Capability::TopicDiscovery) &&
+            !requestTopicCatalog()) {
+            recoverTransport("Failed to request the initial Remote Agent topic catalog", true);
+            if (socket_) socket_->abort();
+            return false;
+        }
+        if ((negotiatedCapabilities_ & sampleCapabilityMask) == 0U) {
+            if (!desiredSubscriptions_.empty()) {
+                onError_(
+                    "Remote Agent no longer offers sample capabilities; subscriptions "
+                    "were not restored");
+            }
+            return true;
+        }
+        for (const auto& [key, request] : desiredSubscriptions_) {
+            static_cast<void>(key);
+            if (!sendReadyFrame(
+                    lab::core::agent::MessageType::Subscribe,
+                    lab::core::agent::encodeSubscriptionRequest(request))) {
+                recoverTransport("Failed to restore Remote Agent subscriptions", true);
+                if (socket_) socket_->abort();
+                return false;
+            }
+        }
+        return true;
     }
 
     bool malformed(const lab::core::agent::Frame& frame, const std::string& error) {
@@ -325,9 +460,10 @@ private:
 
     void failFatal(std::string message) {
         fail(std::move(message));
-        if (timer_) {
-            timer_->stop();
+        if (handshakeTimer_) {
+            handshakeTimer_->stop();
         }
+        if (reconnectTimer_) reconnectTimer_->stop();
         if (socket_) {
             socket_->abort();
         }
@@ -335,12 +471,18 @@ private:
 
     RemoteAgentSettings settings_;
     QTcpSocket* socket_{};
-    QTimer* timer_{};
+    QTimer* handshakeTimer_{};
+    QTimer* reconnectTimer_{};
     lab::core::agent::StreamDecoder decoder_;
     std::optional<std::uint64_t> lastInboundSequence_;
     std::uint64_t outboundSequence_{};
+    std::uint32_t negotiatedCapabilities_{};
+    std::unordered_map<std::string, lab::core::agent::SubscriptionRequest>
+        desiredSubscriptions_;
+    unsigned int reconnectAttempt_{};
     HandshakeState state_{HandshakeState::Disconnected};
     bool closing_{};
+    bool desiredOpen_{};
     HelloHandler onHello_;
     CatalogHandler onCatalog_;
     SampleHandler onSample_;
