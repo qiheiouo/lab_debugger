@@ -3,6 +3,8 @@
 #include "lab/adapters/remote_agent/remote_agent_source.hpp"
 
 #include <QVariantList>
+#include <QHash>
+#include <QVariantMap>
 #include <QWidget>
 
 #include <cstdint>
@@ -44,6 +46,7 @@ public slots:
                       qint64 uncertaintyNs,
                       quint32 sampleCount);
     void setTopics(QVariantList topics, quint64 graphRevision);
+    void setTopicFields(QVariantList topics, quint64 graphRevision);
 
 private slots:
     void updateTopicButtons();
@@ -53,6 +56,7 @@ private slots:
 private:
     [[nodiscard]] std::optional<lab::core::agent::SubscriptionRequest>
     currentRequest();
+    void updateTopicFieldCell(int row);
 
     QLineEdit* host_{};
     QSpinBox* port_{};
@@ -71,6 +75,10 @@ private:
     QPushButton* subscribeButton_{};
     QPushButton* unsubscribeButton_{};
     std::uint64_t nextRequestId_{1};
+    std::uint64_t currentGraphRevision_{};
+    std::uint64_t topicFieldRevision_{};
+    QHash<QString, QVariantMap> topicFields_;
+    bool topicFieldCatalogNegotiated_{};
     bool ready_{};
 };
 

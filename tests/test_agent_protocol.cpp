@@ -127,6 +127,9 @@ void testHandshakePayloads() {
     require(isKnownMessageType(static_cast<std::uint8_t>(MessageType::TopicCatalogRequest)) &&
                 toString(MessageType::TopicCatalogRequest) == "topic_catalog_request",
             "topic catalog refresh message is part of protocol v1");
+    require(isKnownMessageType(static_cast<std::uint8_t>(MessageType::TopicFieldCatalog)) &&
+                toString(MessageType::TopicFieldCatalog) == "topic_field_catalog",
+            "negotiated topic field catalog message is part of protocol v1");
     const Hello hello{
         "robot-main", "0.4.0", "robot-minipc",
         capabilityMask(Capability::TopicDiscovery) |
@@ -156,6 +159,17 @@ void testTopicAndSubscriptionPayloads() {
     const auto decodedCatalog = decodeTopicCatalog(encodeTopicCatalog(catalog), &error);
     require(decodedCatalog && *decodedCatalog == catalog,
             "topic catalog payload round-trip");
+
+    const TopicFieldCatalog fieldCatalog{
+        77,
+        {{"/cmd_vel", "geometry_msgs/msg/Twist", FieldMappingKind::BuiltIn,
+          "Built-in semantic mapper preserves known field units"},
+         {"/points", "custom_msgs/msg/Points", FieldMappingKind::RawOnly,
+          "Introspection typesupport is unavailable"}}};
+    const auto decodedFieldCatalog = decodeTopicFieldCatalog(
+        encodeTopicFieldCatalog(fieldCatalog), &error);
+    require(decodedFieldCatalog && *decodedFieldCatalog == fieldCatalog,
+            "topic field catalog payload round-trip");
 
     const SubscriptionRequest request{
         1234, "/imu/data", "sensor_msgs/msg/Imu", Reliability::BestEffort, 50};
@@ -218,6 +232,13 @@ void testMalformedPayloadsAreRejected() {
     require(!decodeHello(oversizedStringLength, &error) &&
                 error.find("1 MiB") != std::string::npos,
             "oversized string declaration is rejected before allocation");
+
+    auto invalidMapping = encodeTopicFieldCatalog(
+        {1, {{"/x", "T", FieldMappingKind::BuiltIn, "reason"}}});
+    invalidMapping[23] = 0xFFU;
+    require(!decodeTopicFieldCatalog(invalidMapping, &error) &&
+                error.find("mapping enum") != std::string::npos,
+            "invalid topic field mapping enum is rejected");
 }
 
 }  // namespace

@@ -22,6 +22,7 @@
 namespace {
 
 using lab::core::agent::FieldValue;
+using lab::core::agent::FieldMappingKind;
 using lab_debug_agent::MappedFields;
 
 void require(bool condition, const std::string& message) {
@@ -222,6 +223,22 @@ void testGenericIntrospection() {
 }
 
 void testMissingTypesupportAndMalformedData() {
+    std::string reason;
+    require(lab_debug_agent::inspectFieldMapping(
+                "sensor_msgs/msg/Imu", &reason) == FieldMappingKind::BuiltIn &&
+                !reason.empty(),
+            "built-in semantic mapping is reported before subscription");
+    require(lab_debug_agent::inspectFieldMapping(
+                "geometry_msgs/msg/Point", &reason) ==
+                FieldMappingKind::Introspection &&
+                !reason.empty(),
+            "runtime introspection capability is reported before subscription");
+    require(lab_debug_agent::inspectFieldMapping(
+                "missing_msgs/msg/Unavailable", &reason) ==
+                FieldMappingKind::Unavailable &&
+                !reason.empty(),
+            "missing C++ typesupport is reported as unavailable");
+
     geometry_msgs::msg::Point point;
     const auto missing = lab_debug_agent::mapSerializedFields(
         "missing_msgs/msg/Unavailable", serialize(point));

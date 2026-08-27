@@ -49,6 +49,7 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 | 8 | Ping | 双向 | 64 位 nonce 心跳 |
 | 9 | Pong | 双向 | 原样返回 nonce |
 | 10 | TopicCatalogRequest | Client → Agent | 主动请求最新 TopicCatalog，payload 为空 |
+| 11 | TopicFieldCatalog | Agent → Client | 协商后发送 topic/type 的结构化字段能力与原因 |
 
 字符串和字节数组采用 `uint32 length + bytes`；集合采用 `uint32 count`。字符串均为 UTF-8。
 
@@ -62,6 +63,8 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 - durability：unknown / volatile / transient local。
 
 Linux Agent 使用 ROS2 Humble 的 `get_topic_names_and_types()` 建立目录，并按 topic/type 分别汇总发布端 endpoint QoS，生成可靠性与持久性提示。首次目录（包括空目录）的 revision 从 1 开始；topic、type 或汇总 QoS 变化时递增。
+
+能力位 `TopicFieldCapabilities`（`1 << 5`）是向后兼容扩展，依赖 `TopicDiscovery`。双方协商后，Agent 会紧跟 `TopicCatalog` 发送相同 `graphRevision` 的独立 `TopicFieldCatalog`；未协商时绝不发送新消息，旧 v1 客户端仍按原有字节格式工作。字段能力条目包含 topic、type、枚举和原因：`BuiltIn` 表示带单位/专用语义的内置映射，`Introspection` 表示运行时通用展开，`RawOnly` 表示可以订阅但缺少 introspection，`Unavailable` 表示普通 C++ typesupport 缺失、无法创建通用订阅，`Unknown` 用于未来或未确定状态。客户端把原因放在字段能力单元格提示中，并禁止对 `Unavailable` 条目发起新订阅。
 
 订阅请求包含独立 `requestId`，用于标识控制请求，不作为活动订阅的唯一键。活动订阅按 `topic + type` 区分：相同 QoS 的重复订阅是幂等操作，更改 QoS/queueDepth 会替换该 topic/type 的订阅，取消订阅只移除完全匹配的 topic/type，不会误删同名的其他类型。响应失败时 `Error.context` 包含 topic。队列深度范围固定为 1..1000000。
 
@@ -90,7 +93,7 @@ orientation.w
 
 保留原始 CDR 是为了未来修复 introspection 或字段映射后能够重新分析，而不是只相信当时的扁平化结果。
 
-Agent 只发送客户端已协商的内容：`SerializedMessages` 控制原始 CDR，`NumericFields` 控制数值和布尔字段，`TextFields` 控制字符串字段。没有协商 `TopicDiscovery` 时不发送目录；`GraphUpdates` 必须与 `TopicDiscovery` 一起协商。过滤后没有任何内容的样本不会发送。
+Agent 只发送客户端已协商的内容：`SerializedMessages` 控制原始 CDR，`NumericFields` 控制数值和布尔字段，`TextFields` 控制字符串字段。没有协商 `TopicDiscovery` 时不发送目录；`GraphUpdates` 与 `TopicFieldCapabilities` 都必须和 `TopicDiscovery` 一起协商。过滤后没有任何内容的样本不会发送。
 
 ## 5. 连接状态机
 
@@ -102,12 +105,13 @@ TCP connected
   → Client validates version/capabilities and sends HelloAck
   → Client sends TopicCatalogRequest
   → Agent sends TopicCatalog
+  → Agent sends TopicFieldCatalog（仅双方协商后）
   → Client sends Subscribe / Unsubscribe
   → Agent streams SampleBatch and graph updates
   ↔ Ping / Pong
 ```
 
-尚未完成 Hello/HelloAck 时不应接受订阅命令。客户端不得请求 Agent 未提供的能力，也不得在未协商任何样本能力时订阅；若 Agent 错误地只声明 `GraphUpdates` 而没有 `TopicDiscovery`，客户端会主动移除前者。sequence 必须按连接递增；重连后可从 0 或 1 重新开始。客户端用 `agentId + topic` 构造稳定来源标识，不能只用 TCP 端点区分字段。
+尚未完成 Hello/HelloAck 时不应接受订阅命令。客户端不得请求 Agent 未提供的能力，也不得在未协商任何样本能力时订阅；若 Agent 错误地只声明依赖目录发现的 `GraphUpdates` 或 `TopicFieldCapabilities`，客户端会主动移除相应能力。sequence 必须按连接递增；重连后可从 0 或 1 重新开始。客户端用 `agentId + topic` 构造稳定来源标识，不能只用 TCP 端点区分字段。
 
 Windows 客户端可以启用自动恢复。传输断开、连接失败或握手超时会按 250 ms、500 ms、1 s 逐步退避，单次最长 8 s；合法 Hello 到达后退避计数复位，并在同一 host/port 上重新请求目录、恢复此前成功发送的 topic/type 订阅。手动断开会取消定时器；严格序号、非法消息等协议错误进入 Error，不自动形成错误重连循环。切换 host/port 会清空旧端点的订阅恢复集合。
 
@@ -156,12 +160,12 @@ ROS graph 可以报告同名 topic 的多个类型，目录会逐类型保留。
 - 完整帧与负时间戳往返；
 - 逐字节分片、粘包和垃圾前缀；
 - CRC、版本、类型和超长错误后的重同步；
-- Hello、HelloAck、TopicCatalog、Subscribe、SampleBatch、Error、Ping/Pong；
+- Hello、HelloAck、TopicCatalog、TopicFieldCatalog、Subscribe、SampleBatch、Error、Ping/Pong；
 - 截断、尾随字节、非法布尔、非法队列深度和超长字符串拒绝。
 
 `lab_clock_sync_tests` 对偏移、RTT、不确定度、最低 RTT 选样、滚动窗口、异常输入和重置执行无网络的确定性验证。
 
-`lab_remote_agent_tests` 使用本机 TCP 模拟 Agent，覆盖分片 Hello、能力协商、无发现能力时禁止目录请求、初始/手动目录请求、CRC 损坏恢复、TopicCatalog 与 SampleBatch 粘包、原始 CDR、数值/布尔字段、双向 Ping/Pong、主动时钟估计、自动重连与订阅恢复，以及重复序号导致协议断线且不自动重试。
+`lab_remote_agent_tests` 使用本机 TCP 模拟 Agent，覆盖分片 Hello、能力协商、无发现能力时禁止目录请求、初始/手动目录请求、CRC 损坏恢复、TopicCatalog、TopicFieldCatalog 与 SampleBatch 粘包、原始 CDR、数值/布尔字段、双向 Ping/Pong、主动时钟估计、自动重连与订阅恢复，以及重复序号导致协议断线且不自动重试。
 
 `lab_agent_server_session_tests` 覆盖 Agent 侧 Hello/HelloAck、能力拒绝、客户端命令动作化、服务端统一序号、时间戳、心跳、CRC 恢复、结构化错误和重复客户端序号。
 

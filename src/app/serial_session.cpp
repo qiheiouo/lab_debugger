@@ -204,6 +204,26 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                         static_cast<quint32>(estimate.sampleCount));
                 },
                 Qt::QueuedConnection);
+        },
+        [this](const lab::core::agent::TopicFieldCatalog& catalog) {
+            QVariantList topics;
+            topics.reserve(static_cast<qsizetype>(catalog.topics.size()));
+            for (const auto& topic : catalog.topics) {
+                QVariantMap item;
+                item.insert(QStringLiteral("name"), QString::fromStdString(topic.name));
+                item.insert(QStringLiteral("type"), QString::fromStdString(topic.type));
+                item.insert(QStringLiteral("mapping"),
+                            static_cast<int>(topic.mapping));
+                item.insert(QStringLiteral("reason"),
+                            QString::fromStdString(topic.reason));
+                topics.push_back(item);
+            }
+            QMetaObject::invokeMethod(
+                this,
+                [this, topics, revision = catalog.graphRevision] {
+                    emit remoteTopicFieldsChanged(topics, revision);
+                },
+                Qt::QueuedConnection);
         }});
 
     replay_.setCallbacks({
@@ -517,7 +537,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.9.0";
+    options.softwareVersion = "0.10.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();

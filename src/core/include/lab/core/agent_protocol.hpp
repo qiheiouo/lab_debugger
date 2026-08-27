@@ -26,7 +26,8 @@ enum class MessageType : std::uint8_t {
     Error = 7,
     Ping = 8,
     Pong = 9,
-    TopicCatalogRequest = 10
+    TopicCatalogRequest = 10,
+    TopicFieldCatalog = 11
 };
 
 enum class Capability : std::uint32_t {
@@ -34,7 +35,8 @@ enum class Capability : std::uint32_t {
     SerializedMessages = 1U << 1U,
     NumericFields = 1U << 2U,
     TextFields = 1U << 3U,
-    GraphUpdates = 1U << 4U
+    GraphUpdates = 1U << 4U,
+    TopicFieldCapabilities = 1U << 5U
 };
 
 [[nodiscard]] constexpr std::uint32_t capabilityMask(Capability capability) noexcept {
@@ -86,6 +88,30 @@ struct TopicCatalog {
     std::vector<TopicDescriptor> topics;
 
     bool operator==(const TopicCatalog&) const = default;
+};
+
+enum class FieldMappingKind : std::uint8_t {
+    Unknown = 0,
+    BuiltIn = 1,
+    Introspection = 2,
+    RawOnly = 3,
+    Unavailable = 4
+};
+
+struct TopicFieldDescriptor {
+    std::string name;
+    std::string type;
+    FieldMappingKind mapping{FieldMappingKind::Unknown};
+    std::string reason;
+
+    bool operator==(const TopicFieldDescriptor&) const = default;
+};
+
+struct TopicFieldCatalog {
+    std::uint64_t graphRevision{};
+    std::vector<TopicFieldDescriptor> topics;
+
+    bool operator==(const TopicFieldCatalog&) const = default;
 };
 
 struct SubscriptionRequest {
@@ -183,6 +209,12 @@ private:
 
 [[nodiscard]] std::vector<std::uint8_t> encodeTopicCatalog(const TopicCatalog& value);
 [[nodiscard]] std::optional<TopicCatalog> decodeTopicCatalog(
+    std::span<const std::uint8_t> payload,
+    std::string* error = nullptr);
+
+[[nodiscard]] std::vector<std::uint8_t> encodeTopicFieldCatalog(
+    const TopicFieldCatalog& value);
+[[nodiscard]] std::optional<TopicFieldCatalog> decodeTopicFieldCatalog(
     std::span<const std::uint8_t> payload,
     std::string* error = nullptr);
 

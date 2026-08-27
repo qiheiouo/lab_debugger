@@ -73,6 +73,7 @@ signals:
                               qint64 uncertaintyNs,
                               quint32 sampleCount);
     void remoteTopicsChanged(QVariantList topics, quint64 graphRevision);
+    void remoteTopicFieldsChanged(QVariantList topics, quint64 graphRevision);
     void remoteFieldsDiscovered(QStringList fields);
     void sourceError(QString message);
     void statisticsChanged(quint64 rxBytes, quint64 txBytes, qsizetype parserBacklog);

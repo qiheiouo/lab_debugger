@@ -41,7 +41,8 @@ Hello agentHello() {
             capabilityMask(Capability::TopicDiscovery) |
                 capabilityMask(Capability::SerializedMessages) |
                 capabilityMask(Capability::NumericFields) |
-                capabilityMask(Capability::TextFields)};
+                capabilityMask(Capability::TextFields) |
+                capabilityMask(Capability::TopicFieldCapabilities)};
 }
 
 void finishHandshakeWithCapabilities(
@@ -65,7 +66,8 @@ void finishHandshake(ServerSession& session, std::uint64_t sequence = 0) {
         session,
         capabilityMask(Capability::TopicDiscovery) |
             capabilityMask(Capability::SerializedMessages) |
-            capabilityMask(Capability::NumericFields),
+            capabilityMask(Capability::NumericFields) |
+            capabilityMask(Capability::TopicFieldCapabilities),
         sequence);
 }
 
@@ -130,22 +132,30 @@ void testActionsHeartbeatAndServerMessages() {
         {{"/imu", "sensor_msgs/msg/Imu", Reliability::BestEffort,
           Durability::Volatile}}};
     const auto catalogBytes = session.makeTopicCatalog(catalog);
+    const TopicFieldCatalog fieldCatalog{
+        4,
+        {{"/imu", "sensor_msgs/msg/Imu", FieldMappingKind::BuiltIn,
+          "Built-in semantic mapper preserves known field units"}}};
+    const auto fieldCatalogBytes = session.makeTopicFieldCatalog(fieldCatalog);
     const SampleBatch sample{
         "/imu", "sensor_msgs/msg/Imu", {1, 2, 3}, {{"orientation.w", "", 1.0}}};
     const auto sampleBytes = session.makeSample(sample, 100, 200);
     const auto pingBytes = session.makePing(99);
-    require(catalogBytes && sampleBytes && pingBytes,
-            "ready server can emit catalog, sample and ping");
-    const auto frames = decodeAll({*catalogBytes, *sampleBytes, *pingBytes});
-    require(frames.size() == 3 && frames[0].type == MessageType::TopicCatalog &&
-                frames[1].type == MessageType::SampleBatch &&
-                frames[2].type == MessageType::Ping,
+    require(catalogBytes && fieldCatalogBytes && sampleBytes && pingBytes,
+            "ready server can emit both catalogs, sample and ping");
+    const auto frames = decodeAll(
+        {*catalogBytes, *fieldCatalogBytes, *sampleBytes, *pingBytes});
+    require(frames.size() == 4 && frames[0].type == MessageType::TopicCatalog &&
+                frames[1].type == MessageType::TopicFieldCatalog &&
+                frames[2].type == MessageType::SampleBatch &&
+                frames[3].type == MessageType::Ping,
             "server message order is stable");
     require(frames[0].sequence < frames[1].sequence &&
-                frames[1].sequence < frames[2].sequence,
+                frames[1].sequence < frames[2].sequence &&
+                frames[2].sequence < frames[3].sequence,
             "all server output shares a strictly increasing sequence");
-    require(frames[1].sourceTimestamp == 100 &&
-                frames[1].agentReceiveTimestamp == 200,
+    require(frames[2].sourceTimestamp == 100 &&
+                frames[2].agentReceiveTimestamp == 200,
             "sample preserves both Agent timestamps");
 }
 
@@ -210,6 +220,8 @@ void testNegotiatedCapabilitiesAreEnforced() {
         serializedOnly, capabilityMask(Capability::SerializedMessages));
     require(!serializedOnly.makeTopicCatalog({1, {}}),
             "topic catalog is not sent without topic discovery negotiation");
+    require(!serializedOnly.makeTopicFieldCatalog({1, {}}),
+            "topic field catalog is not sent without capability negotiation");
     const auto rawFrame = serializedOnly.makeSample(sample, 0, 456);
     require(rawFrame.has_value(), "serialized-only client receives raw samples");
     const auto rawFrames = decodeAll({*rawFrame});
@@ -260,6 +272,18 @@ void testNegotiatedCapabilitiesAreEnforced() {
                 invalidGraphAck.fatalError->find("topic discovery") !=
                     std::string::npos,
             "graph updates cannot be negotiated without topic discovery");
+
+    ServerSession invalidFieldDependency(agentHello());
+    static_cast<void>(invalidFieldDependency.start());
+    const HelloAck fieldOnly{
+        "Lab Debugger", "0.10.0",
+        capabilityMask(Capability::TopicFieldCapabilities)};
+    const auto invalidFieldAck = invalidFieldDependency.consume(encodeFrame(
+        clientFrame(MessageType::HelloAck, 0, encodeHelloAck(fieldOnly))));
+    require(invalidFieldAck.fatalError &&
+                invalidFieldAck.fatalError->find("topic discovery") !=
+                    std::string::npos,
+            "topic field capabilities cannot be negotiated without discovery");
 }
 
 }  // namespace

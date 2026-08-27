@@ -241,6 +241,10 @@ public:
         require(
             (hello->capabilities & capabilityMask(Capability::GraphUpdates)) != 0U,
             "Hello offers graph updates");
+        require(
+            (hello->capabilities &
+             capabilityMask(Capability::TopicFieldCapabilities)) != 0U,
+            "Hello offers topic field capabilities");
         send(
             MessageType::HelloAck,
             encodeHelloAck({"Humble integration test", "0.1.0", hello->capabilities}));
@@ -412,6 +416,16 @@ const TopicDescriptor* descriptor(
     return nullptr;
 }
 
+const TopicFieldDescriptor* fieldDescriptor(
+    const TopicFieldCatalog& catalog,
+    const std::string& name,
+    const std::string& type) {
+    for (const auto& candidate : catalog.topics) {
+        if (candidate.name == name && candidate.type == type) return &candidate;
+    }
+    return nullptr;
+}
+
 TopicCatalog requestCompleteCatalog(ProtocolClient& client) {
     const std::vector<std::pair<std::string, std::string>> expected{
         {topic("float64"), "std_msgs/msg/Float64"},
@@ -435,11 +449,31 @@ TopicCatalog requestCompleteCatalog(ProtocolClient& client) {
         std::string error;
         const auto catalog = decodeTopicCatalog(frame.payload, &error);
         require(catalog.has_value(), "TopicCatalog payload decodes: " + error);
+        const auto fieldFrame = client.receiveMatching(
+            [](const Frame& value) {
+                return value.type == MessageType::TopicFieldCatalog;
+            },
+            2s);
+        const auto fieldCatalog = decodeTopicFieldCatalog(fieldFrame.payload, &error);
+        require(fieldCatalog.has_value(),
+                "TopicFieldCatalog payload decodes: " + error);
+        require(fieldCatalog->graphRevision == catalog->graphRevision,
+                "topic and field catalogs describe the same graph revision");
         const auto complete = std::all_of(
             expected.begin(), expected.end(), [&](const auto& item) {
                 return descriptor(*catalog, item.first, item.second) != nullptr;
             });
-        if (complete) return *catalog;
+        if (complete) {
+            const auto* builtIn = fieldDescriptor(
+                *fieldCatalog, topic("imu"), "sensor_msgs/msg/Imu");
+            const auto* generic = fieldDescriptor(
+                *fieldCatalog, topic("raw_point"), "geometry_msgs/msg/Point");
+            require(builtIn && builtIn->mapping == FieldMappingKind::BuiltIn,
+                    "field catalog marks Imu as a built-in semantic mapping");
+            require(generic && generic->mapping == FieldMappingKind::Introspection,
+                    "field catalog marks Point as runtime introspection");
+            return *catalog;
+        }
         std::this_thread::sleep_for(100ms);
     }
     throw std::runtime_error("ROS integration: complete ROS graph never reached Agent");

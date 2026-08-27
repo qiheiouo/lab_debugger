@@ -26,6 +26,21 @@ namespace {
 
 using FieldValue = lab::core::agent::FieldValue;
 
+bool hasBuiltInMapping(const std::string& type) {
+    return type == "std_msgs/msg/Float64" ||
+           type == "std_msgs/msg/Float32" ||
+           type == "std_msgs/msg/Int32" ||
+           type == "std_msgs/msg/UInt32" ||
+           type == "std_msgs/msg/Bool" ||
+           type == "std_msgs/msg/String" ||
+           type == "geometry_msgs/msg/Twist" ||
+           type == "geometry_msgs/msg/TwistStamped" ||
+           type == "geometry_msgs/msg/PoseStamped" ||
+           type == "sensor_msgs/msg/Imu" ||
+           type == "sensor_msgs/msg/JointState" ||
+           type == "nav_msgs/msg/Odometry";
+}
+
 template<typename Message>
 Message deserialize(const rclcpp::SerializedMessage& serialized) {
     Message message;
@@ -79,6 +94,16 @@ void twist(
 }
 
 }  // namespace
+
+lab::core::agent::FieldMappingKind inspectFieldMapping(
+    const std::string& type,
+    std::string* reason) {
+    if (hasBuiltInMapping(type)) {
+        if (reason) *reason = "Built-in semantic mapper preserves known field units";
+        return lab::core::agent::FieldMappingKind::BuiltIn;
+    }
+    return inspectGenericFieldMapping(type, reason);
+}
 
 MappedFields mapSerializedFields(
     const std::string& type,

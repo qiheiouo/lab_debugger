@@ -29,7 +29,9 @@ constexpr std::uint32_t supportedCapabilities =
     lab::core::agent::capabilityMask(lab::core::agent::Capability::SerializedMessages) |
     lab::core::agent::capabilityMask(lab::core::agent::Capability::NumericFields) |
     lab::core::agent::capabilityMask(lab::core::agent::Capability::TextFields) |
-    lab::core::agent::capabilityMask(lab::core::agent::Capability::GraphUpdates);
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::GraphUpdates) |
+    lab::core::agent::capabilityMask(
+        lab::core::agent::Capability::TopicFieldCapabilities);
 
 constexpr std::uint32_t sampleCapabilityMask =
     lab::core::agent::capabilityMask(lab::core::agent::Capability::SerializedMessages) |
@@ -59,6 +61,8 @@ class RemoteAgentWorker final : public QObject {
 public:
     using HelloHandler = std::function<void(const lab::core::agent::Hello&)>;
     using CatalogHandler = std::function<void(const lab::core::agent::TopicCatalog&)>;
+    using FieldCatalogHandler =
+        std::function<void(const lab::core::agent::TopicFieldCatalog&)>;
     using SampleHandler = std::function<void(
         const lab::core::agent::Frame&,
         const lab::core::agent::SampleBatch&)>;
@@ -74,6 +78,7 @@ public:
         SampleHandler onSample,
         IssueHandler onIssue,
         ClockHandler onClockSync,
+        FieldCatalogHandler onFieldCatalog,
         StateHandler onState,
         ErrorHandler onError,
         WireHandler onWire)
@@ -82,6 +87,7 @@ public:
           onSample_(std::move(onSample)),
           onIssue_(std::move(onIssue)),
           onClockSync_(std::move(onClockSync)),
+          onFieldCatalog_(std::move(onFieldCatalog)),
           onState_(std::move(onState)),
           onError_(std::move(onError)),
           onWire_(std::move(onWire)) {}
@@ -335,6 +341,20 @@ private:
             onCatalog_(*catalog);
             return true;
         }
+        case lab::core::agent::MessageType::TopicFieldCatalog: {
+            if (!hasCapability(
+                    negotiatedCapabilities_,
+                    lab::core::agent::Capability::TopicFieldCapabilities)) {
+                failFatal(
+                    "Remote Agent sent topic field capabilities without negotiation");
+                return false;
+            }
+            const auto catalog = lab::core::agent::decodeTopicFieldCatalog(
+                frame.payload, &error);
+            if (!catalog) return malformed(frame, error);
+            onFieldCatalog_(*catalog);
+            return true;
+        }
         case lab::core::agent::MessageType::SampleBatch: {
             const auto sample = lab::core::agent::decodeSampleBatch(frame.payload, &error);
             if (!sample) return malformed(frame, error);
@@ -395,6 +415,8 @@ private:
                 lab::core::agent::Capability::TopicDiscovery)) {
             negotiatedCapabilities_ &= ~lab::core::agent::capabilityMask(
                 lab::core::agent::Capability::GraphUpdates);
+            negotiatedCapabilities_ &= ~lab::core::agent::capabilityMask(
+                lab::core::agent::Capability::TopicFieldCapabilities);
         }
         const lab::core::agent::HelloAck ack{
             settings_.clientName,
@@ -551,6 +573,7 @@ private:
     SampleHandler onSample_;
     IssueHandler onIssue_;
     ClockHandler onClockSync_;
+    FieldCatalogHandler onFieldCatalog_;
     StateHandler onState_;
     ErrorHandler onError_;
     WireHandler onWire_;
@@ -572,6 +595,12 @@ RemoteAgentSource::RemoteAgentSource() {
         },
         [this](const lab::core::ClockSyncEstimate& estimate) {
             handleClockSync(estimate);
+        },
+        [this](const lab::core::agent::TopicFieldCatalog& catalog) {
+            const auto callbacks = agentCallbacks();
+            if (callbacks.onTopicFieldCatalog) {
+                callbacks.onTopicFieldCatalog(catalog);
+            }
         },
         [this](lab::core::SourceState state, HandshakeState handshake) {
             open_.store(state == lab::core::SourceState::Open);

@@ -20,7 +20,7 @@ struct RemoteAgentSettings {
     std::string host{"127.0.0.1"};
     std::uint16_t port{9750};
     std::string clientName{"Lab Debugger"};
-    std::string clientVersion{"0.9.0"};
+    std::string clientVersion{"0.10.0"};
     bool autoReconnect{};
 };
 
@@ -32,6 +32,8 @@ struct RemoteAgentCallbacks {
     std::function<void(const lab::core::agent::SampleBatch&)> onSampleBatch;
     std::function<void(const lab::core::agent::DecodeIssue&)> onProtocolIssue;
     std::function<void(const lab::core::ClockSyncEstimate&)> onClockSync;
+    std::function<void(const lab::core::agent::TopicFieldCatalog&)>
+        onTopicFieldCatalog;
 };
 
 class RemoteAgentWorker;

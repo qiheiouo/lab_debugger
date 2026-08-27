@@ -23,7 +23,9 @@ constexpr std::uint32_t agentCapabilities =
     lab::core::agent::capabilityMask(lab::core::agent::Capability::SerializedMessages) |
     lab::core::agent::capabilityMask(lab::core::agent::Capability::NumericFields) |
     lab::core::agent::capabilityMask(lab::core::agent::Capability::TextFields) |
-    lab::core::agent::capabilityMask(lab::core::agent::Capability::GraphUpdates);
+    lab::core::agent::capabilityMask(lab::core::agent::Capability::GraphUpdates) |
+    lab::core::agent::capabilityMask(
+        lab::core::agent::Capability::TopicFieldCapabilities);
 
 std::string defaultHostName() {
     std::array<char, 256> value{};
@@ -89,6 +91,9 @@ RosAgentNode::RosAgentNode() : rclcpp::Node("lab_debug_agent") {
         lastSentRevision_.store(catalog.graphRevision);
         return catalog;
     };
+    callbacks.onTopicFieldCatalogRequested = [this](const auto& catalog) {
+        return buildTopicFieldCatalog(catalog);
+    };
     callbacks.onSubscribe = [this](const auto& request) {
         return subscribeTopic(request);
     };
@@ -108,7 +113,7 @@ RosAgentNode::RosAgentNode() : rclcpp::Node("lab_debug_agent") {
 
     server_ = std::make_unique<AgentTcpServer>(
         TcpServerSettings{bindAddress, static_cast<std::uint16_t>(portValue)},
-        lab::core::agent::Hello{agentId, "0.9.0", defaultHostName(), agentCapabilities},
+        lab::core::agent::Hello{agentId, "0.10.0", defaultHostName(), agentCapabilities},
         std::move(callbacks));
     std::string error;
     if (!server_->start(&error)) throw std::runtime_error(error);
@@ -165,6 +170,20 @@ lab::core::agent::TopicCatalog RosAgentNode::buildCatalog() {
         ++catalogRevision_;
     }
     return {catalogRevision_, std::move(topics)};
+}
+
+lab::core::agent::TopicFieldCatalog RosAgentNode::buildTopicFieldCatalog(
+    const lab::core::agent::TopicCatalog& catalog) {
+    lab::core::agent::TopicFieldCatalog result;
+    result.graphRevision = catalog.graphRevision;
+    result.topics.reserve(catalog.topics.size());
+    for (const auto& topic : catalog.topics) {
+        std::string reason;
+        const auto mapping = inspectFieldMapping(topic.type, &reason);
+        result.topics.push_back(
+            {topic.name, topic.type, mapping, std::move(reason)});
+    }
+    return result;
 }
 
 std::optional<std::string> RosAgentNode::subscribeTopic(
@@ -296,9 +315,16 @@ void RosAgentNode::refreshGraph() {
         return;
     }
     auto catalog = buildCatalog();
-    if (catalog.graphRevision != lastSentRevision_.load() &&
-        server_->publishCatalog(catalog)) {
-        lastSentRevision_.store(catalog.graphRevision);
+    if (catalog.graphRevision != lastSentRevision_.load()) {
+        auto sent = server_->publishCatalog(catalog);
+        if (sent &&
+            (server_->negotiatedCapabilities() &
+             lab::core::agent::capabilityMask(
+                 lab::core::agent::Capability::TopicFieldCapabilities)) != 0U) {
+            sent = server_->publishTopicFieldCatalog(
+                buildTopicFieldCatalog(catalog));
+        }
+        if (sent) lastSentRevision_.store(catalog.graphRevision);
     }
 }
 

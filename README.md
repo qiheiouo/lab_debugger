@@ -79,6 +79,6 @@ cmake --install build --config Release --prefix dist/LabDebugger
 
 ## Remote ROS Agent 客户端
 
-左侧切换到“ROS Agent”页，填写 Linux Agent 地址和端口后连接。客户端必须在 5 秒内收到合法 `Hello`，随后才会显示为就绪；Agent 提供发现能力时客户端自动请求 Topic 目录。选择 Topic、可靠性与队列深度后可订阅或取消订阅；收到的原始 CDR 进入终端和 Session 原始流，数值及布尔字段直接进入实时曲线和 `values.csv`。客户端还会每 2 秒通过 Ping/Pong 更新 Agent 时钟偏移、RTT 与不确定度，连接页显示当前质量，记录期间写入 `clock_sync` 事件。启用自动重连后，临时网络故障按 250 ms 至 8 s 指数退避，同一端点重新握手成功后会刷新目录并恢复已订阅的 topic/type；手动断开会立即取消重试，协议错误不会无限重连。
+左侧切换到“ROS Agent”页，填写 Linux Agent 地址和端口后连接。客户端必须在 5 秒内收到合法 `Hello`，随后才会显示为就绪；Agent 提供发现能力时客户端自动请求 Topic 目录。新版 Agent 还会为每个 topic/type 显示“内置语义、通用解析、仅原始 CDR、不可订阅”及具体原因，旧 Agent 则明确显示“未提供”。选择 Topic、可靠性与队列深度后可订阅或取消订阅；收到的原始 CDR 进入终端和 Session 原始流，数值及布尔字段直接进入实时曲线和 `values.csv`。客户端还会每 2 秒通过 Ping/Pong 更新 Agent 时钟偏移、RTT 与不确定度，连接页显示当前质量，记录期间写入 `clock_sync` 事件。启用自动重连后，临时网络故障按 250 ms 至 8 s 指数退避，同一端点重新握手成功后会刷新目录并恢复已订阅的 topic/type；手动断开会立即取消重试，协议错误不会无限重连。
 
 Linux/ROS2 Humble Agent 位于 [`agent/ros2/lab_debug_agent`](agent/ros2/lab_debug_agent/README.md)。Agent 对内置常见消息保留带单位的语义映射，对其余已安装 C++ 与 introspection typesupport 的消息递归展开标量、字符串、嵌套成员和数组；无法安全结构化的内容仍保留原始 CDR。ament 包此前已在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 环境完成构建、launch、真实 ROS graph/CDR、QoS、订阅生命周期、错误恢复、断线重连和 SIGINT 自动测试。协议暂不提供认证或加密，推荐让 Agent 只监听回环地址并通过 SSH 隧道连接。

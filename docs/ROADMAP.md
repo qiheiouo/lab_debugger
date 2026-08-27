@@ -83,13 +83,13 @@
 - `GenericSubscription` 任意类型 CDR 转发；
 - std_msgs、Twist/Pose、Imu/JointState、Odometry 常见字段映射。
 - 未内置消息的运行时 C++/introspection typesupport 加载、递归字段展开、标准 Header 时间戳与原始 CDR 安全回退；
+- 协商式 TopicFieldCatalog 能力扩展，在订阅前显示内置语义、通用解析、仅原始 CDR、不可订阅和失败原因，旧 v1 对端保持兼容；
 - Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 构建、launch 与 SIGINT 验证；
 - 真实 ROS graph、reliable/best-effort QoS、GraphUpdates、CDR、字段映射、订阅清理和重连自动联调；
 - Linux loopback TCP 并发严格序号、CRC 恢复与协议错误自动测试。
 
 下一批：
 
-- Topic 目录中的结构化类型支持能力标记与失败原因展示；
 - 认证与 TLS 部署方式。
 
 后续：

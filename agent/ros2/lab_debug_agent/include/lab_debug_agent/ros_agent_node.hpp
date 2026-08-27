@@ -26,6 +26,8 @@ private:
     };
 
     [[nodiscard]] lab::core::agent::TopicCatalog buildCatalog();
+    [[nodiscard]] lab::core::agent::TopicFieldCatalog buildTopicFieldCatalog(
+        const lab::core::agent::TopicCatalog& catalog);
     [[nodiscard]] std::optional<std::string> subscribeTopic(
         const lab::core::agent::SubscriptionRequest& request);
     [[nodiscard]] std::optional<std::string> unsubscribeTopic(

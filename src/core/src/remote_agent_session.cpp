@@ -78,6 +78,16 @@ ServerConsumeResult ServerSession::consume(std::span<const std::uint8_t> bytes) 
                     "Graph updates require the topic discovery capability");
                 break;
             }
+            if (hasCapability(
+                    ack->requestedCapabilities,
+                    Capability::TopicFieldCapabilities) &&
+                !hasCapability(
+                    ack->requestedCapabilities, Capability::TopicDiscovery)) {
+                failLocked(
+                    result,
+                    "Topic field capabilities require the topic discovery capability");
+                break;
+            }
             clientIdentity_ = *ack;
             negotiatedCapabilities_ = ack->requestedCapabilities;
             state_ = ServerSessionState::Ready;
@@ -155,6 +165,7 @@ ServerConsumeResult ServerSession::consume(std::span<const std::uint8_t> bytes) 
         case MessageType::Hello:
         case MessageType::HelloAck:
         case MessageType::TopicCatalog:
+        case MessageType::TopicFieldCatalog:
         case MessageType::SampleBatch:
             failLocked(
                 result,
@@ -187,6 +198,22 @@ std::optional<std::vector<std::uint8_t>> ServerSession::makeTopicCatalog(
     const auto now = nowTimestampNs();
     return encodeReadyLocked(
         MessageType::TopicCatalog, encodeTopicCatalog(catalog), now, now);
+}
+
+std::optional<std::vector<std::uint8_t>> ServerSession::makeTopicFieldCatalog(
+    const TopicFieldCatalog& catalog) {
+    std::scoped_lock lock(mutex_);
+    if (state_ != ServerSessionState::Ready ||
+        !hasCapability(
+            negotiatedCapabilities_, Capability::TopicFieldCapabilities)) {
+        return std::nullopt;
+    }
+    const auto now = nowTimestampNs();
+    return encodeReadyLocked(
+        MessageType::TopicFieldCatalog,
+        encodeTopicFieldCatalog(catalog),
+        now,
+        now);
 }
 
 std::optional<std::vector<std::uint8_t>> ServerSession::makeSample(

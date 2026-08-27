@@ -48,6 +48,7 @@ struct Events {
     std::vector<std::string> errors;
     std::vector<Hello> hellos;
     std::vector<TopicCatalog> catalogs;
+    std::vector<TopicFieldCatalog> fieldCatalogs;
     std::vector<SampleBatch> batches;
     std::vector<DecodeIssue> issues;
     std::vector<ClockSyncEstimate> clockEstimates;
@@ -93,6 +94,10 @@ struct Events {
             [this](const ClockSyncEstimate& estimate) {
                 std::scoped_lock lock(mutex);
                 clockEstimates.push_back(estimate);
+            },
+            [this](const TopicFieldCatalog& catalog) {
+                std::scoped_lock lock(mutex);
+                fieldCatalogs.push_back(catalog);
             }};
     }
 
@@ -103,7 +108,7 @@ struct Events {
 
     bool receivedCatalogAndIssue() {
         std::scoped_lock lock(mutex);
-        return catalogs.size() == 1 && !issues.empty();
+        return catalogs.size() == 1 && fieldCatalogs.size() == 1 && !issues.empty();
     }
 
     bool hasSequenceError() {
@@ -217,7 +222,8 @@ void testHandshakeCatalogSamplesAndControls() {
         capabilityMask(Capability::TopicDiscovery) |
             capabilityMask(Capability::SerializedMessages) |
             capabilityMask(Capability::NumericFields) |
-            capabilityMask(Capability::TextFields)};
+            capabilityMask(Capability::TextFields) |
+            capabilityMask(Capability::TopicFieldCapabilities)};
     const auto helloBytes = encodeFrame(serverFrame(MessageType::Hello, 10, encodeHello(hello)));
     send(*peer, std::vector<std::uint8_t>(helloBytes.begin(), helloBytes.begin() + 7));
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
@@ -237,7 +243,9 @@ void testHandshakeCatalogSamplesAndControls() {
     std::string error;
     const auto ack = decodeHelloAck(handshakeFrames[0].payload, &error);
     require(ack && ack->clientName == "Agent test client" &&
-                (ack->requestedCapabilities & capabilityMask(Capability::TextFields)) != 0,
+                (ack->requestedCapabilities & capabilityMask(Capability::TextFields)) != 0 &&
+                (ack->requestedCapabilities &
+                 capabilityMask(Capability::TopicFieldCapabilities)) != 0,
             "hello acknowledgement carries negotiated identity and capabilities");
     require(handshakeFrames[1].type == MessageType::TopicCatalogRequest &&
                 handshakeFrames[1].payload.empty(),
@@ -252,6 +260,13 @@ void testHandshakeCatalogSamplesAndControls() {
     auto catalogBytes = encodeFrame(
         serverFrame(MessageType::TopicCatalog, 11, encodeTopicCatalog(catalog)));
     corrupt.insert(corrupt.end(), catalogBytes.begin(), catalogBytes.end());
+    const TopicFieldCatalog fieldCatalog{
+        3,
+        {{"/imu", "sensor_msgs/msg/Imu", FieldMappingKind::BuiltIn,
+          "Built-in semantic mapper preserves known field units"}}};
+    const auto fieldCatalogBytes = encodeFrame(serverFrame(
+        MessageType::TopicFieldCatalog, 12, encodeTopicFieldCatalog(fieldCatalog)));
+    corrupt.insert(corrupt.end(), fieldCatalogBytes.begin(), fieldCatalogBytes.end());
 
     const SampleBatch batch{
         "/imu",
@@ -261,7 +276,7 @@ void testHandshakeCatalogSamplesAndControls() {
          {"calibrated", "", true},
          {"frame_id", "", std::string("imu_link")}}};
     auto sampleBytes = encodeFrame(
-        serverFrame(MessageType::SampleBatch, 12, encodeSampleBatch(batch)));
+        serverFrame(MessageType::SampleBatch, 13, encodeSampleBatch(batch)));
     corrupt.insert(corrupt.end(), sampleBytes.begin(), sampleBytes.end());
     send(*peer, corrupt);
     require(waitFor([&] {
@@ -288,7 +303,7 @@ void testHandshakeCatalogSamplesAndControls() {
     require(source.requestTopicCatalog(), "manual catalog refresh accepted");
     require(source.subscribe(request), "subscription request accepted");
     require(source.unsubscribe(request), "unsubscribe request accepted");
-    send(*peer, encodeFrame(serverFrame(MessageType::Ping, 13, encodeNonce(0xCAFE))));
+    send(*peer, encodeFrame(serverFrame(MessageType::Ping, 14, encodeNonce(0xCAFE))));
 
     const auto controls = receiveFrames(*peer, clientDecoder, 4);
     require(controls[0].type == MessageType::TopicCatalogRequest,
@@ -308,7 +323,7 @@ void testHandshakeCatalogSamplesAndControls() {
                 stats.receivedChunks > 0 && stats.transmittedChunks >= 6,
             "wire-level statistics include data and control frames");
 
-    send(*peer, encodeFrame(serverFrame(MessageType::Pong, 13, encodeNonce(2))));
+    send(*peer, encodeFrame(serverFrame(MessageType::Pong, 14, encodeNonce(2))));
     require(waitFor([&] {
                 return source.handshakeState() == HandshakeState::Error &&
                        events.hasSequenceError();
@@ -355,6 +370,23 @@ void testCapabilityAwareHandshakeWithoutTopicDiscovery() {
             "client does not request a catalog without topic discovery");
     require(!source.requestTopicCatalog(),
             "manual catalog request is rejected when capability was not negotiated");
+    send(*peer,
+         encodeFrame(serverFrame(
+             MessageType::TopicFieldCatalog,
+             1,
+             encodeTopicFieldCatalog({1, {}}))));
+    require(waitFor([&] {
+                std::scoped_lock lock(events.mutex);
+                return source.handshakeState() == HandshakeState::Error &&
+                       std::any_of(
+                           events.errors.begin(),
+                           events.errors.end(),
+                           [](const std::string& message) {
+                               return message.find("without negotiation") !=
+                                      std::string::npos;
+                           });
+            }),
+            "unnegotiated topic field catalog is a protocol error");
     source.close();
     peer->deleteLater();
 }
@@ -617,6 +649,11 @@ void testClientAndServerStateMachinesAreCompatible() {
                 return events.catalogs.size() == 1;
             }),
             "client accepts catalog produced by server session");
+    {
+        std::scoped_lock lock(events.mutex);
+        require(events.fieldCatalogs.empty(),
+                "client remains compatible when an older Agent does not offer a field catalog");
+    }
 
     const SubscriptionRequest request{
         9, "/temperature", "std_msgs/msg/Float64", Reliability::Reliable, 10};

@@ -166,7 +166,8 @@ Hello identity() {
             capabilityMask(Capability::SerializedMessages) |
             capabilityMask(Capability::NumericFields) |
             capabilityMask(Capability::TextFields) |
-            capabilityMask(Capability::GraphUpdates)};
+            capabilityMask(Capability::GraphUpdates) |
+            capabilityMask(Capability::TopicFieldCapabilities)};
 }
 
 void completeHandshake(
@@ -216,6 +217,12 @@ void testTcpLifecycleAndConcurrentOrdering() {
               Reliability::Reliable,
               Durability::Volatile}}};
     };
+    callbacks.onTopicFieldCatalogRequested = [](const TopicCatalog& catalog) {
+        return TopicFieldCatalog{
+            catalog.graphRevision,
+            {{"/value", "std_msgs/msg/Float64", FieldMappingKind::BuiltIn,
+              "Built-in semantic mapper preserves known field units"}}};
+    };
     callbacks.onSubscribe = [&](const SubscriptionRequest& request) {
         std::scoped_lock lock(callbackMutex);
         subscriptions.push_back(request);
@@ -240,10 +247,15 @@ void testTcpLifecycleAndConcurrentOrdering() {
     std::uint64_t lastServerSequence = 0;
     completeHandshake(client.get(), decoder, &lastServerSequence);
     sendFrame(client.get(), MessageType::TopicCatalogRequest, 1, {});
-    const auto catalogs = receiveFrames(client.get(), decoder, 1);
+    const auto catalogs = receiveFrames(client.get(), decoder, 2);
     require(
-        catalogs.size() == 1 && catalogs[0].type == MessageType::TopicCatalog,
-        "catalog request receives structured TopicCatalog");
+        catalogs.size() == 2 && catalogs[0].type == MessageType::TopicCatalog &&
+            catalogs[1].type == MessageType::TopicFieldCatalog,
+        "catalog request receives topic and negotiated field catalogs");
+    require(
+        decodeTopicFieldCatalog(catalogs[1].payload)->topics[0].mapping ==
+            FieldMappingKind::BuiltIn,
+        "field catalog preserves the Agent mapping capability");
     requireIncreasing(catalogs, &lastServerSequence);
 
     const SubscriptionRequest request{

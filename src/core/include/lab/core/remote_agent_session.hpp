@@ -56,6 +56,8 @@ public:
 
     [[nodiscard]] std::optional<std::vector<std::uint8_t>> makeTopicCatalog(
         const TopicCatalog& catalog);
+    [[nodiscard]] std::optional<std::vector<std::uint8_t>> makeTopicFieldCatalog(
+        const TopicFieldCatalog& catalog);
     [[nodiscard]] std::optional<std::vector<std::uint8_t>> makeSample(
         const SampleBatch& sample,
         Timestamp sourceTimestamp,

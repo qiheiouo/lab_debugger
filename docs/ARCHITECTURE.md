@@ -90,7 +90,7 @@ Windows remote mode:
 
 远程帧必须携带 topic、message type、源时间、Agent 接收时间、序号与负载。当前 Agent 使用 GenericSubscription 转发任意已安装 typesupport 的原始 CDR；常用消息先走带单位和专用语义的编译期映射，其余消息由运行时 C++ typesupport 反序列化，再根据 introspection metadata 递归展开字段。ROS2 构建通过独立 ament 包启用，不向核心传播头文件或链接依赖。
 
-Remote Agent v1 帧和负载编解码位于纯 C++ `lab_core`。Windows `RemoteAgentSource` 在独立 Qt 网络线程内执行客户端状态机、指数退避重连、同端点订阅恢复和 Ping/Pong 时钟测量；纯核心 `ClockSyncEstimator` 在最近 16 个样本中选择最低 RTT 样本，给出 Agent 相对客户端的时钟偏移和不确定度。同一核心中的 `ServerSession` 执行 Agent 侧能力协商、客户端命令、统一序号和错误状态机。Ubuntu ament 包把 POSIX TCP 传输、ROS graph、`GenericSubscription`、常见消息语义映射与通用 introspection 组合在服务端状态机外部。SampleBatch 的原始 CDR 进入 Raw Recorder，数值与布尔字段直接进入 TimeSeries 和 Session；时钟质量进入 Session 事件。详细格式见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。Linux 包此前已经在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下完成自动构建和真实 ROS/DDS/TCP 联调。
+Remote Agent v1 帧和负载编解码位于纯 C++ `lab_core`。Windows `RemoteAgentSource` 在独立 Qt 网络线程内执行客户端状态机、指数退避重连、同端点订阅恢复和 Ping/Pong 时钟测量；纯核心 `ClockSyncEstimator` 在最近 16 个样本中选择最低 RTT 样本，给出 Agent 相对客户端的时钟偏移和不确定度。同一核心中的 `ServerSession` 执行 Agent 侧能力协商、客户端命令、统一序号和错误状态机。Ubuntu ament 包把 POSIX TCP 传输、ROS graph、`GenericSubscription`、常见消息语义映射与通用 introspection 组合在服务端状态机外部。协商 `TopicFieldCapabilities` 后，独立的 `TopicFieldCatalog` 与基础目录使用相同 graph revision，把类型探测结果送到 UI；未协商时仍只发送旧格式 `TopicCatalog`。SampleBatch 的原始 CDR 进入 Raw Recorder，数值与布尔字段直接进入 TimeSeries 和 Session；时钟质量进入 Session 事件。详细格式见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。Linux 包此前已经在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下完成自动构建和真实 ROS/DDS/TCP 联调。
 
 ## 5. 协议引擎边界
 

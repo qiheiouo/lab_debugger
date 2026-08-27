@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(lab_debug_agent VERSION 0.9.0 LANGUAGES CXX)
+project(lab_debug_agent VERSION 0.10.0 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 20)

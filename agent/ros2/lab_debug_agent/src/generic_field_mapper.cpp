@@ -49,7 +49,8 @@ struct TypeSupportEntry {
     std::shared_ptr<rcpputils::SharedLibrary> introspectionLibrary;
     const rosidl_message_type_support_t* serializationHandle{};
     const MessageMembers* members{};
-    std::string error;
+    std::string serializationError;
+    std::string introspectionError;
 };
 
 class TypeSupportCache final {
@@ -67,7 +68,16 @@ public:
                 type,
                 rosidl_typesupport_cpp::typesupport_identifier,
                 *entry->serializationLibrary);
-
+            if (!entry->serializationHandle) {
+                throw std::runtime_error(
+                    "loaded C++ typesupport contains a null handle");
+            }
+        } catch (const std::exception& exception) {
+            if (rcutils_error_is_set()) rcutils_reset_error();
+            entry->serializationHandle = nullptr;
+            entry->serializationError = exception.what();
+        }
+        try {
             entry->introspectionLibrary = rclcpp::get_typesupport_library(
                 type,
                 rosidl_typesupport_introspection_cpp::typesupport_identifier);
@@ -75,9 +85,9 @@ public:
                 type,
                 rosidl_typesupport_introspection_cpp::typesupport_identifier,
                 *entry->introspectionLibrary);
-            if (!entry->serializationHandle || !introspectionHandle ||
-                !introspectionHandle->data) {
-                throw std::runtime_error("loaded typesupport contains a null handle");
+            if (!introspectionHandle || !introspectionHandle->data) {
+                throw std::runtime_error(
+                    "loaded introspection typesupport contains a null handle");
             }
             entry->members = static_cast<const MessageMembers*>(
                 introspectionHandle->data);
@@ -87,9 +97,8 @@ public:
             }
         } catch (const std::exception& exception) {
             if (rcutils_error_is_set()) rcutils_reset_error();
-            entry->serializationHandle = nullptr;
             entry->members = nullptr;
-            entry->error = exception.what();
+            entry->introspectionError = exception.what();
         }
         entries_.emplace(type, entry);
         return entry;
@@ -103,6 +112,17 @@ private:
 TypeSupportCache& typeSupportCache() {
     static TypeSupportCache cache;
     return cache;
+}
+
+std::string boundedReason(std::string value) {
+    std::replace(value.begin(), value.end(), '\r', ' ');
+    std::replace(value.begin(), value.end(), '\n', ' ');
+    constexpr std::size_t maximumReasonBytes = 512;
+    if (value.size() > maximumReasonBytes) {
+        value.resize(maximumReasonBytes - 3);
+        value.append("...");
+    }
+    return value;
 }
 
 class MessageStorage final {
@@ -603,17 +623,49 @@ std::optional<lab::core::Timestamp> standardHeaderTimestamp(
 
 }  // namespace
 
+lab::core::agent::FieldMappingKind inspectGenericFieldMapping(
+    const std::string& type,
+    std::string* reason) {
+    const auto typeSupport = typeSupportCache().get(type);
+    if (!typeSupport->serializationHandle) {
+        if (reason) {
+            *reason = "C++ typesupport is unavailable";
+            if (!typeSupport->serializationError.empty()) {
+                *reason += ": " + boundedReason(typeSupport->serializationError);
+            }
+        }
+        return lab::core::agent::FieldMappingKind::Unavailable;
+    }
+    if (!typeSupport->members) {
+        if (reason) {
+            *reason = "Introspection typesupport is unavailable; raw CDR remains available";
+            if (!typeSupport->introspectionError.empty()) {
+                *reason += ": " + boundedReason(typeSupport->introspectionError);
+            }
+        }
+        return lab::core::agent::FieldMappingKind::RawOnly;
+    }
+    if (reason) *reason = "Runtime ROS2 introspection is available";
+    return lab::core::agent::FieldMappingKind::Introspection;
+}
+
 MappedFields mapGenericSerializedFields(
     const std::string& type,
     const rclcpp::SerializedMessage& serialized) {
     MappedFields result;
     try {
         const auto typeSupport = typeSupportCache().get(type);
-        if (!typeSupport->error.empty()) {
-            throw std::runtime_error(typeSupport->error);
+        if (!typeSupport->serializationHandle) {
+            throw std::runtime_error(
+                typeSupport->serializationError.empty()
+                    ? "C++ typesupport is unavailable"
+                    : typeSupport->serializationError);
         }
-        if (!typeSupport->serializationHandle || !typeSupport->members) {
-            throw std::runtime_error("typesupport cache contains no usable metadata");
+        if (!typeSupport->members) {
+            throw std::runtime_error(
+                typeSupport->introspectionError.empty()
+                    ? "introspection typesupport is unavailable"
+                    : typeSupport->introspectionError);
         }
 
         MessageStorage storage(*typeSupport->members);

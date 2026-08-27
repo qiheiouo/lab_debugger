@@ -39,6 +39,25 @@ QString durabilityName(int value) {
     return QStringLiteral("Unknown");
 }
 
+QString topicFieldKey(const QString& name, const QString& type) {
+    return name + QChar(0x001F) + type;
+}
+
+QString mappingName(int value, bool negotiated) {
+    switch (static_cast<lab::core::agent::FieldMappingKind>(value)) {
+    case lab::core::agent::FieldMappingKind::BuiltIn: return QObject::tr("内置语义");
+    case lab::core::agent::FieldMappingKind::Introspection:
+        return QObject::tr("通用解析");
+    case lab::core::agent::FieldMappingKind::RawOnly:
+        return QObject::tr("仅原始 CDR");
+    case lab::core::agent::FieldMappingKind::Unavailable:
+        return QObject::tr("不可订阅");
+    case lab::core::agent::FieldMappingKind::Unknown:
+        return negotiated ? QObject::tr("等待 Agent") : QObject::tr("Agent 未提供");
+    }
+    return QObject::tr("未知");
+}
+
 }  // namespace
 
 RemoteAgentPanel::RemoteAgentPanel(QWidget* parent) : QWidget(parent) {
@@ -88,13 +107,14 @@ RemoteAgentPanel::RemoteAgentPanel(QWidget* parent) : QWidget(parent) {
     catalogHeader->addWidget(catalogRevision_, 1);
     catalogHeader->addWidget(refreshButton_);
 
-    topics_ = new QTableWidget(0, 4, this);
+    topics_ = new QTableWidget(0, 5, this);
     topics_->setHorizontalHeaderLabels(
-        {tr("Topic"), tr("消息类型"), tr("可靠性"), tr("持久性")});
+        {tr("Topic"), tr("消息类型"), tr("可靠性"), tr("持久性"), tr("字段能力")});
     topics_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     topics_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     topics_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     topics_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    topics_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     topics_->verticalHeader()->hide();
     topics_->setSelectionBehavior(QAbstractItemView::SelectRows);
     topics_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -154,7 +174,7 @@ lab::adapters::remote_agent::RemoteAgentSettings RemoteAgentPanel::settings() co
     return {host_->text().trimmed().toStdString(),
             static_cast<std::uint16_t>(port_->value()),
             clientName_->text().trimmed().toStdString(),
-            "0.9.0",
+            "0.10.0",
             autoReconnect_->isChecked()};
 }
 
@@ -176,6 +196,9 @@ void RemoteAgentPanel::setSourceState(int rawState) {
         state_->setStyleSheet(QStringLiteral("color: #e5b567;"));
         agentIdentity_->setText(tr("等待新的 Agent 身份"));
         topics_->setRowCount(0);
+        topicFields_.clear();
+        currentGraphRevision_ = 0;
+        topicFieldRevision_ = 0;
         catalogRevision_->setText(tr("Topic 目录：等待握手"));
         break;
     case lab::core::SourceState::Open:
@@ -223,9 +246,18 @@ void RemoteAgentPanel::setAgentHello(
         tr("Agent：%1  |  版本：%2  |  主机：%3  |  能力：0x%4")
             .arg(agentId, softwareVersion, hostName)
             .arg(capabilities, 8, 16, QLatin1Char('0')));
+    topicFieldCatalogNegotiated_ =
+        (capabilities & lab::core::agent::capabilityMask(
+                            lab::core::agent::Capability::TopicFieldCapabilities)) != 0U;
+    if (!topicFieldCatalogNegotiated_) {
+        topicFields_.clear();
+        topicFieldRevision_ = 0;
+    }
 }
 
 void RemoteAgentPanel::setTopics(QVariantList topics, quint64 graphRevision) {
+    currentGraphRevision_ = graphRevision;
+    if (topicFieldRevision_ != graphRevision) topicFields_.clear();
     topics_->setRowCount(topics.size());
     for (int row = 0; row < topics.size(); ++row) {
         const auto item = topics[row].toMap();
@@ -239,15 +271,58 @@ void RemoteAgentPanel::setTopics(QVariantList topics, quint64 graphRevision) {
             row, 1, new QTableWidgetItem(item.value(QStringLiteral("type")).toString()));
         topics_->setItem(row, 2, new QTableWidgetItem(reliabilityName(reliability)));
         topics_->setItem(row, 3, new QTableWidgetItem(durabilityName(durability)));
+        updateTopicFieldCell(row);
     }
     catalogRevision_->setText(
         tr("Topic 目录：%1 项，图版本 %2").arg(topics.size()).arg(graphRevision));
     updateTopicButtons();
 }
 
+void RemoteAgentPanel::setTopicFields(
+    QVariantList topics,
+    quint64 graphRevision) {
+    topicFields_.clear();
+    topicFieldRevision_ = graphRevision;
+    for (const auto& value : topics) {
+        const auto item = value.toMap();
+        topicFields_.insert(
+            topicFieldKey(item.value(QStringLiteral("name")).toString(),
+                          item.value(QStringLiteral("type")).toString()),
+            item);
+    }
+    if (currentGraphRevision_ == graphRevision) {
+        for (int row = 0; row < topics_->rowCount(); ++row) {
+            updateTopicFieldCell(row);
+        }
+    }
+    updateTopicButtons();
+}
+
+void RemoteAgentPanel::updateTopicFieldCell(int row) {
+    if (!topics_->item(row, 0) || !topics_->item(row, 1)) return;
+    const auto key = topicFieldKey(
+        topics_->item(row, 0)->text(), topics_->item(row, 1)->text());
+    const auto mapping = topicFieldRevision_ == currentGraphRevision_
+                             ? topicFields_.value(key)
+                             : QVariantMap{};
+    const auto kind = mapping.value(
+        QStringLiteral("mapping"),
+        static_cast<int>(lab::core::agent::FieldMappingKind::Unknown)).toInt();
+    auto* capability = new QTableWidgetItem(
+        mappingName(kind, topicFieldCatalogNegotiated_));
+    capability->setData(Qt::UserRole, kind);
+    const auto reason = mapping.value(QStringLiteral("reason")).toString();
+    if (!reason.isEmpty()) capability->setToolTip(reason);
+    topics_->setItem(row, 4, capability);
+}
+
 void RemoteAgentPanel::updateTopicButtons() {
     const auto selectable = ready_ && topics_->currentRow() >= 0;
-    subscribeButton_->setEnabled(selectable);
+    const auto* mapping = selectable ? topics_->item(topics_->currentRow(), 4) : nullptr;
+    const auto unavailable = mapping &&
+        mapping->data(Qt::UserRole).toInt() ==
+            static_cast<int>(lab::core::agent::FieldMappingKind::Unavailable);
+    subscribeButton_->setEnabled(selectable && !unavailable);
     unsubscribeButton_->setEnabled(selectable);
 }
 

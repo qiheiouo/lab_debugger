@@ -235,6 +235,10 @@ bool validDurability(std::uint8_t value) {
     return value <= static_cast<std::uint8_t>(Durability::TransientLocal);
 }
 
+bool validFieldMappingKind(std::uint8_t value) {
+    return value <= static_cast<std::uint8_t>(FieldMappingKind::Unavailable);
+}
+
 void requireNonEmpty(const std::string& value, const char* field) {
     if (value.empty()) {
         throw std::invalid_argument(std::string("Agent protocol ") + field + " is empty");
@@ -361,7 +365,7 @@ const StreamStatistics& StreamDecoder::statistics() const noexcept {
 
 bool isKnownMessageType(std::uint8_t value) noexcept {
     return value >= static_cast<std::uint8_t>(MessageType::Hello) &&
-           value <= static_cast<std::uint8_t>(MessageType::TopicCatalogRequest);
+           value <= static_cast<std::uint8_t>(MessageType::TopicFieldCatalog);
 }
 
 std::string toString(MessageType type) {
@@ -376,6 +380,7 @@ std::string toString(MessageType type) {
     case MessageType::Ping: return "ping";
     case MessageType::Pong: return "pong";
     case MessageType::TopicCatalogRequest: return "topic_catalog_request";
+    case MessageType::TopicFieldCatalog: return "topic_field_catalog";
     }
     return "unknown";
 }
@@ -518,6 +523,59 @@ std::optional<TopicCatalog> decodeTopicCatalog(
             reader.fail("topic catalog contains empty topic name or type");
             return std::nullopt;
         }
+        value.topics.push_back(std::move(topic));
+    }
+    if (!reader.finish()) return std::nullopt;
+    return value;
+}
+
+std::vector<std::uint8_t> encodeTopicFieldCatalog(
+    const TopicFieldCatalog& value) {
+    PayloadWriter writer;
+    writer.u64(value.graphRevision);
+    writer.count(value.topics.size());
+    for (const auto& topic : value.topics) {
+        requireNonEmpty(topic.name, "field capability topic name");
+        requireNonEmpty(topic.type, "field capability topic type");
+        if (!validFieldMappingKind(static_cast<std::uint8_t>(topic.mapping))) {
+            throw std::invalid_argument(
+                "Agent protocol topic has invalid field mapping enum");
+        }
+        writer.string(topic.name);
+        writer.string(topic.type);
+        writer.u8(static_cast<std::uint8_t>(topic.mapping));
+        writer.string(topic.reason);
+    }
+    return writer.take();
+}
+
+std::optional<TopicFieldCatalog> decodeTopicFieldCatalog(
+    std::span<const std::uint8_t> payload,
+    std::string* error) {
+    if (error) error->clear();
+    PayloadReader reader(payload, error);
+    TopicFieldCatalog value;
+    std::uint32_t count = 0;
+    if (!reader.u64(value.graphRevision) || !reader.count(count)) {
+        return std::nullopt;
+    }
+    value.topics.reserve(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        TopicFieldDescriptor topic;
+        std::uint8_t mapping = 0;
+        if (!reader.string(topic.name) || !reader.string(topic.type) ||
+            !reader.u8(mapping) || !reader.string(topic.reason)) {
+            return std::nullopt;
+        }
+        if (!validFieldMappingKind(mapping)) {
+            reader.fail("topic field catalog contains invalid mapping enum");
+            return std::nullopt;
+        }
+        if (topic.name.empty() || topic.type.empty()) {
+            reader.fail("topic field catalog contains empty topic name or type");
+            return std::nullopt;
+        }
+        topic.mapping = static_cast<FieldMappingKind>(mapping);
         value.topics.push_back(std::move(topic));
     }
     if (!reader.finish()) return std::nullopt;

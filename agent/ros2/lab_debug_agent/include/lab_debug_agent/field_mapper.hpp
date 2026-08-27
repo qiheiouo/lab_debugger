@@ -15,6 +15,10 @@ struct MappedFields {
     std::string warning;
 };
 
+[[nodiscard]] lab::core::agent::FieldMappingKind inspectFieldMapping(
+    const std::string& type,
+    std::string* reason = nullptr);
+
 [[nodiscard]] MappedFields mapSerializedFields(
     const std::string& type,
     const rclcpp::SerializedMessage& serialized);

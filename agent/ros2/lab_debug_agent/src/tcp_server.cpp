@@ -104,6 +104,19 @@ bool AgentTcpServer::publishCatalog(
     }
 }
 
+bool AgentTcpServer::publishTopicFieldCatalog(
+    const lab::core::agent::TopicFieldCatalog& catalog) {
+    std::scoped_lock lock(sessionIoMutex_);
+    try {
+        const auto bytes = session_.makeTopicFieldCatalog(catalog);
+        return bytes && sendEncoded(*bytes);
+    } catch (const std::exception& exception) {
+        warning(std::string("Failed to encode topic field catalog: ") +
+                exception.what());
+        return false;
+    }
+}
+
 bool AgentTcpServer::publishSample(
     const lab::core::agent::SampleBatch& sample,
     lab::core::Timestamp sourceTimestamp,
@@ -250,7 +263,16 @@ void AgentTcpServer::processAction(
     try {
         if (std::holds_alternative<lab::core::agent::CatalogRequestAction>(action)) {
             if (callbacks_.onCatalogRequested) {
-                publishCatalog(callbacks_.onCatalogRequested());
+                const auto catalog = callbacks_.onCatalogRequested();
+                const auto catalogSent = publishCatalog(catalog);
+                if (catalogSent &&
+                    (negotiatedCapabilities() &
+                     lab::core::agent::capabilityMask(
+                         lab::core::agent::Capability::TopicFieldCapabilities)) != 0U &&
+                    callbacks_.onTopicFieldCatalogRequested) {
+                    publishTopicFieldCatalog(
+                        callbacks_.onTopicFieldCatalogRequested(catalog));
+                }
             }
             return;
         }

@@ -20,6 +20,8 @@ struct TcpServerSettings {
 
 struct TcpServerCallbacks {
     std::function<lab::core::agent::TopicCatalog()> onCatalogRequested;
+    std::function<lab::core::agent::TopicFieldCatalog(
+        const lab::core::agent::TopicCatalog&)> onTopicFieldCatalogRequested;
     std::function<std::optional<std::string>(
         const lab::core::agent::SubscriptionRequest&)> onSubscribe;
     std::function<std::optional<std::string>(
@@ -44,6 +46,8 @@ public:
     void stop();
 
     bool publishCatalog(const lab::core::agent::TopicCatalog& catalog);
+    bool publishTopicFieldCatalog(
+        const lab::core::agent::TopicFieldCatalog& catalog);
     bool publishSample(
         const lab::core::agent::SampleBatch& sample,
         lab::core::Timestamp sourceTimestamp,
