@@ -74,6 +74,7 @@
 - TCP 分片/粘包、垃圾、错误 CRC/版本/类型/长度后的流式重同步测试。
 - 独立 `QThread` 的 Windows `RemoteAgentSource`、5 秒握手超时和严格入站序号检查；
 - Windows 客户端可选指数退避自动重连、目录刷新与同端点订阅恢复；
+- Windows 客户端主动 Ping/Pong 时钟测量、最低 RTT 偏移估计、质量 UI 与 Session 事件；
 - Topic 目录、Agent 身份、订阅/取消订阅 UI 与手动刷新；
 - CDR 原始记录、结构化数值/布尔曲线与 Session 元数据接线；
 - 本机 TCP 模拟 Agent 回环测试覆盖握手、目录、样本、心跳和错误路径。
@@ -88,7 +89,7 @@
 下一批：
 
 - 通用 ROS introspection 字段树与类型支持能力探测；
-- 时钟偏移估计、认证与 TLS 部署方式。
+- 认证与 TLS 部署方式。
 
 后续：
 

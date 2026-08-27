@@ -182,7 +182,29 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 Qt::QueuedConnection);
         },
         {},
-        {}});
+        {},
+        [this](const lab::core::ClockSyncEstimate& estimate) {
+            recorder_.enqueueEvent({
+                estimate.measuredAtNs,
+                remoteAgent_.sourceId(),
+                "info",
+                "clock_sync",
+                "offset_ns=" + std::to_string(estimate.offsetNs) +
+                    ";round_trip_ns=" + std::to_string(estimate.roundTripNs) +
+                    ";uncertainty_ns=" + std::to_string(estimate.uncertaintyNs) +
+                    ";samples=" + std::to_string(estimate.sampleCount),
+                0});
+            QMetaObject::invokeMethod(
+                this,
+                [this, estimate] {
+                    emit remoteAgentClockSync(
+                        estimate.offsetNs,
+                        estimate.roundTripNs,
+                        estimate.uncertaintyNs,
+                        static_cast<quint32>(estimate.sampleCount));
+                },
+                Qt::QueuedConnection);
+        }});
 
     replay_.setCallbacks({
         [this](const lab::core::DataChunk& chunk) {
@@ -495,7 +517,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.7.0";
+    options.softwareVersion = "0.8.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -528,12 +550,14 @@ bool SerialSession::startSession(const QString& directory) {
             "ros_remote_agent",
             lastRemoteAgentSettings_.host + ':' +
                 std::to_string(lastRemoteAgentSettings_.port),
-            {{"host", lastRemoteAgentSettings_.host},
-             {"port", std::to_string(lastRemoteAgentSettings_.port)},
-             {"client_name", lastRemoteAgentSettings_.clientName},
-             {"client_version", lastRemoteAgentSettings_.clientVersion},
-             {"auto_reconnect",
-              lastRemoteAgentSettings_.autoReconnect ? "true" : "false"}}});
+             {{"host", lastRemoteAgentSettings_.host},
+              {"port", std::to_string(lastRemoteAgentSettings_.port)},
+              {"client_name", lastRemoteAgentSettings_.clientName},
+              {"client_version", lastRemoteAgentSettings_.clientVersion},
+              {"auto_reconnect",
+               lastRemoteAgentSettings_.autoReconnect ? "true" : "false"},
+              {"clock_sync_method", "ping_pong_min_rtt"},
+              {"clock_sync_interval_ms", "2000"}}});
     }
 
     bool result = false;

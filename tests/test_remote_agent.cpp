@@ -50,6 +50,7 @@ struct Events {
     std::vector<TopicCatalog> catalogs;
     std::vector<SampleBatch> batches;
     std::vector<DecodeIssue> issues;
+    std::vector<ClockSyncEstimate> clockEstimates;
 
     DataSourceCallbacks sourceCallbacks() {
         return {
@@ -88,6 +89,10 @@ struct Events {
             [this](const DecodeIssue& issue) {
                 std::scoped_lock lock(mutex);
                 issues.push_back(issue);
+            },
+            [this](const ClockSyncEstimate& estimate) {
+                std::scoped_lock lock(mutex);
+                clockEstimates.push_back(estimate);
             }};
     }
 
@@ -113,6 +118,11 @@ struct Events {
         return std::any_of(errors.begin(), errors.end(), [](const std::string& error) {
             return error.find("before handshake completed") != std::string::npos;
         });
+    }
+
+    bool hasClockEstimate() {
+        std::scoped_lock lock(mutex);
+        return !clockEstimates.empty();
     }
 };
 
@@ -346,6 +356,66 @@ void testCapabilityAwareHandshakeWithoutTopicDiscovery() {
     require(!source.requestTopicCatalog(),
             "manual catalog request is rejected when capability was not negotiated");
     source.close();
+    peer->deleteLater();
+}
+
+void testActiveClockSynchronization() {
+    QTcpServer server;
+    require(server.listen(QHostAddress::LocalHost, 0), "clock fixture listens");
+    RemoteAgentSource source;
+    Events events;
+    source.setCallbacks(events.sourceCallbacks());
+    source.setAgentCallbacks(events.agentCallbacks());
+    source.setSettings(
+        {"127.0.0.1", server.serverPort(), "Clock client", "0.8.0", false});
+    require(source.open(), "clock synchronization connection starts");
+    require(waitFor([&] { return server.hasPendingConnections(); }),
+            "clock fixture accepts client");
+    auto* peer = server.nextPendingConnection();
+
+    const Hello hello{"clock-agent", "0.1.0", "fixture", 0};
+    send(*peer, encodeFrame(serverFrame(MessageType::Hello, 0, encodeHello(hello))));
+    StreamDecoder decoder;
+    const auto frames = receiveFrames(*peer, decoder, 2);
+    const auto ping = std::find_if(frames.begin(), frames.end(), [](const Frame& frame) {
+        return frame.type == MessageType::Ping;
+    });
+    require(ping != frames.end(), "client actively requests a clock sample after handshake");
+    std::string error;
+    const auto nonce = decodeNonce(ping->payload, &error);
+    require(nonce.has_value(), "clock ping carries a valid nonce");
+
+    constexpr Timestamp simulatedAgentOffset = 5'000'000;
+    const auto agentTimestamp = ping->sourceTimestamp + simulatedAgentOffset;
+    send(*peer,
+         encodeFrame({MessageType::Pong,
+                      0,
+                      1,
+                      agentTimestamp,
+                      agentTimestamp,
+                      encodeNonce(*nonce)}));
+    require(waitFor([&] { return events.hasClockEstimate(); }),
+            "matching pong publishes a clock estimate");
+
+    ClockSyncEstimate callbackEstimate;
+    {
+        std::scoped_lock lock(events.mutex);
+        callbackEstimate = events.clockEstimates.back();
+    }
+    require(
+        callbackEstimate.offsetNs ==
+            agentTimestamp -
+                (ping->sourceTimestamp + callbackEstimate.roundTripNs / 2),
+        "clock estimate uses the exact on-wire ping timestamp and local receive time");
+    require(callbackEstimate.roundTripNs >= 0 &&
+                callbackEstimate.uncertaintyNs == callbackEstimate.roundTripNs / 2 &&
+                callbackEstimate.sampleCount == 1,
+            "clock callback reports RTT uncertainty and sample count");
+    require(source.clockSyncEstimate() == callbackEstimate,
+            "source exposes the latest clock estimate safely across threads");
+
+    source.close();
+    require(!source.clockSyncEstimate(), "closing the source clears stale clock quality");
     peer->deleteLater();
 }
 
@@ -588,6 +658,7 @@ int main(int argc, char* argv[]) {
         testDisconnectBeforeHelloIsError();
         testHandshakeCatalogSamplesAndControls();
         testCapabilityAwareHandshakeWithoutTopicDiscovery();
+        testActiveClockSynchronization();
         testAutomaticReconnectRestoresSubscriptions();
         testProtocolFailureDoesNotAutoReconnect();
         testClientAndServerStateMachinesAreCompatible();

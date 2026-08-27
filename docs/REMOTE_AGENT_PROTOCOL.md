@@ -12,7 +12,7 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 
 协议核心位于 `lab_core`，不依赖 Qt、ROS2 或操作系统 API。这样 Windows 主程序不需要安装 ROS2，Linux Agent 也能复用同一套编解码器和测试向量。
 
-当前已完成协议核心、Windows `RemoteAgentSource`、Topic UI、Session/曲线接线，以及 Ubuntu/ROS2 Humble Agent。共享状态机、Linux TCP 服务端和真实 ROS/DDS/TCP 链路均已有自动测试；ament 包已在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下验证。
+当前已完成协议核心、Windows `RemoteAgentSource`、Topic/时钟质量 UI、Session/曲线接线，以及 Ubuntu/ROS2 Humble Agent。共享状态机、Linux TCP 服务端和真实 ROS/DDS/TCP 链路均已有自动测试；ament 包已在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下验证。
 
 ## 1. TCP 帧
 
@@ -111,7 +111,23 @@ TCP connected
 
 Windows 客户端可以启用自动恢复。传输断开、连接失败或握手超时会按 250 ms、500 ms、1 s 逐步退避，单次最长 8 s；合法 Hello 到达后退避计数复位，并在同一 host/port 上重新请求目录、恢复此前成功发送的 topic/type 订阅。手动断开会取消定时器；严格序号、非法消息等协议错误进入 Error，不自动形成错误重连循环。切换 host/port 会清空旧端点的订阅恢复集合。
 
-## 6. ROS2 Humble 映射
+## 6. 时钟偏移估计
+
+时钟测量复用 v1 已有的 Ping/Pong，不增加消息类型或改变线协议。Windows 客户端在握手和控制恢复完成后立即发送一次 Ping，之后每 2 秒测量一次；同一时刻最多保留一个待响应 nonce。Agent 返回 Pong 时，帧时间戳是 Agent 生成响应时的 Unix ns。
+
+令客户端发送、接收时刻分别为 `t0`、`t3`，Pong 中的 Agent 时间为 `ta`：
+
+```text
+round_trip = t3 - t0
+offset     = ta - (t0 + round_trip / 2)
+uncertainty = round_trip / 2
+```
+
+`offset > 0` 表示 Agent 时钟领先客户端。客户端保留最近 16 个有效样本，并使用最低 RTT 样本抑制排队抖动；RTT 超过 10 秒、时间戳无效或 nonce 不匹配的响应不进入窗口。连接进入非 Open 状态时立即清空旧估计。结果显示在 ROS Agent 页面，并以 `clock_sync` 类别写入 Session 事件。
+
+该方法假定往返链路大致对称，`±RTT/2` 只是单次测量的不确定度提示。它不会修改系统时钟，不能代替 NTP/PTP；需要严格跨机时间一致性时，应先在操作系统层完成同步。
+
+## 7. ROS2 Humble 映射
 
 第一阶段 Agent 使用 `rclcpp::NodeGraphInterface::get_topic_names_and_types()` 做发现，并针对常用消息类型做字段映射。对于运行时未知类型，Humble 的 `rclcpp::GenericSubscription` 可以接收 `rclcpp::SerializedMessage`，所以原始 CDR 转发不需要在编译期知道所有自定义消息。
 
@@ -121,14 +137,14 @@ Windows 客户端可以启用自动恢复。传输断开、连接失败或握手
 
 ROS graph 可以报告同名 topic 的多个类型，目录会逐类型保留。Humble RMW 不支持同一个 Agent participant 同时为同名 topic 创建不同类型的 `GenericSubscription`；Agent 会在进入 RMW 前返回明确的订阅错误，并保留此前已经成功创建的订阅。取消订阅仍按 topic/type 精确匹配。
 
-## 7. 安全与当前边界
+## 8. 安全与当前边界
 
 - 协议当前不提供认证、授权或加密，只应在受信实验室网络或 VPN/SSH 隧道中使用；
 - CRC32 用于检测传输或解析错误，不是安全校验；
 - 后续若直接暴露到非受信网络，应在协议外使用 TLS，并增加 Agent 访问令牌和 topic 白名单；
 - 压缩标志、服务调用、参数、TF 专用消息和 rosbag2 尚未定义；未知 flags 必须忽略或显式拒绝，不能猜测含义。
 
-## 8. 自动测试
+## 9. 自动测试
 
 `lab_agent_protocol_tests` 覆盖：
 
@@ -139,7 +155,9 @@ ROS graph 可以报告同名 topic 的多个类型，目录会逐类型保留。
 - Hello、HelloAck、TopicCatalog、Subscribe、SampleBatch、Error、Ping/Pong；
 - 截断、尾随字节、非法布尔、非法队列深度和超长字符串拒绝。
 
-`lab_remote_agent_tests` 使用本机 TCP 模拟 Agent，覆盖分片 Hello、能力协商、无发现能力时禁止目录请求、初始/手动目录请求、CRC 损坏恢复、TopicCatalog 与 SampleBatch 粘包、原始 CDR、数值/布尔字段、订阅/取消订阅、Ping/Pong、自动重连与订阅恢复，以及重复序号导致协议断线且不自动重试。
+`lab_clock_sync_tests` 对偏移、RTT、不确定度、最低 RTT 选样、滚动窗口、异常输入和重置执行无网络的确定性验证。
+
+`lab_remote_agent_tests` 使用本机 TCP 模拟 Agent，覆盖分片 Hello、能力协商、无发现能力时禁止目录请求、初始/手动目录请求、CRC 损坏恢复、TopicCatalog 与 SampleBatch 粘包、原始 CDR、数值/布尔字段、双向 Ping/Pong、主动时钟估计、自动重连与订阅恢复，以及重复序号导致协议断线且不自动重试。
 
 `lab_agent_server_session_tests` 覆盖 Agent 侧 Hello/HelloAck、能力拒绝、客户端命令动作化、服务端统一序号、时间戳、心跳、CRC 恢复、结构化错误和重复客户端序号。
 

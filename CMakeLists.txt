@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.7.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.8.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -24,6 +24,7 @@ find_package(Threads REQUIRED)
 add_library(lab_core STATIC
     src/core/src/agent_protocol.cpp
     src/core/src/checksum.cpp
+    src/core/src/clock_sync.cpp
     src/core/src/csv_stream_parser.cpp
     src/core/src/frame_stream_parser.cpp
     src/core/src/logger.cpp
@@ -155,6 +156,9 @@ if(LAB_DEBUGGER_BUILD_TESTS)
     add_executable(lab_agent_protocol_tests tests/test_agent_protocol.cpp)
     target_link_libraries(lab_agent_protocol_tests PRIVATE lab_core)
     add_test(NAME lab_agent_protocol_tests COMMAND lab_agent_protocol_tests)
+    add_executable(lab_clock_sync_tests tests/test_clock_sync.cpp)
+    target_link_libraries(lab_clock_sync_tests PRIVATE lab_core)
+    add_test(NAME lab_clock_sync_tests COMMAND lab_clock_sync_tests)
     add_executable(lab_agent_server_session_tests tests/test_agent_server_session.cpp)
     target_link_libraries(lab_agent_server_session_tests PRIVATE lab_core)
     add_test(NAME lab_agent_server_session_tests COMMAND lab_agent_server_session_tests)

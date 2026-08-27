@@ -68,6 +68,10 @@ signals:
                           QString softwareVersion,
                           QString hostName,
                           quint32 capabilities);
+    void remoteAgentClockSync(qint64 offsetNs,
+                              qint64 roundTripNs,
+                              qint64 uncertaintyNs,
+                              quint32 sampleCount);
     void remoteTopicsChanged(QVariantList topics, quint64 graphRevision);
     void remoteFieldsDiscovered(QStringList fields);
     void sourceError(QString message);

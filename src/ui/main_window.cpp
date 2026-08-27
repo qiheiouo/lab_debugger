@@ -138,6 +138,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             remoteAgentPanel_, &RemoteAgentPanel::setSourceState);
     connect(&session_, &lab::app::SerialSession::remoteAgentHello,
             remoteAgentPanel_, &RemoteAgentPanel::setAgentHello);
+    connect(&session_, &lab::app::SerialSession::remoteAgentClockSync,
+            remoteAgentPanel_, &RemoteAgentPanel::setClockSync);
     connect(&session_, &lab::app::SerialSession::remoteTopicsChanged,
             remoteAgentPanel_, &RemoteAgentPanel::setTopics);
     connect(&session_, &lab::app::SerialSession::remoteFieldsDiscovered,

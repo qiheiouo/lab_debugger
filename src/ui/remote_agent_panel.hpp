@@ -39,6 +39,10 @@ public slots:
                        QString softwareVersion,
                        QString hostName,
                        quint32 capabilities);
+    void setClockSync(qint64 offsetNs,
+                      qint64 roundTripNs,
+                      qint64 uncertaintyNs,
+                      quint32 sampleCount);
     void setTopics(QVariantList topics, quint64 graphRevision);
 
 private slots:
@@ -56,6 +60,7 @@ private:
     QCheckBox* autoReconnect_{};
     QLabel* state_{};
     QLabel* agentIdentity_{};
+    QLabel* clockSync_{};
     QLabel* catalogRevision_{};
     QTableWidget* topics_{};
     QSpinBox* queueDepth_{};

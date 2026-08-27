@@ -21,6 +21,8 @@ namespace {
 constexpr int handshakeTimeoutMs = 5000;
 constexpr int reconnectInitialDelayMs = 250;
 constexpr int reconnectMaximumDelayMs = 8000;
+constexpr int clockSyncIntervalMs = 2000;
+constexpr lab::core::Timestamp clockSyncResponseTimeoutNs = 10'000'000'000LL;
 
 constexpr std::uint32_t supportedCapabilities =
     lab::core::agent::capabilityMask(lab::core::agent::Capability::TopicDiscovery) |
@@ -61,6 +63,7 @@ public:
         const lab::core::agent::Frame&,
         const lab::core::agent::SampleBatch&)>;
     using IssueHandler = std::function<void(const lab::core::agent::DecodeIssue&)>;
+    using ClockHandler = std::function<void(const lab::core::ClockSyncEstimate&)>;
     using StateHandler = std::function<void(lab::core::SourceState, HandshakeState)>;
     using ErrorHandler = std::function<void(std::string)>;
     using WireHandler = std::function<void(lab::core::Direction, std::size_t)>;
@@ -70,6 +73,7 @@ public:
         CatalogHandler onCatalog,
         SampleHandler onSample,
         IssueHandler onIssue,
+        ClockHandler onClockSync,
         StateHandler onState,
         ErrorHandler onError,
         WireHandler onWire)
@@ -77,6 +81,7 @@ public:
           onCatalog_(std::move(onCatalog)),
           onSample_(std::move(onSample)),
           onIssue_(std::move(onIssue)),
+          onClockSync_(std::move(onClockSync)),
           onState_(std::move(onState)),
           onError_(std::move(onError)),
           onWire_(std::move(onWire)) {}
@@ -109,6 +114,11 @@ public:
         QObject::connect(reconnectTimer_, &QTimer::timeout, this, [this] {
             startConnection();
         });
+        clockSyncTimer_ = new QTimer(this);
+        clockSyncTimer_->setInterval(clockSyncIntervalMs);
+        QObject::connect(clockSyncTimer_, &QTimer::timeout, this, [this] {
+            requestClockSync();
+        });
         startConnection();
         return true;
     }
@@ -129,6 +139,11 @@ public:
             delete reconnectTimer_;
             reconnectTimer_ = nullptr;
         }
+        if (clockSyncTimer_) {
+            clockSyncTimer_->stop();
+            delete clockSyncTimer_;
+            clockSyncTimer_ = nullptr;
+        }
         if (socket_) {
             QObject::disconnect(socket_, nullptr, this, nullptr);
             socket_->abort();
@@ -138,6 +153,8 @@ public:
         decoder_.reset();
         lastInboundSequence_.reset();
         negotiatedCapabilities_ = 0;
+        clockEstimator_.reset();
+        pendingClockPing_.reset();
         state_ = HandshakeState::Disconnected;
         if (announce) {
             onState_(lab::core::SourceState::Closed, state_);
@@ -200,6 +217,9 @@ private:
         lastInboundSequence_.reset();
         outboundSequence_ = 0;
         negotiatedCapabilities_ = 0;
+        if (clockSyncTimer_) clockSyncTimer_->stop();
+        clockEstimator_.reset();
+        pendingClockPing_.reset();
         closing_ = false;
         state_ = HandshakeState::Disconnected;
         onState_(lab::core::SourceState::Opening, state_);
@@ -257,6 +277,8 @@ private:
 
     void recoverTransport(std::string message, bool errorWithoutReconnect) {
         if (closing_ || !desiredOpen_ || state_ == HandshakeState::Error) return;
+        if (clockSyncTimer_) clockSyncTimer_->stop();
+        pendingClockPing_.reset();
         if (settings_.autoReconnect) {
             if (reconnectTimer_ && reconnectTimer_->isActive()) return;
             onError_(std::move(message));
@@ -334,7 +356,18 @@ private:
                 lab::core::agent::encodeNonce(*nonce));
         }
         case lab::core::agent::MessageType::Pong:
-            if (!lab::core::agent::decodeNonce(frame.payload, &error)) {
+            if (const auto nonce = lab::core::agent::decodeNonce(frame.payload, &error)) {
+                if (pendingClockPing_ && pendingClockPing_->first == *nonce) {
+                    const auto localReceive = lab::core::nowTimestampNs();
+                    const auto agentTimestamp = frame.agentReceiveTimestamp != 0
+                                                    ? frame.agentReceiveTimestamp
+                                                    : frame.sourceTimestamp;
+                    const auto estimate = clockEstimator_.addSample(
+                        pendingClockPing_->second, agentTimestamp, localReceive);
+                    pendingClockPing_.reset();
+                    if (estimate) onClockSync_(*estimate);
+                }
+            } else {
                 return malformed(frame, error);
             }
             return true;
@@ -392,19 +425,41 @@ private:
                     "Remote Agent no longer offers sample capabilities; subscriptions "
                     "were not restored");
             }
-            return true;
-        }
-        for (const auto& [key, request] : desiredSubscriptions_) {
-            static_cast<void>(key);
-            if (!sendReadyFrame(
-                    lab::core::agent::MessageType::Subscribe,
-                    lab::core::agent::encodeSubscriptionRequest(request))) {
-                recoverTransport("Failed to restore Remote Agent subscriptions", true);
-                if (socket_) socket_->abort();
-                return false;
+        } else {
+            for (const auto& [key, request] : desiredSubscriptions_) {
+                static_cast<void>(key);
+                if (!sendReadyFrame(
+                        lab::core::agent::MessageType::Subscribe,
+                        lab::core::agent::encodeSubscriptionRequest(request))) {
+                    recoverTransport("Failed to restore Remote Agent subscriptions", true);
+                    if (socket_) socket_->abort();
+                    return false;
+                }
             }
         }
+        if (clockSyncTimer_) clockSyncTimer_->start();
+        requestClockSync();
         return true;
+    }
+
+    void requestClockSync() {
+        if (state_ != HandshakeState::Ready) return;
+        const auto now = lab::core::nowTimestampNs();
+        if (pendingClockPing_) {
+            if (now >= pendingClockPing_->second &&
+                now - pendingClockPing_->second <= clockSyncResponseTimeoutNs) {
+                return;
+            }
+            pendingClockPing_.reset();
+        }
+        const auto nonce = nextClockNonce_++;
+        lab::core::Timestamp sentAt{};
+        if (sendFrame(
+                lab::core::agent::MessageType::Ping,
+                lab::core::agent::encodeNonce(nonce),
+                &sentAt)) {
+            pendingClockPing_ = std::pair{nonce, sentAt};
+        }
     }
 
     bool malformed(const lab::core::agent::Frame& frame, const std::string& error) {
@@ -425,7 +480,8 @@ private:
 
     bool sendFrame(
         lab::core::agent::MessageType type,
-        std::vector<std::uint8_t> payload) {
+        std::vector<std::uint8_t> payload,
+        lab::core::Timestamp* sentAt = nullptr) {
         if (!socket_ || socket_->state() != QAbstractSocket::ConnectedState) {
             onError_("Remote Agent socket is not connected");
             return false;
@@ -449,6 +505,7 @@ private:
             onError_("Remote Agent socket accepted only part of a control frame");
             return false;
         }
+        if (sentAt) *sentAt = now;
         return true;
     }
 
@@ -464,6 +521,8 @@ private:
             handshakeTimer_->stop();
         }
         if (reconnectTimer_) reconnectTimer_->stop();
+        if (clockSyncTimer_) clockSyncTimer_->stop();
+        pendingClockPing_.reset();
         if (socket_) {
             socket_->abort();
         }
@@ -473,10 +532,14 @@ private:
     QTcpSocket* socket_{};
     QTimer* handshakeTimer_{};
     QTimer* reconnectTimer_{};
+    QTimer* clockSyncTimer_{};
     lab::core::agent::StreamDecoder decoder_;
     std::optional<std::uint64_t> lastInboundSequence_;
     std::uint64_t outboundSequence_{};
     std::uint32_t negotiatedCapabilities_{};
+    lab::core::ClockSyncEstimator clockEstimator_;
+    std::optional<std::pair<std::uint64_t, lab::core::Timestamp>> pendingClockPing_;
+    std::uint64_t nextClockNonce_{1};
     std::unordered_map<std::string, lab::core::agent::SubscriptionRequest>
         desiredSubscriptions_;
     unsigned int reconnectAttempt_{};
@@ -487,6 +550,7 @@ private:
     CatalogHandler onCatalog_;
     SampleHandler onSample_;
     IssueHandler onIssue_;
+    ClockHandler onClockSync_;
     StateHandler onState_;
     ErrorHandler onError_;
     WireHandler onWire_;
@@ -506,9 +570,16 @@ RemoteAgentSource::RemoteAgentSource() {
         [this](const lab::core::agent::DecodeIssue& issue) {
             handleProtocolIssue(issue);
         },
+        [this](const lab::core::ClockSyncEstimate& estimate) {
+            handleClockSync(estimate);
+        },
         [this](lab::core::SourceState state, HandshakeState handshake) {
             open_.store(state == lab::core::SourceState::Open);
             handshakeState_.store(handshake);
+            if (state != lab::core::SourceState::Open) {
+                std::scoped_lock lock(clockSyncMutex_);
+                clockSyncEstimate_.reset();
+            }
             publishState(state);
         },
         [this](std::string message) {
@@ -641,6 +712,12 @@ HandshakeState RemoteAgentSource::handshakeState() const noexcept {
     return handshakeState_.load();
 }
 
+std::optional<lab::core::ClockSyncEstimate>
+RemoteAgentSource::clockSyncEstimate() const {
+    std::scoped_lock lock(clockSyncMutex_);
+    return clockSyncEstimate_;
+}
+
 void RemoteAgentSource::handleHello(const lab::core::agent::Hello& hello) {
     {
         std::scoped_lock lock(agentIdentityMutex_);
@@ -691,6 +768,16 @@ void RemoteAgentSource::handleProtocolIssue(
     const lab::core::agent::DecodeIssue& issue) {
     const auto callbacks = agentCallbacks();
     if (callbacks.onProtocolIssue) callbacks.onProtocolIssue(issue);
+}
+
+void RemoteAgentSource::handleClockSync(
+    const lab::core::ClockSyncEstimate& estimate) {
+    {
+        std::scoped_lock lock(clockSyncMutex_);
+        clockSyncEstimate_ = estimate;
+    }
+    const auto callbacks = agentCallbacks();
+    if (callbacks.onClockSync) callbacks.onClockSync(estimate);
 }
 
 void RemoteAgentSource::handleWireBytes(

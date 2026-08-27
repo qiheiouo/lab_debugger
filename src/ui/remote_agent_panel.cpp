@@ -67,6 +67,9 @@ RemoteAgentPanel::RemoteAgentPanel(QWidget* parent) : QWidget(parent) {
     agentIdentity_ = new QLabel(tr("尚未收到 Agent 身份"), this);
     agentIdentity_->setWordWrap(true);
     agentIdentity_->setObjectName(QStringLiteral("secondaryText"));
+    clockSync_ = new QLabel(tr("时钟同步：等待样本"), this);
+    clockSync_->setWordWrap(true);
+    clockSync_->setObjectName(QStringLiteral("secondaryText"));
 
     connectButton_ = new QPushButton(tr("连接"), this);
     disconnectButton_ = new QPushButton(tr("断开"), this);
@@ -123,6 +126,7 @@ RemoteAgentPanel::RemoteAgentPanel(QWidget* parent) : QWidget(parent) {
     layout->addLayout(form);
     layout->addWidget(state_);
     layout->addWidget(agentIdentity_);
+    layout->addWidget(clockSync_);
     layout->addLayout(connectionButtons);
     layout->addSpacing(8);
     layout->addLayout(catalogHeader);
@@ -150,13 +154,16 @@ lab::adapters::remote_agent::RemoteAgentSettings RemoteAgentPanel::settings() co
     return {host_->text().trimmed().toStdString(),
             static_cast<std::uint16_t>(port_->value()),
             clientName_->text().trimmed().toStdString(),
-            "0.7.0",
+            "0.8.0",
             autoReconnect_->isChecked()};
 }
 
 void RemoteAgentPanel::setSourceState(int rawState) {
     const auto sourceState = static_cast<lab::core::SourceState>(rawState);
     ready_ = sourceState == lab::core::SourceState::Open;
+    if (!ready_) {
+        clockSync_->setText(tr("时钟同步：等待样本"));
+    }
     connectButton_->setEnabled(sourceState == lab::core::SourceState::Closed ||
                                sourceState == lab::core::SourceState::Error);
     disconnectButton_->setEnabled(sourceState == lab::core::SourceState::Opening || ready_);
@@ -190,6 +197,21 @@ void RemoteAgentPanel::setSourceState(int rawState) {
         break;
     }
     updateTopicButtons();
+}
+
+void RemoteAgentPanel::setClockSync(
+    qint64 offsetNs,
+    qint64 roundTripNs,
+    qint64 uncertaintyNs,
+    quint32 sampleCount) {
+    auto offset = QString::number(static_cast<double>(offsetNs) / 1'000'000.0, 'f', 3);
+    if (offsetNs > 0) offset.prepend(QLatin1Char('+'));
+    clockSync_->setText(
+        tr("时钟同步：偏移 %1 ms  |  RTT %2 ms  |  不确定度 ±%3 ms  |  %4 个样本")
+            .arg(offset)
+            .arg(static_cast<double>(roundTripNs) / 1'000'000.0, 0, 'f', 3)
+            .arg(static_cast<double>(uncertaintyNs) / 1'000'000.0, 0, 'f', 3)
+            .arg(sampleCount));
 }
 
 void RemoteAgentPanel::setAgentHello(
