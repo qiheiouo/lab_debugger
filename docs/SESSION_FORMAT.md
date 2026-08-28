@@ -1,6 +1,6 @@
 # Session 记录与回放格式
 
-Lab Debugger 0.3 引入目录式 Session，0.4 将 TCP/UDP 配置纳入同一格式，0.8 为 Remote Agent 增加时钟质量事件。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
+Lab Debugger 0.3 引入目录式 Session，0.4 将 TCP/UDP 配置纳入同一格式，0.8 为 Remote Agent 增加时钟质量事件，0.11 允许 rosbag2 SQLite 安全转换到同一容器。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
 
 ```text
 session_YYYYMMDD_HHMMSS/
@@ -58,5 +58,7 @@ repeat:
 - 支持 `0.1× / 0.5× / 1× / 2× / 5× / 10×`、暂停、继续和跳转；
 - 跳转时先建立处理屏障，再清理半帧/半行缓存和旧曲线，避免把跳转前后的字节拼成伪帧；
 - Session 的初始协议或 CSV 字段配置会自动恢复。
+
+rosbag2 导入 Session 额外标记 `replay_mode: raw-only`，并在 `configuration/rosbag2.json` 保存 Topic/类型目录。此模式保留完整时间轴和原始 CDR，但明确跳过 CSV 与自定义二进制协议解析，避免随机二进制形成伪数值或伪帧。单文件、分卷归并和限制见 [rosbag2 导入说明](ROSBAG2.md)。
 
 当前索引是每条原始记录 16 字节的内存索引。后续针对数小时、极高 chunk 频率的数据，会增加后台建索引、稀疏索引和索引缓存；原始格式无需因此改变。

@@ -6,12 +6,15 @@
 #include <QFile>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMetaObject>
 #include <QSysInfo>
 #include <QVariantMap>
 
 #include <algorithm>
 #include <filesystem>
+#include <limits>
 #include <string_view>
 
 namespace lab::app {
@@ -229,7 +232,7 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
     replay_.setCallbacks({
         [this](const lab::core::DataChunk& chunk) {
             std::scoped_lock routeLock(routingMutex_);
-            if (chunk.direction == lab::core::Direction::Rx) {
+            if (!replayRawOnly_.load() && chunk.direction == lab::core::Direction::Rx) {
                 processing_.push(chunk);
             }
             std::scoped_lock lock(uiQueueMutex_);
@@ -273,6 +276,11 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
 }
 
 SerialSession::~SerialSession() {
+    rosbagImporting_.store(false);
+    if (rosbagImportWorker_.joinable()) {
+        rosbagImportWorker_.request_stop();
+        rosbagImportWorker_.join();
+    }
     source_.close();
     network_.close();
     remoteAgent_.close();
@@ -537,7 +545,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.10.0";
+    options.softwareVersion = "0.11.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -641,17 +649,31 @@ bool SerialSession::openReplaySession(const QString& directory) {
     network_.close();
     remoteAgent_.close();
     replay_.close();
-    timeSeries_.clear();
+    {
+        std::scoped_lock routeLock(routingMutex_);
+        processing_.flush();
+        processing_.resetParsers();
+        timeSeries_.clear();
+    }
     {
         std::scoped_lock lock(uiQueueMutex_);
         uiQueue_.clear();
     }
     const auto protocolPath = QDir(sessionDirectory).filePath(QStringLiteral("protocol/initial.json"));
+    bool rawOnly = false;
+    QFile metadataFile(QDir(sessionDirectory).filePath(QStringLiteral("metadata.json")));
+    if (metadataFile.open(QIODevice::ReadOnly)) {
+        const auto document = QJsonDocument::fromJson(metadataFile.readAll());
+        rawOnly = document.isObject() &&
+                  document.object().value(QStringLiteral("replay_mode")).toString() ==
+                      QStringLiteral("raw-only");
+    }
+    replayRawOnly_.store(rawOnly);
     clearProtocol();
-    if (QFileInfo::exists(protocolPath)) {
+    if (!rawOnly && QFileInfo::exists(protocolPath)) {
         loadProtocolFile(protocolPath);
     }
-    if (activeProtocolName_.empty()) {
+    if (!rawOnly && activeProtocolName_.empty()) {
         QFile fieldsFile(QDir(sessionDirectory).filePath(
             QStringLiteral("configuration/csv_fields.txt")));
         if (fieldsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -670,16 +692,100 @@ bool SerialSession::openReplaySession(const QString& directory) {
     }
     replay_.setPath(std::filesystem::path(rawPath.toStdWString()));
     if (!replay_.open()) {
+        replayRawOnly_.store(false);
         emit replayOpenFailed(tr("无法打开回放文件；详细原因已写入状态栏和日志"));
         return false;
     }
     const auto replayStatus = replay_.status();
-    emit replayOpened(sessionDirectory, replayStatus.recoveredTruncatedTail);
+    emit replayOpened(sessionDirectory, replayStatus.recoveredTruncatedTail, rawOnly);
     return true;
+}
+
+void SerialSession::importRosbag2(const QString& source, const QString& destination) {
+    if (recorder_.isRecording()) {
+        emit rosbagImportFinished(false,
+                                  {},
+                                  tr("请先停止当前 Session 记录"),
+                                  0,
+                                  0);
+        return;
+    }
+    if (rosbagImporting_.exchange(true)) {
+        emit rosbagImportFinished(false, {}, tr("已有 rosbag2 正在导入"), 0, 0);
+        return;
+    }
+    if (rosbagImportWorker_.joinable()) {
+        rosbagImportWorker_.join();
+    }
+
+    emit rosbagImportStarted(source, destination);
+    rosbagImportWorker_ = std::jthread(
+        [this, source, destination](std::stop_token stopToken) {
+            lab::adapters::rosbag2::Rosbag2ImportOptions options;
+            options.source = std::filesystem::path(source.toStdWString());
+            options.destination = std::filesystem::path(destination.toStdWString());
+            options.sessionName = QFileInfo(destination).fileName().toStdString();
+            options.softwareVersion = "0.11.0";
+
+            std::uint64_t lastReported = std::numeric_limits<std::uint64_t>::max();
+            auto result = lab::adapters::rosbag2::importRosbag2(
+                options,
+                [this, stopToken, &lastReported](std::uint64_t imported,
+                                                std::uint64_t total) {
+                    if (stopToken.stop_requested()) {
+                        return false;
+                    }
+                    if (imported == total || imported == 0 ||
+                        imported / 1000 != lastReported / 1000) {
+                        lastReported = imported;
+                        QMetaObject::invokeMethod(
+                            this,
+                            [this, imported, total] {
+                                emit rosbagImportProgress(imported, total);
+                            },
+                            Qt::QueuedConnection);
+                    }
+                    return true;
+                });
+
+            QMetaObject::invokeMethod(
+                this,
+                [this, result = std::move(result)] {
+                    rosbagImporting_.store(false);
+                    const auto directory = QString::fromStdWString(
+                        result.sessionDirectory.wstring());
+                    if (!result.success) {
+                        const auto message = result.cancelled
+                                                 ? tr("rosbag2 导入已取消")
+                                                 : tr("rosbag2 导入失败：%1")
+                                                       .arg(QString::fromStdString(result.error));
+                        emit rosbagImportFinished(false, {}, message, 0, 0);
+                        return;
+                    }
+                    const auto message =
+                        tr("已导入 %1 条消息、%2 个 Topic")
+                            .arg(result.messageCount)
+                            .arg(static_cast<quint64>(result.topics.size()));
+                    emit rosbagImportFinished(true,
+                                              directory,
+                                              message,
+                                              result.messageCount,
+                                              static_cast<quint64>(result.topics.size()));
+                    openReplaySession(directory);
+                },
+                Qt::QueuedConnection);
+        });
+}
+
+void SerialSession::cancelRosbag2Import() {
+    if (rosbagImportWorker_.joinable() && rosbagImporting_.load()) {
+        rosbagImportWorker_.request_stop();
+    }
 }
 
 void SerialSession::closeReplay() {
     replay_.close();
+    replayRawOnly_.store(false);
 }
 
 void SerialSession::pauseReplay() {
@@ -730,7 +836,8 @@ void SerialSession::drainUiQueue() {
                 reinterpret_cast<const char*>(chunk.payload.data()),
                 static_cast<qsizetype>(chunk.payload.size())),
             chunk.direction == lab::core::Direction::Tx,
-            chunk.receiveTimestamp);
+            chunk.receiveTimestamp,
+            QString::fromStdString(chunk.sourceId));
     }
 
     std::deque<lab::core::FrameEvent> frameEvents;

@@ -118,6 +118,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::clearProtocol);
     connect(replay_, &ReplayWidget::openSessionRequested,
             &session_, &lab::app::SerialSession::openReplaySession);
+    connect(replay_, &ReplayWidget::importRosbagRequested,
+            &session_, &lab::app::SerialSession::importRosbag2);
+    connect(replay_, &ReplayWidget::cancelRosbagImportRequested,
+            &session_, &lab::app::SerialSession::cancelRosbag2Import);
     connect(replay_, &ReplayWidget::closeReplayRequested,
             &session_, &lab::app::SerialSession::closeReplay);
     connect(replay_, &ReplayWidget::pauseRequested,
@@ -167,6 +171,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             replay_, &ReplayWidget::showOpenError);
     connect(&session_, &lab::app::SerialSession::replayStatusChanged,
             replay_, &ReplayWidget::setStatus);
+    connect(&session_, &lab::app::SerialSession::rosbagImportStarted,
+            replay_, &ReplayWidget::setImportStarted);
+    connect(&session_, &lab::app::SerialSession::rosbagImportProgress,
+            replay_, &ReplayWidget::setImportProgress);
+    connect(&session_, &lab::app::SerialSession::rosbagImportFinished,
+            replay_, &ReplayWidget::setImportFinished);
     connect(&session_, &lab::app::SerialSession::csvFieldsRestored,
             plot_, &PlotWidget::useProtocolFields);
     connect(&session_, &lab::app::SerialSession::recordingChanged,

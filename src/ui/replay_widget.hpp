@@ -16,6 +16,8 @@ public:
 
 signals:
     void openSessionRequested(QString directory);
+    void importRosbagRequested(QString source, QString destination);
+    void cancelRosbagImportRequested();
     void closeReplayRequested();
     void pauseRequested();
     void resumeRequested();
@@ -23,8 +25,15 @@ signals:
     void seekRequested(double fraction);
 
 public slots:
-    void setOpened(const QString& directory, bool recoveredTruncatedTail);
+    void setOpened(const QString& directory, bool recoveredTruncatedTail, bool rawOnly);
     void showOpenError(const QString& message);
+    void setImportStarted(const QString& source, const QString& destination);
+    void setImportProgress(quint64 importedMessages, quint64 totalMessages);
+    void setImportFinished(bool success,
+                           const QString& directory,
+                           const QString& message,
+                           quint64 messageCount,
+                           quint64 topicCount);
     void setStatus(bool open,
                    bool paused,
                    bool atEnd,
@@ -36,12 +45,18 @@ public slots:
                    qint64 currentTimestamp);
 
 private:
+    void chooseRosbagSource(bool directory);
+
     QLabel* pathLabel_{};
     QLabel* stateLabel_{};
     QLabel* timeLabel_{};
     QLabel* countLabel_{};
     QPushButton* playButton_{};
     QPushButton* closeButton_{};
+    QPushButton* importButton_{};
+    QPushButton* importDirectoryButton_{};
+    QPushButton* cancelImportButton_{};
+    QLabel* importLabel_{};
     QSlider* timeline_{};
     bool paused_{true};
 };

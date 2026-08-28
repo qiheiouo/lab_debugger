@@ -1,12 +1,12 @@
 #pragma once
 
 #include "lab/core/data_chunk.hpp"
+#include "lab/core/raw_log_writer.hpp"
 
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <stop_token>
 #include <thread>
@@ -35,10 +35,9 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable_any ready_;
     std::deque<DataChunk> queue_;
-    std::ofstream output_;
+    RawLogWriter writer_;
     std::jthread worker_;
     bool recording_{};
 };
 
 }  // namespace lab::core
-

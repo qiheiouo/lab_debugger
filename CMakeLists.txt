@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.10.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.11.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -35,6 +35,7 @@ add_library(lab_core STATIC
     src/core/src/protocol_json_loader.cpp
     src/core/src/raw_log_reader.cpp
     src/core/src/raw_log_recorder.cpp
+    src/core/src/raw_log_writer.cpp
     src/core/src/replay_source.cpp
     src/core/src/remote_agent_session.cpp
     src/core/src/session_recorder.cpp
@@ -51,7 +52,7 @@ else()
 endif()
 
 if(LAB_DEBUGGER_BUILD_GUI)
-    find_package(Qt6 6.5 QUIET COMPONENTS Widgets SerialPort Network)
+    find_package(Qt6 6.5 QUIET COMPONENTS Widgets SerialPort Network Sql)
     if(Qt6_FOUND)
         qt_standard_project_setup()
         get_target_property(LAB_DEBUGGER_QT_CORE_DLL Qt6::Core IMPORTED_LOCATION_RELEASE)
@@ -92,6 +93,16 @@ if(LAB_DEBUGGER_BUILD_GUI)
             PUBLIC lab_core Qt6::Core Qt6::Network
         )
 
+        add_library(lab_rosbag2_adapter STATIC
+            src/adapters/rosbag2/src/rosbag2_importer.cpp
+        )
+        target_include_directories(lab_rosbag2_adapter PUBLIC
+            src/adapters/rosbag2/include
+        )
+        target_link_libraries(lab_rosbag2_adapter
+            PUBLIC lab_core Qt6::Core Qt6::Sql
+        )
+
         add_library(lab_app_ui STATIC
             src/app/serial_session.cpp
             src/app/serial_session.hpp
@@ -117,7 +128,7 @@ if(LAB_DEBUGGER_BUILD_GUI)
         target_include_directories(lab_app_ui PUBLIC src)
         target_link_libraries(lab_app_ui
             PUBLIC lab_core lab_serial_adapter lab_network_adapter
-                   lab_remote_agent_adapter Qt6::Widgets
+                   lab_remote_agent_adapter lab_rosbag2_adapter Qt6::Widgets
         )
 
         qt_add_executable(lab_debugger WIN32 src/app/main.cpp)
@@ -139,7 +150,7 @@ if(LAB_DEBUGGER_BUILD_GUI)
         install(SCRIPT ${deploy_script})
     else()
         message(WARNING
-            "Qt 6 Widgets + SerialPort + Network were not found. "
+            "Qt 6 Widgets + SerialPort + Network + Sql were not found. "
             "The portable core and tests will still be built."
         )
     endif()
@@ -198,7 +209,27 @@ if(LAB_DEBUGGER_BUILD_TESTS)
             TIMEOUT 15
         )
     endif()
+    if(TARGET lab_rosbag2_adapter)
+        add_executable(lab_rosbag2_tests tests/test_rosbag2.cpp)
+        target_link_libraries(lab_rosbag2_tests
+            PRIVATE lab_rosbag2_adapter Qt6::Core Qt6::Sql
+        )
+        add_test(NAME lab_rosbag2_tests COMMAND lab_rosbag2_tests)
+        set_tests_properties(lab_rosbag2_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 30
+        )
+    endif()
     if(TARGET lab_app_ui)
+        add_executable(lab_replay_routing_tests tests/test_replay_routing.cpp)
+        target_link_libraries(lab_replay_routing_tests PRIVATE lab_app_ui)
+        add_test(NAME lab_replay_routing_tests COMMAND lab_replay_routing_tests)
+        set_tests_properties(lab_replay_routing_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 15
+        )
         add_executable(lab_gui_smoke_tests tests/test_gui_smoke.cpp)
         target_link_libraries(lab_gui_smoke_tests PRIVATE lab_app_ui)
         add_test(NAME lab_gui_smoke_tests COMMAND lab_gui_smoke_tests)

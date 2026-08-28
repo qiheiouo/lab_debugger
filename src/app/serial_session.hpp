@@ -3,6 +3,7 @@
 #include "lab/adapters/serial/serial_source.hpp"
 #include "lab/adapters/network/network_source.hpp"
 #include "lab/adapters/remote_agent/remote_agent_source.hpp"
+#include "lab/adapters/rosbag2/rosbag2_importer.hpp"
 #include "lab/core/data_chunk.hpp"
 #include "lab/core/processing_pipeline.hpp"
 #include "lab/core/replay_source.hpp"
@@ -17,8 +18,10 @@
 #include <QVariantList>
 
 #include <deque>
+#include <atomic>
 #include <mutex>
 #include <set>
+#include <thread>
 #include <vector>
 
 namespace lab::app {
@@ -53,6 +56,8 @@ public slots:
     bool startSession(const QString& directory);
     void stopSession();
     bool openReplaySession(const QString& directory);
+    void importRosbag2(const QString& source, const QString& destination);
+    void cancelRosbag2Import();
     void closeReplay();
     void pauseReplay();
     void resumeReplay();
@@ -60,7 +65,10 @@ public slots:
     void seekReplay(double fraction);
 
 signals:
-    void chunkReady(QByteArray bytes, bool transmitted, qint64 timestampNs);
+    void chunkReady(QByteArray bytes,
+                    bool transmitted,
+                    qint64 timestampNs,
+                    QString sourceId);
     void sourceStateChanged(int state);
     void networkStateChanged(int state);
     void remoteAgentStateChanged(int state);
@@ -87,7 +95,7 @@ signals:
                                    quint64 checksumErrors,
                                    quint64 lengthErrors,
                                    quint64 decodeErrors);
-    void replayOpened(QString directory, bool recoveredTruncatedTail);
+    void replayOpened(QString directory, bool recoveredTruncatedTail, bool rawOnly);
     void replayOpenFailed(QString message);
     void replayStatusChanged(bool open,
                              bool paused,
@@ -99,6 +107,13 @@ signals:
                              qint64 lastTimestamp,
                              qint64 currentTimestamp);
     void csvFieldsRestored(QStringList fields);
+    void rosbagImportStarted(QString source, QString destination);
+    void rosbagImportProgress(quint64 importedMessages, quint64 totalMessages);
+    void rosbagImportFinished(bool success,
+                              QString directory,
+                              QString message,
+                              quint64 messageCount,
+                              quint64 topicCount);
 
 private slots:
     void drainUiQueue();
@@ -112,6 +127,9 @@ private:
     lab::adapters::network::NetworkSource network_;
     lab::adapters::remote_agent::RemoteAgentSource remoteAgent_;
     lab::core::ReplaySource replay_;
+    std::atomic_bool replayRawOnly_{};
+    std::atomic_bool rosbagImporting_{};
+    std::jthread rosbagImportWorker_;
     lab::adapters::serial::SerialSettings lastSettings_;
     lab::adapters::network::NetworkSettings lastNetworkSettings_;
     lab::adapters::remote_agent::RemoteAgentSettings lastRemoteAgentSettings_;

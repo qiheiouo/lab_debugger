@@ -1,12 +1,17 @@
 #include "ui/replay_widget.hpp"
 
 #include <QComboBox>
+#include <QDateTime>
+#include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSlider>
+#include <QStandardPaths>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -32,6 +37,10 @@ ReplayWidget::ReplayWidget(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
     auto* controls = new QHBoxLayout;
     auto* openButton = new QPushButton(tr("打开 Session"), this);
+    importButton_ = new QPushButton(tr("导入 .db3"), this);
+    importDirectoryButton_ = new QPushButton(tr("导入 bag 目录"), this);
+    cancelImportButton_ = new QPushButton(tr("取消导入"), this);
+    cancelImportButton_->setEnabled(false);
     closeButton_ = new QPushButton(tr("关闭回放"), this);
     playButton_ = new QPushButton(tr("播放"), this);
     auto* speed = new QComboBox(this);
@@ -40,6 +49,9 @@ ReplayWidget::ReplayWidget(QWidget* parent) : QWidget(parent) {
     }
     speed->setCurrentIndex(2);
     controls->addWidget(openButton);
+    controls->addWidget(importButton_);
+    controls->addWidget(importDirectoryButton_);
+    controls->addWidget(cancelImportButton_);
     controls->addWidget(closeButton_);
     controls->addSpacing(12);
     controls->addWidget(playButton_);
@@ -52,6 +64,11 @@ ReplayWidget::ReplayWidget(QWidget* parent) : QWidget(parent) {
     pathLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     pathLabel_->setStyleSheet(QStringLiteral("color: #8794a6;"));
     root->addWidget(pathLabel_);
+
+    importLabel_ = new QLabel(tr("可导入 rosbag2 SQLite（.db3）并生成标准 Session"), this);
+    importLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    importLabel_->setStyleSheet(QStringLiteral("color: #8794a6;"));
+    root->addWidget(importLabel_);
 
     auto* status = new QHBoxLayout;
     stateLabel_ = new QLabel(tr("已关闭"), this);
@@ -69,8 +86,8 @@ ReplayWidget::ReplayWidget(QWidget* parent) : QWidget(parent) {
     root->addWidget(timeline_);
 
     auto* help = new QLabel(
-        tr("回放数据会进入与实时串口相同的终端、协议解析和曲线链路。打开后默认暂停，"
-           "拖动时间轴可跳转；Session 中保存的初始协议会自动加载。"),
+        tr("普通 Session 会进入终端、协议解析和曲线链路；rosbag2 的 CDR 二进制仅进入"
+           "原始终端与回放，不会误送进 CSV 解析。打开后默认暂停，拖动时间轴可跳转。"),
         this);
     help->setWordWrap(true);
     help->setStyleSheet(QStringLiteral("color: #8794a6; padding-top: 12px;"));
@@ -84,6 +101,16 @@ ReplayWidget::ReplayWidget(QWidget* parent) : QWidget(parent) {
             emit openSessionRequested(directory);
         }
     });
+    connect(importButton_, &QPushButton::clicked, this, [this] {
+        chooseRosbagSource(false);
+    });
+    connect(importDirectoryButton_, &QPushButton::clicked, this, [this] {
+        chooseRosbagSource(true);
+    });
+    connect(cancelImportButton_,
+            &QPushButton::clicked,
+            this,
+            &ReplayWidget::cancelRosbagImportRequested);
     connect(closeButton_, &QPushButton::clicked, this, &ReplayWidget::closeReplayRequested);
     connect(playButton_, &QPushButton::clicked, this, [this] {
         if (paused_) {
@@ -100,8 +127,44 @@ ReplayWidget::ReplayWidget(QWidget* parent) : QWidget(parent) {
     });
 }
 
-void ReplayWidget::setOpened(const QString& directory, bool recoveredTruncatedTail) {
-    pathLabel_->setText(tr("Session：%1").arg(directory));
+void ReplayWidget::chooseRosbagSource(bool directory) {
+    const auto documents =
+        QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    const auto source = directory
+                            ? QFileDialog::getExistingDirectory(
+                                  this, tr("选择 rosbag2 bag 目录"), documents)
+                            : QFileDialog::getOpenFileName(
+                                  this,
+                                  tr("选择 rosbag2 SQLite 文件"),
+                                  documents,
+                                  tr("rosbag2 SQLite (*.db3)"));
+    if (source.isEmpty()) {
+        return;
+    }
+    const auto parent = QFileDialog::getExistingDirectory(
+        this, tr("选择导入后 Session 的保存位置"), documents);
+    if (parent.isEmpty()) {
+        return;
+    }
+    const QFileInfo sourceInfo(source);
+    auto stem = sourceInfo.isDir() ? sourceInfo.fileName() : sourceInfo.completeBaseName();
+    stem.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9_-]+")),
+                 QStringLiteral("_"));
+    if (stem.isEmpty()) {
+        stem = QStringLiteral("rosbag2");
+    }
+    const auto name = QStringLiteral("%1_import_%2")
+                          .arg(stem,
+                               QDateTime::currentDateTime().toString(
+                                   QStringLiteral("yyyyMMdd_HHmmss")));
+    emit importRosbagRequested(source, QDir(parent).filePath(name));
+}
+
+void ReplayWidget::setOpened(const QString& directory,
+                             bool recoveredTruncatedTail,
+                             bool rawOnly) {
+    pathLabel_->setText(rawOnly ? tr("Session（rosbag2 原始 CDR）：%1").arg(directory)
+                                : tr("Session：%1").arg(directory));
     pathLabel_->setStyleSheet(recoveredTruncatedTail
                                   ? QStringLiteral("color: #f2cc60;")
                                   : QStringLiteral("color: #5fd19a;"));
@@ -109,6 +172,38 @@ void ReplayWidget::setOpened(const QString& directory, bool recoveredTruncatedTa
         pathLabel_->setToolTip(tr("文件尾部不完整，已安全恢复此前的全部完整记录"));
     } else {
         pathLabel_->setToolTip({});
+    }
+}
+
+void ReplayWidget::setImportStarted(const QString& source, const QString& destination) {
+    importButton_->setEnabled(false);
+    importDirectoryButton_->setEnabled(false);
+    cancelImportButton_->setEnabled(true);
+    importLabel_->setText(tr("正在导入：%1\n保存到：%2").arg(source, destination));
+    importLabel_->setStyleSheet(QStringLiteral("color: #f2cc60;"));
+}
+
+void ReplayWidget::setImportProgress(quint64 importedMessages, quint64 totalMessages) {
+    importLabel_->setText(totalMessages > 0
+                              ? tr("正在导入 rosbag2：%1 / %2 条消息")
+                                    .arg(importedMessages)
+                                    .arg(totalMessages)
+                              : tr("正在检查 rosbag2 数据库…"));
+}
+
+void ReplayWidget::setImportFinished(bool success,
+                                     const QString& directory,
+                                     const QString& message,
+                                     quint64,
+                                     quint64) {
+    importButton_->setEnabled(true);
+    importDirectoryButton_->setEnabled(true);
+    cancelImportButton_->setEnabled(false);
+    importLabel_->setText(success ? tr("%1\nSession：%2").arg(message, directory) : message);
+    importLabel_->setStyleSheet(success ? QStringLiteral("color: #5fd19a;")
+                                        : QStringLiteral("color: #ff6b6b;"));
+    if (!success && !message.contains(tr("已取消"))) {
+        QMessageBox::warning(this, tr("rosbag2 导入失败"), message);
     }
 }
 

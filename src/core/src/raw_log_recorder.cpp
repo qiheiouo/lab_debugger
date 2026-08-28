@@ -2,29 +2,7 @@
 
 #include "lab/core/logger.hpp"
 
-#include <array>
-#include <cstdint>
-#include <cstring>
-#include <limits>
-#include <type_traits>
-
 namespace lab::core {
-namespace {
-
-template <typename T>
-void writeValue(std::ofstream& stream, T value) {
-    static_assert(std::is_integral_v<T>);
-    using Unsigned = std::make_unsigned_t<T>;
-    Unsigned bits{};
-    std::memcpy(&bits, &value, sizeof(value));
-    std::array<std::uint8_t, sizeof(T)> bytes{};
-    for (std::size_t index = 0; index < bytes.size(); ++index) {
-        bytes[index] = static_cast<std::uint8_t>(bits >> (index * 8U));
-    }
-    stream.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-}
-
-}  // namespace
 
 RawLogRecorder::~RawLogRecorder() {
     stop();
@@ -34,14 +12,13 @@ bool RawLogRecorder::start(const std::filesystem::path& path) {
     stop();
     {
         std::scoped_lock lock(mutex_);
-        output_.open(path, std::ios::binary | std::ios::trunc);
-        if (!output_) {
+        if (!writer_.open(path)) {
             Logger::instance().log(
-                LogLevel::Error, "Recorder", "Cannot open raw log: " + path.string());
+                LogLevel::Error,
+                "Recorder",
+                "Cannot open raw log: " + path.string() + ": " + writer_.error());
             return false;
         }
-        constexpr std::array<char, 8> magic{'L', 'D', 'B', 'G', 'R', 'A', 'W', '1'};
-        output_.write(magic.data(), magic.size());
         recording_ = true;
     }
     worker_ = std::jthread([this](std::stop_token token) { run(token); });
@@ -64,9 +41,8 @@ void RawLogRecorder::stop() {
     }
     std::scoped_lock lock(mutex_);
     queue_.clear();
-    if (output_.is_open()) {
-        output_.flush();
-        output_.close();
+    if (writer_.isOpen()) {
+        writer_.close();
         Logger::instance().log(LogLevel::Info, "Recorder", "Raw recording stopped");
     }
 }
@@ -127,26 +103,9 @@ void RawLogRecorder::run(std::stop_token stopToken) {
 
 void RawLogRecorder::writeChunk(const DataChunk& chunk) {
     std::scoped_lock lock(mutex_);
-    if (!output_) {
-        return;
+    if (!writer_.write(chunk)) {
+        Logger::instance().log(LogLevel::Error, "Recorder", writer_.error());
     }
-    if (chunk.sourceId.size() > std::numeric_limits<std::uint32_t>::max() ||
-        chunk.payload.size() > std::numeric_limits<std::uint32_t>::max()) {
-        Logger::instance().log(LogLevel::Error, "Recorder", "Raw record is too large");
-        return;
-    }
-    constexpr std::uint32_t recordMagic = 0x4C444252;
-    writeValue(output_, recordMagic);
-    writeValue(output_, chunk.sourceTimestamp);
-    writeValue(output_, chunk.receiveTimestamp);
-    writeValue(output_, chunk.sequence);
-    writeValue(output_, static_cast<std::uint8_t>(chunk.direction));
-    writeValue(output_, static_cast<std::uint32_t>(chunk.sourceId.size()));
-    writeValue(output_, static_cast<std::uint32_t>(chunk.payload.size()));
-    output_.write(chunk.sourceId.data(), static_cast<std::streamsize>(chunk.sourceId.size()));
-    output_.write(
-        reinterpret_cast<const char*>(chunk.payload.data()),
-        static_cast<std::streamsize>(chunk.payload.size()));
 }
 
 }  // namespace lab::core

@@ -16,7 +16,10 @@ public:
     explicit TerminalWidget(QWidget* parent = nullptr);
 
 public slots:
-    void appendChunk(const QByteArray& bytes, bool transmitted, qint64 timestampNs);
+    void appendChunk(const QByteArray& bytes,
+                     bool transmitted,
+                     qint64 timestampNs,
+                     const QString& sourceId);
 
 private:
     [[nodiscard]] QString formatPayload(const QByteArray& bytes) const;
@@ -28,4 +31,3 @@ private:
 };
 
 }  // namespace lab::ui
-

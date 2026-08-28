@@ -65,6 +65,7 @@ Remote Agent QThread       QTcpSocket、握手、帧解码、订阅控制、心�
 Processing std::jthread    CSV/二进制帧解析、TimeSeries 追加、FrameEvent
 Recorder std::jthread      有序写入 RX/TX 原始记录
 Session std::jthread       异步写入数值、结构化帧、事件和配置快照
+rosbag2 std::jthread       Qt Sql 前向读取、分卷时间归并与同步 RawLogWriter
 ```
 
 暂停终端或曲线只影响绘制，不会停止串口、处理线程或记录线程。`TimeSeriesStore` 使用共享锁保护；绘图得到有序快照，不持有内部存储引用。
@@ -72,6 +73,8 @@ Session std::jthread       异步写入数值、结构化帧、事件和配置�
 当前处理和记录队列选择可靠性优先，不在压力下静默丢弃。停止 Session 时，数据源路由短暂进入屏障，等待处理队列变空后再结束记录，确保停止点前的原始数据和解析值一致。队列深度会暴露为指标；后续持续压力策略是背压告警、分块落盘和可配置内存上限，而不是无提示截断。
 
 `ReplaySource` 实现同一个 `IDataSource` 接口，按原始接收时间调度 `DataChunk`，所以回放复用 Monitor、Protocol 和 Plot 全链路。跳转会暂停回放、等待处理队列空闲、重置流解析器后再切换索引位置。
+
+`Rosbag2Importer` 位于 Qt 适配器层：QSQLITE 只负责读取 rosbag2 数据库，纯核心 `RawLogWriter` 负责流式生成标准 `.ldraw`。分卷 bag 同时保留每卷一个前向游标，并按时间戳、文件序和行号做确定性归并，因此导入内存取决于分卷数和单条消息大小，而不是消息总量。生成的 Session 标记为 `raw-only`；应用层据此把 CDR 送入终端但绕过 CSV/自定义协议处理。
 
 ## 4. Windows / Linux / ROS2 解耦
 
@@ -106,6 +109,7 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 
 - 当前最小绘图是自绘 Qt Widget，不依赖 Qt Charts；适合 10~20 条常规曲线，但尚未实现高密度 LTTB/min-max downsampling。
 - 回放索引当前在打开文件时同步建立，每条原始记录占 16 字节索引内存；超长 Session 的后台建索引与稀疏缓存仍待实现。
+- rosbag2 当前支持 SQLite3/CDR；MCAP、压缩存储、Topic 过滤和离线结构化字段仍待实现。
 - CSV 解析器只处理换行分隔的数值；二进制帧、单位和校验由独立协议引擎处理。
 - 串口断开后提供手动重连；自动退避重连和端口热插拔恢复留到后续。
 - TCP 当前服务一个活动客户端；UDP 远端目前要求数字 IPv4/IPv6 地址。自动重连、TLS、组播和多客户端管理留到后续。

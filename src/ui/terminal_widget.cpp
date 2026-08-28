@@ -72,7 +72,8 @@ TerminalWidget::TerminalWidget(QWidget* parent) : QWidget(parent) {
 void TerminalWidget::appendChunk(
     const QByteArray& bytes,
     bool transmitted,
-    qint64 timestampNs) {
+    qint64 timestampNs,
+    const QString& sourceId) {
     if (paused_->isChecked()) {
         return;
     }
@@ -80,7 +81,8 @@ void TerminalWidget::appendChunk(
     const auto time = QDateTime::fromMSecsSinceEpoch(milliseconds).toString(QStringLiteral("HH:mm:ss.zzz"));
     const auto direction = transmitted ? QStringLiteral("TX") : QStringLiteral("RX");
     output_->appendPlainText(
-        QStringLiteral("[%1] %2  %3").arg(time, direction, formatPayload(bytes)));
+        QStringLiteral("[%1] %2  [%3]  %4")
+            .arg(time, direction, sourceId, formatPayload(bytes)));
     if (autoScroll_->isChecked()) {
         output_->verticalScrollBar()->setValue(output_->verticalScrollBar()->maximum());
     }
