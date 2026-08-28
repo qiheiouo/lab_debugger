@@ -190,6 +190,13 @@ if(LAB_DEBUGGER_BUILD_TESTS)
     add_test(NAME lab_agent_server_session_tests COMMAND lab_agent_server_session_tests)
     add_executable(lab_cdr_field_mapper_tests tests/test_cdr_field_mapper.cpp)
     target_link_libraries(lab_cdr_field_mapper_tests PRIVATE lab_rosbag_cdr)
+    if(MSVC)
+        target_compile_options(lab_cdr_field_mapper_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(lab_cdr_field_mapper_tests PRIVATE
+            -Wall -Wextra -Wpedantic
+        )
+    endif()
     add_test(NAME lab_cdr_field_mapper_tests COMMAND lab_cdr_field_mapper_tests)
     set_tests_properties(lab_cdr_field_mapper_tests PROPERTIES TIMEOUT 15)
     if(UNIX)

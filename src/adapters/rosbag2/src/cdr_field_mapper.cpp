@@ -179,9 +179,10 @@ void addField(std::vector<CdrNumericField>& fields,
               std::string path,
               std::string unit,
               double value) {
-    if (std::isfinite(value)) {
-        fields.push_back({std::move(path), std::move(unit), value});
+    if (!std::isfinite(value)) {
+        throw std::runtime_error("CDR numeric field is not finite");
     }
+    fields.push_back({std::move(path), std::move(unit), value});
 }
 
 bool readHeader(CdrReader& reader, lab::core::Timestamp& timestamp) {

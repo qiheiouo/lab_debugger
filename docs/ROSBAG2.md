@@ -25,7 +25,7 @@ Lab Debugger 0.11 提供 Phase 7 的第一版 rosbag2 离线链路，0.12 增加
 
 CDR 是 ROS 的二进制序列化数据，不是 CSV 文本。0.13 内置 `std_msgs/msg/Float32`、`Float64`、`Int32`、`UInt32`、`Bool`，`geometry_msgs/msg/Twist`、`TwistStamped`、`PoseStamped`，`sensor_msgs/msg/Imu`、`JointState` 和 `nav_msgs/msg/Odometry`。字段路径与 Remote Agent 保持一致，并保留 `m`、`m/s`、`rad`、`rad/s`、`m/s^2` 等单位；曲线字段带 Topic 前缀，避免多个 Topic 的 `data` 或 `pose` 相互覆盖。Header 时间戳非零时用于曲线，零时间戳回退到 bag 消息时间。
 
-所有类型都会逐字节保留原始 CDR。未知类型、非有限数值、单条截断/损坏消息或不支持的 CDR 封装不会产生伪字段；其中未知类型保持“仅原始 CDR”，已知类型解析失败会计入 Session 的 `mapping_failure_count` 并在回放时按来源限频提示。后续版本会增加更多类型、可选动态类型描述和索引缓存。
+所有类型都会逐字节保留原始 CDR。未知类型、非有限数值、单条截断/损坏消息或不支持的 CDR 封装不会产生伪字段；一条已知消息中只要有一个 NaN 或 Inf，整条消息的结构化字段都会清空，不会保留其他有限字段形成部分曲线。其中未知类型保持“仅原始 CDR”，已知类型解析失败会计入 Session 的 `mapping_failure_count` 并在回放时按来源限频提示。后续版本会增加更多类型、可选动态类型描述和索引缓存。
 
 ## 安全限制与错误处理
 
@@ -40,3 +40,5 @@ CDR 是 ROS 的二进制序列化数据，不是 CSV 文本。0.13 内置 `std_m
 ## 开发依赖
 
 GUI 构建使用 Qt Sql 和随 Qt 部署的 QSQLITE 驱动。离线 CDR 字段映射本身是纯 C++20，不链接 ROS2；无 GUI 构建仍不依赖 Qt、SQLite 或 ROS2。
+
+ROS2 Agent 测试包中的 `lab_debug_agent_cdr_compatibility_tests` 会使用 Humble 的 `rclcpp::Serialization<T>` 生成真实 CDR，再直接编译并调用客户端共享的 `cdr_field_mapper.cpp`，同时逐项比较 Remote Agent 字段路径、单位、数值和 Header 时间戳。该目标只属于 ROS 测试体系，不会把 ROS2 依赖传播到 `lab_rosbag_cdr`、`lab_core` 或 Windows GUI。

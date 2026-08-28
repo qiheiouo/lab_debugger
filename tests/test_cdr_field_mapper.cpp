@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -208,6 +209,52 @@ void testSafeFallbacks() {
     require(!representation.success &&
                 representation.warning.find("encapsulation") != std::string::npos,
             "unsupported CDR representation is rejected explicitly");
+
+    const auto invalidBool = lab::adapters::rosbag2::mapStructuredCdrFields(
+        "std_msgs/msg/Bool", std::vector<std::uint8_t>{0, 1, 0, 0, 2});
+    require(!invalidBool.success && invalidBool.fields.empty() &&
+                invalidBool.warning.find("boolean") != std::string::npos,
+            "invalid Bool falls back without invented fields");
+
+    CdrWriter oversizedString;
+    oversizedString.int32(1);
+    oversizedString.uint32(2);
+    oversizedString.uint32(1024U * 1024U + 1U);
+    const auto stringLimit = lab::adapters::rosbag2::mapStructuredCdrFields(
+        "geometry_msgs/msg/TwistStamped", oversizedString.bytes());
+    require(!stringLimit.success && stringLimit.fields.empty() &&
+                stringLimit.warning.find("string length") != std::string::npos,
+            "oversized Header string falls back without partial fields");
+
+    CdrWriter oversizedSequence;
+    oversizedSequence.header(1, 2, "arm");
+    oversizedSequence.uint32(1025);
+    const auto sequenceLimit = lab::adapters::rosbag2::mapStructuredCdrFields(
+        "sensor_msgs/msg/JointState", oversizedSequence.bytes());
+    require(!sequenceLimit.success && sequenceLimit.fields.empty() &&
+                sequenceLimit.warning.find("1024-item") != std::string::npos,
+            "oversized JointState sequence falls back without partial fields");
+
+    CdrWriter damagedHeader;
+    damagedHeader.header(1, 1'000'000'000U, "frame");
+    const auto header = lab::adapters::rosbag2::mapStructuredCdrFields(
+        "geometry_msgs/msg/PoseStamped", damagedHeader.bytes());
+    require(!header.success && header.fields.empty() &&
+                header.sourceTimestamp == 0,
+            "invalid Header nanoseconds clear the timestamp and fields");
+
+    CdrWriter nonFinite;
+    nonFinite.float64(1.0);
+    nonFinite.float64(std::numeric_limits<double>::quiet_NaN());
+    nonFinite.float64(3.0);
+    nonFinite.float64(4.0);
+    nonFinite.float64(5.0);
+    nonFinite.float64(6.0);
+    const auto invalidNumber = lab::adapters::rosbag2::mapStructuredCdrFields(
+        "geometry_msgs/msg/Twist", nonFinite.bytes());
+    require(!invalidNumber.success && invalidNumber.fields.empty() &&
+                invalidNumber.warning.find("not finite") != std::string::npos,
+            "one non-finite value rejects the complete structured message");
 }
 
 }  // namespace

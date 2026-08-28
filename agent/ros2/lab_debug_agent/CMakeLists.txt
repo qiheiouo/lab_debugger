@@ -79,6 +79,39 @@ if(BUILD_TESTING)
     COMMAND lab_debug_agent_field_mapper_tests
   )
 
+  add_executable(lab_debug_agent_cdr_compatibility_tests
+    test/test_cdr_compatibility.cpp
+    src/field_mapper.cpp
+    src/generic_field_mapper.cpp
+    "${LAB_DEBUGGER_ROOT}/src/adapters/rosbag2/src/cdr_field_mapper.cpp"
+  )
+  target_include_directories(lab_debug_agent_cdr_compatibility_tests PRIVATE
+    include
+    "${LAB_DEBUGGER_ROOT}/src/adapters/rosbag2/include"
+  )
+  target_link_libraries(
+    lab_debug_agent_cdr_compatibility_tests
+    lab_agent_protocol_core
+  )
+  ament_target_dependencies(lab_debug_agent_cdr_compatibility_tests
+    rclcpp
+    rcpputils
+    rcutils
+    rosidl_typesupport_cpp
+    rosidl_typesupport_introspection_cpp
+    std_msgs
+    geometry_msgs
+    sensor_msgs
+    nav_msgs
+  )
+  target_compile_options(lab_debug_agent_cdr_compatibility_tests PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(
+    NAME lab_debug_agent_cdr_compatibility_tests
+    COMMAND lab_debug_agent_cdr_compatibility_tests
+  )
+
   add_executable(lab_debug_agent_ros_integration_tests
     test/test_ros_integration.cpp
   )
