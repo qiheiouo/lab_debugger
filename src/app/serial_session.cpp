@@ -545,7 +545,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.11.0";
+    options.softwareVersion = "0.12.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -701,11 +701,89 @@ bool SerialSession::openReplaySession(const QString& directory) {
     return true;
 }
 
-void SerialSession::importRosbag2(const QString& source, const QString& destination) {
+void SerialSession::inspectRosbag2(const QString& source, const QString& destination) {
+    if (recorder_.isRecording()) {
+        emit rosbagInspectionFinished(false,
+                                      source,
+                                      destination,
+                                      tr("请先停止当前 Session 记录"),
+                                      {},
+                                      0,
+                                      0);
+        return;
+    }
+    if (rosbagImporting_.exchange(true)) {
+        emit rosbagInspectionFinished(false,
+                                      source,
+                                      destination,
+                                      tr("已有 rosbag2 任务正在运行"),
+                                      {},
+                                      0,
+                                      0);
+        return;
+    }
+    if (rosbagImportWorker_.joinable()) {
+        rosbagImportWorker_.join();
+    }
+
+    emit rosbagInspectionStarted(source, destination);
+    rosbagImportWorker_ = std::jthread(
+        [this, source, destination](std::stop_token stopToken) {
+            const auto result = lab::adapters::rosbag2::inspectRosbag2(
+                std::filesystem::path(source.toStdWString()),
+                [stopToken] { return stopToken.stop_requested(); });
+            QMetaObject::invokeMethod(
+                this,
+                [this, source, destination, result] {
+                    rosbagImporting_.store(false);
+                    QVariantList topics;
+                    topics.reserve(static_cast<qsizetype>(result.topics.size()));
+                    for (const auto& topic : result.topics) {
+                        QVariantMap item;
+                        item.insert(QStringLiteral("name"),
+                                    QString::fromUtf8(topic.name));
+                        item.insert(QStringLiteral("type"),
+                                    QString::fromUtf8(topic.type));
+                        item.insert(QStringLiteral("serialization_format"),
+                                    QString::fromUtf8(topic.serializationFormat));
+                        item.insert(QStringLiteral("message_count"),
+                                    static_cast<qulonglong>(topic.messageCount));
+                        topics.push_back(item);
+                    }
+                    const auto message = result.cancelled
+                                             ? tr("rosbag2 目录读取已取消")
+                                             : result.success
+                                                   ? tr("Topic 目录读取完成")
+                                                   : tr("rosbag2 目录读取失败：%1")
+                                                         .arg(QString::fromStdString(
+                                                             result.error));
+                    emit rosbagInspectionFinished(result.success,
+                                                  source,
+                                                  destination,
+                                                  message,
+                                                  topics,
+                                                  result.databaseCount,
+                                                  result.messageCount);
+                },
+                Qt::QueuedConnection);
+        });
+}
+
+void SerialSession::importRosbag2(const QString& source,
+                                  const QString& destination,
+                                  const QVariantList& selectedTopics) {
     if (recorder_.isRecording()) {
         emit rosbagImportFinished(false,
                                   {},
                                   tr("请先停止当前 Session 记录"),
+                                  0,
+                                  0);
+        return;
+    }
+    if (selectedTopics.isEmpty()) {
+        emit rosbagImportFinished(false,
+                                  {},
+                                  tr("请至少选择一个可导入的 Topic"),
                                   0,
                                   0);
         return;
@@ -720,12 +798,26 @@ void SerialSession::importRosbag2(const QString& source, const QString& destinat
 
     emit rosbagImportStarted(source, destination);
     rosbagImportWorker_ = std::jthread(
-        [this, source, destination](std::stop_token stopToken) {
+        [this, source, destination, selectedTopics](std::stop_token stopToken) {
             lab::adapters::rosbag2::Rosbag2ImportOptions options;
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.11.0";
+            options.softwareVersion = "0.12.0";
+            options.includedTopics.reserve(
+                static_cast<std::size_t>(selectedTopics.size()));
+            for (const auto& selectedValue : selectedTopics) {
+                const auto selected = selectedValue.toMap();
+                const auto nameBytes =
+                    selected.value(QStringLiteral("name")).toString().toUtf8();
+                const auto typeBytes =
+                    selected.value(QStringLiteral("type")).toString().toUtf8();
+                options.includedTopics.push_back(
+                    {std::string(nameBytes.constData(),
+                                 static_cast<std::size_t>(nameBytes.size())),
+                     std::string(typeBytes.constData(),
+                                 static_cast<std::size_t>(typeBytes.size()))});
+            }
 
             std::uint64_t lastReported = std::numeric_limits<std::uint64_t>::max();
             auto result = lab::adapters::rosbag2::importRosbag2(

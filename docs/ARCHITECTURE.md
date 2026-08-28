@@ -74,7 +74,7 @@ rosbag2 std::jthread       Qt Sql 前向读取、分卷时间归并与同步 Raw
 
 `ReplaySource` 实现同一个 `IDataSource` 接口，按原始接收时间调度 `DataChunk`，所以回放复用 Monitor、Protocol 和 Plot 全链路。跳转会暂停回放、等待处理队列空闲、重置流解析器后再切换索引位置。
 
-`Rosbag2Importer` 位于 Qt 适配器层：QSQLITE 只负责读取 rosbag2 数据库，纯核心 `RawLogWriter` 负责流式生成标准 `.ldraw`。分卷 bag 同时保留每卷一个前向游标，并按时间戳、文件序和行号做确定性归并，因此导入内存取决于分卷数和单条消息大小，而不是消息总量。生成的 Session 标记为 `raw-only`；应用层据此把 CDR 送入终端但绕过 CSV/自定义协议处理。
+`Rosbag2Importer` 位于 Qt 适配器层：QSQLITE 只负责读取 rosbag2 数据库，纯核心 `RawLogWriter` 负责流式生成标准 `.ldraw`。预检先合并分卷 Topic/类型/格式与计数，UI 再提交明确的 Topic 选择；正式查询按各数据库本地 topic id 限定数据。分卷 bag 同时保留每卷一个前向游标，并按时间戳、文件序和行号做确定性归并，因此导入内存取决于分卷数和单条消息大小，而不是消息总量。生成的 Session 标记为 `raw-only`；应用层据此把 CDR 送入终端但绕过 CSV/自定义协议处理。
 
 ## 4. Windows / Linux / ROS2 解耦
 

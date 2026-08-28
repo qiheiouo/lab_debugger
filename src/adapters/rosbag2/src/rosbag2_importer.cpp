@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QStringList>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -21,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <system_error>
 #include <tuple>
 
@@ -123,6 +125,17 @@ struct CursorRecord {
     QByteArray payload;
 };
 
+bool topicSelected(const std::string& name,
+                   const std::string& type,
+                   const std::string& serializationFormat,
+                   const std::vector<Rosbag2TopicSelector>& selection) {
+    return selection.empty() ||
+           (serializationFormat == "cdr" &&
+            std::any_of(selection.begin(), selection.end(), [&](const auto& selected) {
+                return selected.name == name && selected.type == type;
+            }));
+}
+
 class DatabaseCursor {
 public:
     DatabaseCursor(std::filesystem::path path, std::size_t order)
@@ -151,13 +164,51 @@ public:
         return true;
     }
 
-    bool start(std::string& error) {
+    bool start(const std::vector<Rosbag2TopicSelector>& selection,
+               std::string& error) {
+        QString whereClause;
+        if (!selection.empty()) {
+            QSqlQuery topicQuery(database_);
+            if (!topicQuery.exec(QStringLiteral(
+                    "SELECT id, name, type, serialization_format FROM topics"))) {
+                error = "cannot select rosbag2 topics from " + pathText(path_.filename()) +
+                        ": " + toUtf8(topicQuery.lastError().text());
+                return false;
+            }
+            QStringList ids;
+            while (topicQuery.next()) {
+                bool idOk = false;
+                const auto id = topicQuery.value(0).toLongLong(&idOk);
+                const auto name = toUtf8(topicQuery.value(1).toString());
+                const auto type = toUtf8(topicQuery.value(2).toString());
+                const auto format = toUtf8(topicQuery.value(3).toString());
+                if (!idOk) {
+                    error = "rosbag2 topic contains an invalid id";
+                    return false;
+                }
+                if (topicSelected(name, type, format, selection)) {
+                    ids.push_back(QString::number(id));
+                }
+            }
+            if (topicQuery.lastError().isValid()) {
+                error = "cannot read rosbag2 topics: " +
+                        toUtf8(topicQuery.lastError().text());
+                return false;
+            }
+            if (ids.empty()) {
+                record_.reset();
+                return true;
+            }
+            whereClause = QStringLiteral(" WHERE m.topic_id IN (%1)").arg(ids.join(','));
+        }
+
         query_ = std::make_unique<QSqlQuery>(database_);
         query_->setForwardOnly(true);
-        if (!query_->exec(QStringLiteral(
-                "SELECT m.timestamp, m.id, t.name, t.type, m.data "
-                "FROM messages m JOIN topics t ON t.id = m.topic_id "
-                "ORDER BY m.timestamp, m.id"))) {
+        const auto statement =
+            QStringLiteral("SELECT m.timestamp, m.id, t.name, t.type, m.data "
+                           "FROM messages m JOIN topics t ON t.id = m.topic_id") +
+            whereClause + QStringLiteral(" ORDER BY m.timestamp, m.id");
+        if (!query_->exec(statement)) {
             error = "unsupported or damaged rosbag2 schema in " + pathText(path_.filename()) +
                     ": " + toUtf8(query_->lastError().text());
             return false;
@@ -219,6 +270,8 @@ bool inspectDatabase(DatabaseCursor& cursor,
                      std::map<TopicKey, std::uint64_t>& topics,
                      std::uint64_t& totalMessages,
                      std::uint64_t& totalBytes,
+                     const std::vector<Rosbag2TopicSelector>& selection,
+                     bool allowUnsupportedFormats,
                      std::string& error) {
     QSqlQuery query(cursor.database());
     if (!query.exec(QStringLiteral(
@@ -246,7 +299,10 @@ bool inspectDatabase(DatabaseCursor& cursor,
             error = "rosbag2 topic name or type exceeds the safety limit";
             return false;
         }
-        if (format != "cdr") {
+        if (!topicSelected(name, type, format, selection)) {
+            continue;
+        }
+        if (!allowUnsupportedFormats && format != "cdr") {
             error = "unsupported rosbag2 serialization format '" + format +
                     "' for topic " + name;
             return false;
@@ -317,6 +373,9 @@ bool writeSessionFiles(const std::filesystem::path& root,
     }
     QJsonObject catalog;
     catalog.insert(QStringLiteral("format"), QStringLiteral("rosbag2-sqlite3"));
+    catalog.insert(QStringLiteral("selection_mode"),
+                   options.includedTopics.empty() ? QStringLiteral("all")
+                                                  : QStringLiteral("explicit"));
     catalog.insert(QStringLiteral("source"), fromPath(options.source));
     catalog.insert(QStringLiteral("databases"), databaseArray);
     catalog.insert(QStringLiteral("topics"), topicArray);
@@ -359,6 +418,8 @@ bool writeSessionFiles(const std::filesystem::path& root,
     import.insert(QStringLiteral("format"), QStringLiteral("rosbag2-sqlite3"));
     import.insert(QStringLiteral("source"), fromPath(options.source));
     import.insert(QStringLiteral("database_count"), static_cast<qint64>(result.databaseCount));
+    import.insert(QStringLiteral("selected_topic_count"),
+                  static_cast<qint64>(result.topics.size()));
 
     QJsonObject metadata;
     metadata.insert(QStringLiteral("format"), QStringLiteral("lab-debug-session"));
@@ -378,6 +439,55 @@ bool writeSessionFiles(const std::filesystem::path& root,
 }
 
 }  // namespace
+
+Rosbag2InspectionResult inspectRosbag2(
+    const std::filesystem::path& source,
+    Rosbag2CancellationCallback cancelled) {
+    Rosbag2InspectionResult result;
+    auto fail = [&result](std::string message) {
+        result.error = std::move(message);
+        return result;
+    };
+    if (source.empty()) {
+        return fail("rosbag2 source is required");
+    }
+
+    std::string error;
+    const auto files = databaseFiles(source, error);
+    if (files.empty()) {
+        return fail(std::move(error));
+    }
+    result.databaseCount = files.size();
+
+    std::map<TopicKey, std::uint64_t> topicCounts;
+    for (std::size_t index = 0; index < files.size(); ++index) {
+        if (cancelled && cancelled()) {
+            result.cancelled = true;
+            return fail("rosbag2 inspection cancelled");
+        }
+        DatabaseCursor cursor(files[index], index);
+        if (!cursor.open(error) ||
+            !inspectDatabase(cursor,
+                             topicCounts,
+                             result.messageCount,
+                             result.payloadBytes,
+                             {},
+                             true,
+                             error)) {
+            return fail(std::move(error));
+        }
+    }
+    if (cancelled && cancelled()) {
+        result.cancelled = true;
+        return fail("rosbag2 inspection cancelled");
+    }
+    for (const auto& [key, count] : topicCounts) {
+        result.topics.push_back(
+            {std::get<0>(key), std::get<1>(key), std::get<2>(key), count});
+    }
+    result.success = true;
+    return result;
+}
 
 Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
                                  Rosbag2ProgressCallback progress) {
@@ -435,8 +545,10 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
                              topicCounts,
                              result.messageCount,
                              result.payloadBytes,
+                             options.includedTopics,
+                             false,
                              error) ||
-            !cursor->start(error)) {
+            !cursor->start(options.includedTopics, error)) {
             return fail(std::move(error));
         }
         cursors.push_back(std::move(cursor));
@@ -449,6 +561,22 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
     }
     for (const auto& [key, count] : topicCounts) {
         result.topics.push_back({std::get<0>(key), std::get<1>(key), std::get<2>(key), count});
+    }
+    if (!options.includedTopics.empty()) {
+        std::set<std::pair<std::string, std::string>> requested;
+        std::set<std::pair<std::string, std::string>> found;
+        for (const auto& selected : options.includedTopics) {
+            if (selected.name.empty() || selected.type.empty()) {
+                return fail("selected rosbag2 topic name and type are required");
+            }
+            requested.emplace(selected.name, selected.type);
+        }
+        for (const auto& topic : result.topics) {
+            found.emplace(topic.name, topic.type);
+        }
+        if (requested != found) {
+            return fail("one or more selected rosbag2 topics no longer exist");
+        }
     }
 
     lab::core::RawLogWriter writer;

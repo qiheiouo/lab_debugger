@@ -20,7 +20,7 @@ struct RemoteAgentSettings {
     std::string host{"127.0.0.1"};
     std::uint16_t port{9750};
     std::string clientName{"Lab Debugger"};
-    std::string clientVersion{"0.11.0"};
+    std::string clientVersion{"0.12.0"};
     bool autoReconnect{};
 };
 

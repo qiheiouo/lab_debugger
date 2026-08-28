@@ -59,6 +59,6 @@ repeat:
 - 跳转时先建立处理屏障，再清理半帧/半行缓存和旧曲线，避免把跳转前后的字节拼成伪帧；
 - Session 的初始协议或 CSV 字段配置会自动恢复。
 
-rosbag2 导入 Session 额外标记 `replay_mode: raw-only`，并在 `configuration/rosbag2.json` 保存 Topic/类型目录。此模式保留完整时间轴和原始 CDR，但明确跳过 CSV 与自定义二进制协议解析，避免随机二进制形成伪数值或伪帧。单文件、分卷归并和限制见 [rosbag2 导入说明](ROSBAG2.md)。
+rosbag2 导入 Session 额外标记 `replay_mode: raw-only`，并在 `configuration/rosbag2.json` 保存本次选中的 Topic/类型目录。此模式保留选中数据的完整时间轴和原始 CDR，但明确跳过 CSV 与自定义二进制协议解析，避免随机二进制形成伪数值或伪帧。单文件、分卷归并、Topic 筛选和限制见 [rosbag2 导入说明](ROSBAG2.md)。
 
 当前索引是每条原始记录 16 字节的内存索引。后续针对数小时、极高 chunk 频率的数据，会增加后台建索引、稀疏索引和索引缓存；原始格式无需因此改变。

@@ -56,7 +56,10 @@ public slots:
     bool startSession(const QString& directory);
     void stopSession();
     bool openReplaySession(const QString& directory);
-    void importRosbag2(const QString& source, const QString& destination);
+    void inspectRosbag2(const QString& source, const QString& destination);
+    void importRosbag2(const QString& source,
+                       const QString& destination,
+                       const QVariantList& selectedTopics);
     void cancelRosbag2Import();
     void closeReplay();
     void pauseReplay();
@@ -107,6 +110,14 @@ signals:
                              qint64 lastTimestamp,
                              qint64 currentTimestamp);
     void csvFieldsRestored(QStringList fields);
+    void rosbagInspectionStarted(QString source, QString destination);
+    void rosbagInspectionFinished(bool success,
+                                  QString source,
+                                  QString destination,
+                                  QString message,
+                                  QVariantList topics,
+                                  quint64 databaseCount,
+                                  quint64 messageCount);
     void rosbagImportStarted(QString source, QString destination);
     void rosbagImportProgress(quint64 importedMessages, quint64 totalMessages);
     void rosbagImportFinished(bool success,

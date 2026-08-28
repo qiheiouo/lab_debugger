@@ -1,5 +1,7 @@
 #include "ui/replay_widget.hpp"
 
+#include "ui/rosbag_topic_dialog.hpp"
+
 #include <QComboBox>
 #include <QDateTime>
 #include <QDir>
@@ -157,7 +159,7 @@ void ReplayWidget::chooseRosbagSource(bool directory) {
                           .arg(stem,
                                QDateTime::currentDateTime().toString(
                                    QStringLiteral("yyyyMMdd_HHmmss")));
-    emit importRosbagRequested(source, QDir(parent).filePath(name));
+    emit inspectRosbagRequested(source, QDir(parent).filePath(name));
 }
 
 void ReplayWidget::setOpened(const QString& directory,
@@ -181,6 +183,56 @@ void ReplayWidget::setImportStarted(const QString& source, const QString& destin
     cancelImportButton_->setEnabled(true);
     importLabel_->setText(tr("正在导入：%1\n保存到：%2").arg(source, destination));
     importLabel_->setStyleSheet(QStringLiteral("color: #f2cc60;"));
+}
+
+void ReplayWidget::setInspectionStarted(const QString& source,
+                                        const QString& destination) {
+    importButton_->setEnabled(false);
+    importDirectoryButton_->setEnabled(false);
+    cancelImportButton_->setEnabled(true);
+    importLabel_->setText(tr("正在读取 rosbag2 Topic 目录…\n来源：%1\n目标：%2")
+                              .arg(source, destination));
+    importLabel_->setStyleSheet(QStringLiteral("color: #f2cc60;"));
+}
+
+void ReplayWidget::showInspectionResult(bool success,
+                                        const QString& source,
+                                        const QString& destination,
+                                        const QString& message,
+                                        const QVariantList& topics,
+                                        quint64 databaseCount,
+                                        quint64 messageCount) {
+    importButton_->setEnabled(true);
+    importDirectoryButton_->setEnabled(true);
+    cancelImportButton_->setEnabled(false);
+    if (!success) {
+        importLabel_->setText(message);
+        importLabel_->setStyleSheet(QStringLiteral("color: #ff6b6b;"));
+        if (!message.contains(tr("已取消"))) {
+            QMessageBox::warning(this, tr("无法读取 rosbag2"), message);
+        }
+        return;
+    }
+    if (topics.isEmpty()) {
+        const auto emptyMessage = tr("rosbag2 中没有可导入的 Topic");
+        importLabel_->setText(emptyMessage);
+        importLabel_->setStyleSheet(QStringLiteral("color: #ff6b6b;"));
+        QMessageBox::information(this, tr("没有 Topic"), emptyMessage);
+        return;
+    }
+
+    importLabel_->setText(tr("已读取 %1 个数据库、%2 个 Topic、%3 条消息")
+                              .arg(databaseCount)
+                              .arg(topics.size())
+                              .arg(messageCount));
+    importLabel_->setStyleSheet(QStringLiteral("color: #5fd19a;"));
+    RosbagTopicDialog dialog(source, destination, topics, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        importLabel_->setText(tr("已取消 Topic 选择，未创建 Session"));
+        importLabel_->setStyleSheet(QStringLiteral("color: #8794a6;"));
+        return;
+    }
+    emit importRosbagRequested(source, destination, dialog.selectedTopics());
 }
 
 void ReplayWidget::setImportProgress(quint64 importedMessages, quint64 totalMessages) {

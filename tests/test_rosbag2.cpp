@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSqlDatabase>
@@ -104,10 +105,17 @@ void testSplitBagImport(const std::filesystem::path& root) {
                {1, 300, QByteArray::fromHex("04")}},
               true);
 
+    const auto inspection = lab::adapters::rosbag2::inspectRosbag2(source);
+    require(inspection.success, "split rosbag2 inspection succeeds: " + inspection.error);
+    require(inspection.databaseCount == 2 && inspection.topics.size() == 2,
+            "inspection merges topic catalogs across split files");
+    require(inspection.messageCount == 4 && inspection.payloadBytes == 4,
+            "inspection reports exact total counts without importing");
+
     const auto destination = root / "imported_session";
     std::uint64_t lastProgress{};
     const auto result = lab::adapters::rosbag2::importRosbag2(
-        {source, destination, "split-import", "0.11.0"},
+        {source, destination, "split-import", "0.12.0"},
         [&lastProgress](std::uint64_t imported, std::uint64_t) {
             lastProgress = imported;
             return true;
@@ -149,6 +157,40 @@ void testSplitBagImport(const std::filesystem::path& root) {
             "imported Session prevents CDR from entering CSV parsing");
     require(std::filesystem::exists(destination / "configuration" / "rosbag2.json"),
             "imported topic catalog is retained");
+
+    const auto filteredDestination = root / "filtered_session";
+    lab::adapters::rosbag2::Rosbag2ImportOptions filteredOptions{
+        source, filteredDestination, "filtered-import", "0.12.0"};
+    filteredOptions.includedTopics.push_back(
+        {"/status", "std_msgs/msg/String"});
+    const auto filtered = lab::adapters::rosbag2::importRosbag2(filteredOptions);
+    require(filtered.success, "selected Topic import succeeds: " + filtered.error);
+    require(filtered.topics.size() == 1 && filtered.messageCount == 1 &&
+                filtered.payloadBytes == 1,
+            "selected Topic controls catalog and aggregate counts");
+    lab::core::RawLogReader filteredReader;
+    require(filteredReader.open(filteredDestination / "raw" / "stream.ldraw") &&
+                filteredReader.recordCount() == 1,
+            "selected Topic produces only its raw records");
+    const auto selectedChunk = filteredReader.read(0);
+    require(selectedChunk && selectedChunk->sourceTimestamp == 200 &&
+                selectedChunk->payload == std::vector<std::uint8_t>{2} &&
+                selectedChunk->sourceId.find("/status") != std::string::npos,
+            "selected Topic preserves its timestamp, payload, and source id");
+    QFile filteredCatalog(
+        QString::fromStdWString((filteredDestination / "configuration" / "rosbag2.json")
+                                    .wstring()));
+    require(filteredCatalog.open(QIODevice::ReadOnly),
+            "selected Topic catalog exists");
+    const auto filteredDocument = QJsonDocument::fromJson(filteredCatalog.readAll());
+    require(filteredDocument.object()
+                    .value(QStringLiteral("selection_mode"))
+                    .toString() == QStringLiteral("explicit") &&
+                filteredDocument.object()
+                        .value(QStringLiteral("topics"))
+                        .toArray()
+                        .size() == 1,
+            "Session configuration records the explicit filtered catalog");
 }
 
 void testCancellationAndValidation(const std::filesystem::path& root) {
@@ -158,7 +200,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
               {{1, 100, QByteArray::fromHex("0102")}});
     const auto cancelledDestination = root / "cancelled_session";
     const auto cancelled = lab::adapters::rosbag2::importRosbag2(
-        {bag, cancelledDestination, "cancelled", "0.11.0"},
+        {bag, cancelledDestination, "cancelled", "0.12.0"},
         [](std::uint64_t, std::uint64_t) { return false; });
     require(!cancelled.success && cancelled.cancelled,
             "cancel callback stops import explicitly");
@@ -170,18 +212,53 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
               QStringLiteral("json"),
               {{1, 100, QByteArrayLiteral("{}")}});
     const auto unsupportedDestination = root / "unsupported_session";
+    const auto unsupportedInspection =
+        lab::adapters::rosbag2::inspectRosbag2(unsupportedBag);
+    require(unsupportedInspection.success && unsupportedInspection.topics.size() == 1 &&
+                unsupportedInspection.topics.front().serializationFormat == "json",
+            "inspection reports unsupported formats so the UI can disable them");
     const auto unsupported = lab::adapters::rosbag2::importRosbag2(
-        {unsupportedBag, unsupportedDestination, "unsupported", "0.11.0"});
+        {unsupportedBag, unsupportedDestination, "unsupported", "0.12.0"});
     require(!unsupported.success &&
                 unsupported.error.find("serialization format") != std::string::npos,
             "non-CDR bag fails with a clear format error");
     require(!std::filesystem::exists(unsupportedDestination),
             "invalid input does not publish a partial Session");
 
+    const auto mixedSource = root / "mixed_serialization_bag";
+    std::filesystem::create_directories(mixedSource);
+    createBag(QString::fromStdWString((mixedSource / "cdr.db3").wstring()),
+              QStringLiteral("cdr"),
+              {{1, 100, QByteArray::fromHex("01")}});
+    createBag(QString::fromStdWString((mixedSource / "json.db3").wstring()),
+              QStringLiteral("json"),
+              {{1, 200, QByteArrayLiteral("{}")}});
+    const auto mixedDestination = root / "mixed_serialization_session";
+    lab::adapters::rosbag2::Rosbag2ImportOptions mixedOptions{
+        mixedSource, mixedDestination, "mixed", "0.12.0"};
+    mixedOptions.includedTopics.push_back(
+        {"/temperature", "std_msgs/msg/Float64"});
+    const auto mixed = lab::adapters::rosbag2::importRosbag2(mixedOptions);
+    require(mixed.success && mixed.topics.size() == 1 &&
+                mixed.topics.front().serializationFormat == "cdr" &&
+                mixed.messageCount == 1,
+            "explicit selection imports only the supported CDR catalog row");
+
+    const auto missingDestination = root / "missing_topic_session";
+    lab::adapters::rosbag2::Rosbag2ImportOptions missingOptions{
+        bag, missingDestination, "missing", "0.12.0"};
+    missingOptions.includedTopics.push_back(
+        {"/missing", "std_msgs/msg/String"});
+    const auto missing = lab::adapters::rosbag2::importRosbag2(missingOptions);
+    require(!missing.success && missing.error.find("no longer exist") != std::string::npos,
+            "stale Topic selection fails explicitly");
+    require(!std::filesystem::exists(missingDestination),
+            "stale selection does not publish a partial Session");
+
     const auto occupied = root / "occupied_session";
     std::filesystem::create_directories(occupied);
     const auto existing = lab::adapters::rosbag2::importRosbag2(
-        {bag, occupied, "occupied", "0.11.0"});
+        {bag, occupied, "occupied", "0.12.0"});
     require(!existing.success &&
                 existing.error.find("already exists") != std::string::npos,
             "import never overwrites an existing destination");

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.11.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.12.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -118,6 +118,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
             src/ui/protocol_widget.hpp
             src/ui/replay_widget.cpp
             src/ui/replay_widget.hpp
+            src/ui/rosbag_topic_dialog.cpp
+            src/ui/rosbag_topic_dialog.hpp
             src/ui/send_panel.cpp
             src/ui/send_panel.hpp
             src/ui/serial_panel.cpp
@@ -222,6 +224,17 @@ if(LAB_DEBUGGER_BUILD_TESTS)
         )
     endif()
     if(TARGET lab_app_ui)
+        add_executable(lab_rosbag_topic_dialog_tests
+            tests/test_rosbag_topic_dialog.cpp
+        )
+        target_link_libraries(lab_rosbag_topic_dialog_tests PRIVATE lab_app_ui)
+        add_test(NAME lab_rosbag_topic_dialog_tests COMMAND lab_rosbag_topic_dialog_tests)
+        set_tests_properties(lab_rosbag_topic_dialog_tests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 15
+        )
         add_executable(lab_replay_routing_tests tests/test_replay_routing.cpp)
         target_link_libraries(lab_replay_routing_tests PRIVATE lab_app_ui)
         add_test(NAME lab_replay_routing_tests COMMAND lab_replay_routing_tests)

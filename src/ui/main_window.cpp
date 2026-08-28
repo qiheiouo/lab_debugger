@@ -118,6 +118,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::clearProtocol);
     connect(replay_, &ReplayWidget::openSessionRequested,
             &session_, &lab::app::SerialSession::openReplaySession);
+    connect(replay_, &ReplayWidget::inspectRosbagRequested,
+            &session_, &lab::app::SerialSession::inspectRosbag2);
     connect(replay_, &ReplayWidget::importRosbagRequested,
             &session_, &lab::app::SerialSession::importRosbag2);
     connect(replay_, &ReplayWidget::cancelRosbagImportRequested,
@@ -171,6 +173,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             replay_, &ReplayWidget::showOpenError);
     connect(&session_, &lab::app::SerialSession::replayStatusChanged,
             replay_, &ReplayWidget::setStatus);
+    connect(&session_, &lab::app::SerialSession::rosbagInspectionStarted,
+            replay_, &ReplayWidget::setInspectionStarted);
+    connect(&session_, &lab::app::SerialSession::rosbagInspectionFinished,
+            replay_, &ReplayWidget::showInspectionResult);
     connect(&session_, &lab::app::SerialSession::rosbagImportStarted,
             replay_, &ReplayWidget::setImportStarted);
     connect(&session_, &lab::app::SerialSession::rosbagImportProgress,

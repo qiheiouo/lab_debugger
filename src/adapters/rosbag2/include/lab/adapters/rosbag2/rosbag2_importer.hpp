@@ -17,11 +17,27 @@ struct Rosbag2TopicInfo {
     std::uint64_t messageCount{};
 };
 
+struct Rosbag2TopicSelector {
+    std::string name;
+    std::string type;
+};
+
+struct Rosbag2InspectionResult {
+    bool success{};
+    bool cancelled{};
+    std::vector<Rosbag2TopicInfo> topics;
+    std::uint64_t databaseCount{};
+    std::uint64_t messageCount{};
+    std::uint64_t payloadBytes{};
+    std::string error;
+};
+
 struct Rosbag2ImportOptions {
     std::filesystem::path source;
     std::filesystem::path destination;
     std::string sessionName;
     std::string softwareVersion;
+    std::vector<Rosbag2TopicSelector> includedTopics;
 };
 
 struct Rosbag2ImportResult {
@@ -39,6 +55,12 @@ struct Rosbag2ImportResult {
 
 using Rosbag2ProgressCallback =
     std::function<bool(std::uint64_t importedMessages, std::uint64_t totalMessages)>;
+
+using Rosbag2CancellationCallback = std::function<bool()>;
+
+Rosbag2InspectionResult inspectRosbag2(
+    const std::filesystem::path& source,
+    Rosbag2CancellationCallback cancelled = {});
 
 Rosbag2ImportResult importRosbag2(
     const Rosbag2ImportOptions& options,
