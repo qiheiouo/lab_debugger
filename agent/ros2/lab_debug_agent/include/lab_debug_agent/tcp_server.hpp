@@ -45,9 +45,10 @@ public:
     bool start(std::string* error = nullptr);
     void stop();
 
-    bool publishCatalog(const lab::core::agent::TopicCatalog& catalog);
-    bool publishTopicFieldCatalog(
-        const lab::core::agent::TopicFieldCatalog& catalog);
+    bool publishCatalog(
+        const lab::core::agent::TopicCatalog& catalog,
+        const std::function<lab::core::agent::TopicFieldCatalog(
+            const lab::core::agent::TopicCatalog&)>& fieldCatalogBuilder = {});
     bool publishSample(
         const lab::core::agent::SampleBatch& sample,
         lab::core::Timestamp sourceTimestamp,

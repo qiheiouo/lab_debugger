@@ -6,6 +6,7 @@
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/serialization.hpp>
+#include <rcutils/error_handling.h>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -233,6 +234,8 @@ void testMissingTypesupportAndMalformedData() {
                 FieldMappingKind::Introspection &&
                 !reason.empty(),
             "runtime introspection capability is reported before subscription");
+    require(!rcutils_error_is_set(),
+            "successful dynamic typesupport lookup clears transient ROS errors");
     require(lab_debug_agent::inspectFieldMapping(
                 "missing_msgs/msg/Unavailable", &reason) ==
                 FieldMappingKind::Unavailable &&
@@ -264,6 +267,8 @@ void testMissingTypesupportAndMalformedData() {
                 genericFailure.warning.find("Structured field mapping failed") !=
                     std::string::npos,
             "generic deserialization failure also preserves the raw-only fallback");
+    require(!rcutils_error_is_set(),
+            "generic deserialization failure does not leak a ROS error state");
 }
 
 }  // namespace

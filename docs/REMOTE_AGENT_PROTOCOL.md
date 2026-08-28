@@ -64,7 +64,7 @@ Ubuntu / ROS2 Humble                  Windows / Linux
 
 Linux Agent 使用 ROS2 Humble 的 `get_topic_names_and_types()` 建立目录，并按 topic/type 分别汇总发布端 endpoint QoS，生成可靠性与持久性提示。首次目录（包括空目录）的 revision 从 1 开始；topic、type 或汇总 QoS 变化时递增。
 
-能力位 `TopicFieldCapabilities`（`1 << 5`）是向后兼容扩展，依赖 `TopicDiscovery`。双方协商后，Agent 会紧跟 `TopicCatalog` 发送相同 `graphRevision` 的独立 `TopicFieldCatalog`；未协商时绝不发送新消息，旧 v1 客户端仍按原有字节格式工作。字段能力条目包含 topic、type、枚举和原因：`BuiltIn` 表示带单位/专用语义的内置映射，`Introspection` 表示运行时通用展开，`RawOnly` 表示可以订阅但缺少 introspection，`Unavailable` 表示普通 C++ typesupport 缺失、无法创建通用订阅，`Unknown` 用于未来或未确定状态。客户端把原因放在字段能力单元格提示中，并禁止对 `Unavailable` 条目发起新订阅。
+能力位 `TopicFieldCapabilities`（`1 << 5`）是向后兼容扩展，依赖 `TopicDiscovery`。双方协商后，Agent 会在同一发送临界区内紧跟 `TopicCatalog` 发送相同 `graphRevision` 的独立 `TopicFieldCatalog`，避免心跳或样本插入两种目录之间；未协商时绝不发送新消息，旧 v1 客户端仍按原有字节格式工作。字段能力条目包含 topic、type、枚举和原因：`BuiltIn` 表示带单位/专用语义的内置映射，`Introspection` 表示运行时通用展开，`RawOnly` 表示可以订阅但缺少 introspection，`Unavailable` 表示普通 C++ typesupport 缺失、无法创建通用订阅，`Unknown` 用于未来或未确定状态。客户端把原因放在字段能力单元格提示中，并禁止对 `Unavailable` 条目发起新订阅。
 
 订阅请求包含独立 `requestId`，用于标识控制请求，不作为活动订阅的唯一键。活动订阅按 `topic + type` 区分：相同 QoS 的重复订阅是幂等操作，更改 QoS/queueDepth 会替换该 topic/type 的订阅，取消订阅只移除完全匹配的 topic/type，不会误删同名的其他类型。响应失败时 `Error.context` 包含 topic。队列深度范围固定为 1..1000000。
 
@@ -141,6 +141,8 @@ Agent 使用 `rclcpp::NodeGraphInterface::get_topic_names_and_types()` 做发现
 
 任意自定义消息都必须在 Agent 环境中安装普通 C++ typesupport，`GenericSubscription` 才能创建；缺少时订阅失败并返回明确错误。introspection typesupport 缺失、元数据异常或结构化反序列化失败时，字段集合清空且 Agent 记录告警，但已复制的原始 CDR 继续转发，不能伪造解析结果。
 
+`RawOnly` 表示独立探测到普通 C++ typesupport、但未探测到 introspection。自定义包的 typesupport 安装必须保持内部一致；在构建完成后直接移走分派表中声明存在的 introspection 动态库，会使 Humble 的 `GenericSubscription` 创建失败，即使普通 C++/FastRTPS 动态库仍在。Agent 会保留 `RawOnly` 探测原因并把该订阅失败作为明确 `Error` 返回。已经合法创建的订阅若随后失去 introspection，仍会继续转发原始 CDR 且不产生伪造字段。
+
 `header.stamp` 为零或消息没有标准 Header 时，由服务端回退到 Agent 收到 ROS 回调的时间。
 
 ROS graph 可以报告同名 topic 的多个类型，目录会逐类型保留。Humble RMW 不支持同一个 Agent participant 同时为同名 topic 创建不同类型的 `GenericSubscription`；Agent 会在进入 RMW 前返回明确的订阅错误，并保留此前已经成功创建的订阅。取消订阅仍按 topic/type 精确匹配。
@@ -169,6 +171,6 @@ ROS graph 可以报告同名 topic 的多个类型，目录会逐类型保留。
 
 `lab_agent_server_session_tests` 覆盖 Agent 侧 Hello/HelloAck、能力拒绝、客户端命令动作化、服务端统一序号、时间戳、心跳、CRC 恢复、结构化错误和重复客户端序号。
 
-`lab_agent_tcp_server_tests` 在 Linux loopback socket 上覆盖连接、并发发送严格序号、目录、订阅/取消订阅、Ping/Pong、CRC 恢复、协议断线、清理回调和重连。
+`lab_agent_tcp_server_tests` 在 Linux loopback socket 上覆盖连接、并发发送严格序号、成对目录、订阅/取消订阅、Ping/Pong、CRC 恢复、协议断线、清理回调和重连；还模拟不协商字段能力的旧 v1 客户端，确认其只收到旧目录并仍可订阅、接收原始样本和使用 Ping/Pong。
 
 ROS2 包内的 `lab_debug_agent_field_mapper_tests` 与 `lab_debug_agent_ros_integration_tests` 覆盖 Humble 序列化字段映射、运行时 Point/数组/嵌套消息 introspection、精度与资源边界，以及真实 graph、reliable/best-effort QoS、GraphUpdates、原始 CDR、Header 时间戳、订阅生命周期、错误、断线清理、重连和 SIGINT。构建与运行步骤见 [`agent/ros2/lab_debug_agent/README.md`](../agent/ros2/lab_debug_agent/README.md)。

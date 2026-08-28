@@ -44,6 +44,10 @@ constexpr std::size_t maximumArrayElements = 1024;
 constexpr std::size_t maximumStringBytes = 1U << 20U;
 constexpr std::uint64_t maximumExactInteger = 1ULL << 53U;
 
+void resetRcutilsError() noexcept {
+    if (rcutils_error_is_set()) rcutils_reset_error();
+}
+
 struct TypeSupportEntry {
     std::shared_ptr<rcpputils::SharedLibrary> serializationLibrary;
     std::shared_ptr<rcpputils::SharedLibrary> introspectionLibrary;
@@ -72,8 +76,9 @@ public:
                 throw std::runtime_error(
                     "loaded C++ typesupport contains a null handle");
             }
+            resetRcutilsError();
         } catch (const std::exception& exception) {
-            if (rcutils_error_is_set()) rcutils_reset_error();
+            resetRcutilsError();
             entry->serializationHandle = nullptr;
             entry->serializationError = exception.what();
         }
@@ -95,8 +100,9 @@ public:
                 throw std::runtime_error(
                     "introspection metadata has no message lifecycle functions");
             }
+            resetRcutilsError();
         } catch (const std::exception& exception) {
-            if (rcutils_error_is_set()) rcutils_reset_error();
+            resetRcutilsError();
             entry->members = nullptr;
             entry->introspectionError = exception.what();
         }
@@ -668,9 +674,16 @@ MappedFields mapGenericSerializedFields(
                     : typeSupport->introspectionError);
         }
 
+        const auto& raw = serialized.get_rcl_serialized_message();
+        if (raw.buffer_length == 4 && typeSupport->members->member_count_ != 0) {
+            throw std::runtime_error(
+                "serialized CDR contains an encapsulation header but no member data");
+        }
+
         MessageStorage storage(*typeSupport->members);
         rclcpp::SerializationBase serialization(typeSupport->serializationHandle);
         serialization.deserialize_message(&serialized, storage.get());
+        resetRcutilsError();
 
         Warnings warnings;
         FieldWalker walker(result.fields, warnings);
@@ -680,7 +693,7 @@ MappedFields mapGenericSerializedFields(
                                      .value_or(0);
         result.warning = warnings.format(type);
     } catch (const std::exception& exception) {
-        if (rcutils_error_is_set()) rcutils_reset_error();
+        resetRcutilsError();
         result.fields.clear();
         result.sourceTimestamp = 0;
         result.warning =

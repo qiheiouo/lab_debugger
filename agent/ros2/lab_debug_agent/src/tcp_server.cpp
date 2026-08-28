@@ -93,26 +93,29 @@ void AgentTcpServer::stop() {
 }
 
 bool AgentTcpServer::publishCatalog(
-    const lab::core::agent::TopicCatalog& catalog) {
+    const lab::core::agent::TopicCatalog& catalog,
+    const std::function<lab::core::agent::TopicFieldCatalog(
+        const lab::core::agent::TopicCatalog&)>& fieldCatalogBuilder) {
     std::scoped_lock lock(sessionIoMutex_);
     try {
+        std::optional<lab::core::agent::TopicFieldCatalog> fieldCatalog;
+        if (fieldCatalogBuilder &&
+            (session_.negotiatedCapabilities() &
+             lab::core::agent::capabilityMask(
+                 lab::core::agent::Capability::TopicFieldCapabilities)) != 0U) {
+            fieldCatalog = fieldCatalogBuilder(catalog);
+        }
         const auto bytes = session_.makeTopicCatalog(catalog);
-        return bytes && sendEncoded(*bytes);
+        if (!bytes) return false;
+        std::optional<std::vector<std::uint8_t>> fieldBytes;
+        if (fieldCatalog) {
+            fieldBytes = session_.makeTopicFieldCatalog(*fieldCatalog);
+            if (!fieldBytes) return false;
+        }
+        if (!sendEncoded(*bytes)) return false;
+        return !fieldBytes || sendEncoded(*fieldBytes);
     } catch (const std::exception& exception) {
         warning(std::string("Failed to encode topic catalog: ") + exception.what());
-        return false;
-    }
-}
-
-bool AgentTcpServer::publishTopicFieldCatalog(
-    const lab::core::agent::TopicFieldCatalog& catalog) {
-    std::scoped_lock lock(sessionIoMutex_);
-    try {
-        const auto bytes = session_.makeTopicFieldCatalog(catalog);
-        return bytes && sendEncoded(*bytes);
-    } catch (const std::exception& exception) {
-        warning(std::string("Failed to encode topic field catalog: ") +
-                exception.what());
         return false;
     }
 }
@@ -264,15 +267,7 @@ void AgentTcpServer::processAction(
         if (std::holds_alternative<lab::core::agent::CatalogRequestAction>(action)) {
             if (callbacks_.onCatalogRequested) {
                 const auto catalog = callbacks_.onCatalogRequested();
-                const auto catalogSent = publishCatalog(catalog);
-                if (catalogSent &&
-                    (negotiatedCapabilities() &
-                     lab::core::agent::capabilityMask(
-                         lab::core::agent::Capability::TopicFieldCapabilities)) != 0U &&
-                    callbacks_.onTopicFieldCatalogRequested) {
-                    publishTopicFieldCatalog(
-                        callbacks_.onTopicFieldCatalogRequested(catalog));
-                }
+                publishCatalog(catalog, callbacks_.onTopicFieldCatalogRequested);
             }
             return;
         }

@@ -397,9 +397,8 @@ std::vector<std::uint8_t> encodeFrame(const Frame& frame) {
         throw std::length_error("Agent frame payload exceeds 16 MiB limit");
     }
 
-    std::vector<std::uint8_t> output;
+    std::vector<std::uint8_t> output(magic.begin(), magic.end());
     output.reserve(frameHeaderSize + frame.payload.size());
-    output.insert(output.end(), magic.begin(), magic.end());
     appendU8(output, protocolVersion);
     appendU8(output, static_cast<std::uint8_t>(frame.type));
     appendU16(output, frame.flags);

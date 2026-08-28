@@ -316,14 +316,9 @@ void RosAgentNode::refreshGraph() {
     }
     auto catalog = buildCatalog();
     if (catalog.graphRevision != lastSentRevision_.load()) {
-        auto sent = server_->publishCatalog(catalog);
-        if (sent &&
-            (server_->negotiatedCapabilities() &
-             lab::core::agent::capabilityMask(
-                 lab::core::agent::Capability::TopicFieldCapabilities)) != 0U) {
-            sent = server_->publishTopicFieldCatalog(
-                buildTopicFieldCatalog(catalog));
-        }
+        const auto sent = server_->publishCatalog(
+            catalog,
+            [this](const auto& value) { return buildTopicFieldCatalog(value); });
         if (sent) lastSentRevision_.store(catalog.graphRevision);
     }
 }

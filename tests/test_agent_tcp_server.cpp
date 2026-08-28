@@ -1,6 +1,7 @@
 #include "lab_debug_agent/tcp_server.hpp"
 
 #include <arpa/inet.h>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -173,7 +174,8 @@ Hello identity() {
 void completeHandshake(
     int socket,
     StreamDecoder& decoder,
-    std::uint64_t* lastServerSequence) {
+    std::uint64_t* lastServerSequence,
+    std::uint32_t requestedCapabilities = identity().capabilities) {
     const auto helloFrames = receiveFrames(socket, decoder, 1);
     require(
         helloFrames.size() == 1 && helloFrames[0].type == MessageType::Hello,
@@ -188,7 +190,8 @@ void completeHandshake(
         socket,
         MessageType::HelloAck,
         0,
-        encodeHelloAck({"Linux integration test", "0.1.0", identity().capabilities}));
+        encodeHelloAck(
+            {"Linux integration test", "0.1.0", requestedCapabilities}));
 }
 
 void requireIncreasing(
@@ -345,6 +348,81 @@ void testTcpLifecycleAndConcurrentOrdering() {
             return disconnects == 2;
         }),
         "a fresh client reconnects and disconnect cleanup runs again");
+
+    Socket legacy = connectClient(port);
+    StreamDecoder legacyDecoder;
+    lastServerSequence = 0;
+    const auto legacyCapabilities =
+        capabilityMask(Capability::TopicDiscovery) |
+        capabilityMask(Capability::SerializedMessages);
+    completeHandshake(
+        legacy.get(), legacyDecoder, &lastServerSequence, legacyCapabilities);
+    sendFrame(legacy.get(), MessageType::TopicCatalogRequest, 1, {});
+    const auto legacyCatalogFrames = receiveFrames(legacy.get(), legacyDecoder, 1);
+    require(
+        legacyCatalogFrames.size() == 1 &&
+            legacyCatalogFrames[0].type == MessageType::TopicCatalog &&
+            decodeTopicCatalog(legacyCatalogFrames[0].payload).has_value(),
+        "legacy v1 client receives the unchanged TopicCatalog only");
+    requireIncreasing(legacyCatalogFrames, &lastServerSequence);
+
+    timeval shortTimeout{};
+    shortTimeout.tv_usec = 200'000;
+    ::setsockopt(
+        legacy.get(), SOL_SOCKET, SO_RCVTIMEO, &shortTimeout, sizeof(shortTimeout));
+    std::array<std::uint8_t, 256> unexpected{};
+    const auto unexpectedCount =
+        ::recv(legacy.get(), unexpected.data(), unexpected.size(), 0);
+    require(
+        unexpectedCount < 0 && (errno == EAGAIN || errno == EWOULDBLOCK),
+        "legacy v1 client is never sent unnegotiated TopicFieldCatalog data");
+
+    const SubscriptionRequest legacyRequest{
+        23, "/value", "std_msgs/msg/Float64", Reliability::Reliable, 10};
+    sendFrame(
+        legacy.get(),
+        MessageType::Subscribe,
+        2,
+        encodeSubscriptionRequest(legacyRequest));
+    require(
+        waitFor([&] {
+            std::scoped_lock lock(callbackMutex);
+            return subscriptions.size() == 2;
+        }),
+        "legacy v1 client can still subscribe");
+    require(
+        server.publishSample(
+            {"/value",
+             "std_msgs/msg/Float64",
+             {1, 2, 3, 4},
+             {{"data", "", 42.0}}},
+            100,
+            200),
+        "legacy v1 sample publish succeeds");
+    const auto legacySamples = receiveFrames(legacy.get(), legacyDecoder, 1);
+    const auto legacySample = decodeSampleBatch(legacySamples[0].payload);
+    require(
+        legacySamples.size() == 1 &&
+            legacySamples[0].type == MessageType::SampleBatch &&
+            legacySample && legacySample->serializedData ==
+                std::vector<std::uint8_t>({1, 2, 3, 4}),
+        "legacy v1 client still receives negotiated raw samples");
+    requireIncreasing(legacySamples, &lastServerSequence);
+
+    sendFrame(legacy.get(), MessageType::Ping, 3, encodeNonce(0xDDDD));
+    const auto legacyPongs = receiveFrames(legacy.get(), legacyDecoder, 1);
+    require(
+        legacyPongs.size() == 1 && legacyPongs[0].type == MessageType::Pong &&
+            decodeNonce(legacyPongs[0].payload) == 0xDDDD,
+        "legacy v1 client still receives Pong");
+    requireIncreasing(legacyPongs, &lastServerSequence);
+    legacy.reset();
+    require(
+        waitFor([&] {
+            std::scoped_lock lock(callbackMutex);
+            return disconnects == 3;
+        }),
+        "legacy v1 client disconnect cleanup runs");
     server.stop();
 }
 

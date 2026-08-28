@@ -19,6 +19,8 @@
 
 自定义消息的类型支持库必须已经安装，并且其工作空间已在启动 Agent 前 `source`。普通 C++ typesupport 缺失时 `GenericSubscription` 会返回明确错误；introspection typesupport 缺失或反序列化失败时，Agent 记录限频告警并继续发送原始 CDR，不会把不可靠结果伪装成字段。
 
+不要通过直接删除生成包中声明存在的 introspection 动态库来制作部署环境；这会破坏 Humble typesupport 分派安装的一致性，并可能使 `GenericSubscription` 在订阅阶段失败。Agent 会将这种失败返回客户端。对已经合法创建的订阅，后续 introspection 不可用时仍按 `RawOnly` 规则保留原始 CDR。
+
 ## 构建
 
 保持本仓库目录结构不变，因为 ament 包会复用仓库 `src/core` 中的协议实现：

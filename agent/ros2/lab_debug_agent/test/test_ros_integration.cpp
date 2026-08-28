@@ -238,6 +238,8 @@ public:
         const auto hello = decodeHello(helloFrame.payload, &error);
         require(hello && hello->agentId == "linux-validation",
                 "receives valid configured Hello identity");
+        require(hello->softwareVersion == "0.10.0",
+                "Hello reports the 0.10.0 Agent version");
         require(
             (hello->capabilities & capabilityMask(Capability::GraphUpdates)) != 0U,
             "Hello offers graph updates");
