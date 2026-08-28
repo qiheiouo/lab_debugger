@@ -22,6 +22,8 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace lab::app {
@@ -86,6 +88,7 @@ signals:
     void remoteTopicsChanged(QVariantList topics, quint64 graphRevision);
     void remoteTopicFieldsChanged(QVariantList topics, quint64 graphRevision);
     void remoteFieldsDiscovered(QStringList fields);
+    void replayFieldsDiscovered(QStringList fields);
     void sourceError(QString message);
     void statisticsChanged(quint64 rxBytes, quint64 txBytes, qsizetype parserBacklog);
     void recordingChanged(bool active, QString message);
@@ -98,7 +101,10 @@ signals:
                                    quint64 checksumErrors,
                                    quint64 lengthErrors,
                                    quint64 decodeErrors);
-    void replayOpened(QString directory, bool recoveredTruncatedTail, bool rawOnly);
+    void replayOpened(QString directory,
+                      bool recoveredTruncatedTail,
+                      bool rawOnly,
+                      bool structuredRosbag);
     void replayOpenFailed(QString message);
     void replayStatusChanged(bool open,
                              bool paused,
@@ -139,6 +145,7 @@ private:
     lab::adapters::remote_agent::RemoteAgentSource remoteAgent_;
     lab::core::ReplaySource replay_;
     std::atomic_bool replayRawOnly_{};
+    std::atomic_bool replayStructuredRosbag_{};
     std::atomic_bool rosbagImporting_{};
     std::jthread rosbagImportWorker_;
     lab::adapters::serial::SerialSettings lastSettings_;
@@ -155,6 +162,10 @@ private:
     std::mutex routingMutex_;
     std::mutex remoteFieldsMutex_;
     std::set<std::string> remoteFieldNames_;
+    std::unordered_map<std::string, std::pair<std::string, std::string>>
+        rosbagReplayTopics_;
+    std::set<std::string> replayFieldNames_;
+    std::set<std::string> replayMappingWarnings_;
     lab::core::SessionRecorder recorder_;
     lab::core::ProcessingPipeline processing_{timeSeries_};
     std::string activeProtocolName_;

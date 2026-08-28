@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.12.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.13.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -49,6 +49,19 @@ if(MSVC)
     target_compile_options(lab_core PRIVATE /W4 /permissive-)
 else()
     target_compile_options(lab_core PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(lab_rosbag_cdr STATIC
+    src/adapters/rosbag2/src/cdr_field_mapper.cpp
+)
+target_include_directories(lab_rosbag_cdr PUBLIC
+    src/adapters/rosbag2/include
+)
+target_link_libraries(lab_rosbag_cdr PUBLIC lab_core)
+if(MSVC)
+    target_compile_options(lab_rosbag_cdr PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(lab_rosbag_cdr PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 if(LAB_DEBUGGER_BUILD_GUI)
@@ -100,7 +113,7 @@ if(LAB_DEBUGGER_BUILD_GUI)
             src/adapters/rosbag2/include
         )
         target_link_libraries(lab_rosbag2_adapter
-            PUBLIC lab_core Qt6::Core Qt6::Sql
+            PUBLIC lab_core lab_rosbag_cdr Qt6::Core Qt6::Sql
         )
 
         add_library(lab_app_ui STATIC
@@ -175,6 +188,10 @@ if(LAB_DEBUGGER_BUILD_TESTS)
     add_executable(lab_agent_server_session_tests tests/test_agent_server_session.cpp)
     target_link_libraries(lab_agent_server_session_tests PRIVATE lab_core)
     add_test(NAME lab_agent_server_session_tests COMMAND lab_agent_server_session_tests)
+    add_executable(lab_cdr_field_mapper_tests tests/test_cdr_field_mapper.cpp)
+    target_link_libraries(lab_cdr_field_mapper_tests PRIVATE lab_rosbag_cdr)
+    add_test(NAME lab_cdr_field_mapper_tests COMMAND lab_cdr_field_mapper_tests)
+    set_tests_properties(lab_cdr_field_mapper_tests PROPERTIES TIMEOUT 15)
     if(UNIX)
         add_executable(lab_agent_tcp_server_tests
             tests/test_agent_tcp_server.cpp

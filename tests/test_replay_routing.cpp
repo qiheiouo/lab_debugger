@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QThread>
@@ -73,6 +74,49 @@ void createSession(const std::filesystem::path& directory, bool rawOnly) {
             "metadata fixture is written");
 }
 
+void createStructuredRosbagSession(const std::filesystem::path& directory) {
+    std::filesystem::create_directories(directory / "raw");
+    std::filesystem::create_directories(directory / "configuration");
+    std::filesystem::create_directories(directory / "protocol");
+    lab::core::RawLogWriter writer;
+    require(writer.open(directory / "raw" / "stream.ldraw"),
+            "structured rosbag raw fixture opens");
+    lab::core::DataChunk chunk;
+    chunk.sourceId = lab::adapters::rosbag2::rosbag2SourceId(
+        "/temperature", "std_msgs/msg/Float64");
+    chunk.sourceTimestamp = 100;
+    chunk.receiveTimestamp = 100;
+    chunk.sequence = 0;
+    chunk.payload = {0x00, 0x01, 0x00, 0x00,
+                     0x00, 0x00, 0x00, 0x00,
+                     0x00, 0x40, 0x45, 0x40};
+    require(writer.write(chunk) && writer.close(),
+            "structured rosbag raw fixture is written");
+
+    QJsonObject topic;
+    topic.insert(QStringLiteral("name"), QStringLiteral("/temperature"));
+    topic.insert(QStringLiteral("type"), QStringLiteral("std_msgs/msg/Float64"));
+    topic.insert(QStringLiteral("serialization_format"), QStringLiteral("cdr"));
+    topic.insert(QStringLiteral("field_mapping"), QStringLiteral("built-in"));
+    QJsonObject catalog;
+    catalog.insert(QStringLiteral("topics"), QJsonArray{topic});
+    QFile catalogOutput(
+        fromPath(directory / "configuration" / "rosbag2.json"));
+    require(catalogOutput.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+                catalogOutput.write(QJsonDocument(catalog).toJson()) > 0,
+            "structured rosbag catalog is written");
+
+    QJsonObject metadata;
+    metadata.insert(QStringLiteral("format"), QStringLiteral("lab-debug-session"));
+    metadata.insert(QStringLiteral("format_version"), 1);
+    metadata.insert(QStringLiteral("replay_mode"),
+                    QStringLiteral("rosbag2-structured"));
+    QFile metadataOutput(fromPath(directory / "metadata.json"));
+    require(metadataOutput.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+                metadataOutput.write(QJsonDocument(metadata).toJson()) > 0,
+            "structured rosbag metadata is written");
+}
+
 bool waitForReplayEnd(lab::app::SerialSession& session) {
     bool atEnd = false;
     const auto connection = QObject::connect(
@@ -106,16 +150,28 @@ int main(int argc, char* argv[]) {
                            QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString());
         const auto normal = root / "normal";
         const auto rawOnly = root / "raw_only";
+        const auto structuredRosbag = root / "structured_rosbag";
         createSession(normal, false);
         createSession(rawOnly, true);
+        createStructuredRosbagSession(structuredRosbag);
 
         bool openedRawOnly = false;
+        bool openedStructuredRosbag = false;
+        QStringList replayFields;
         lab::app::SerialSession session;
         QObject::connect(&session,
                          &lab::app::SerialSession::replayOpened,
                          &session,
-                         [&openedRawOnly](const QString&, bool, bool value) {
-                             openedRawOnly = value;
+                         [&openedRawOnly, &openedStructuredRosbag](
+                             const QString&, bool, bool raw, bool structured) {
+                             openedRawOnly = raw;
+                             openedStructuredRosbag = structured;
+                         });
+        QObject::connect(&session,
+                         &lab::app::SerialSession::replayFieldsDiscovered,
+                         &session,
+                         [&replayFields](const QStringList& fields) {
+                             replayFields = fields;
                          });
 
         require(session.openReplaySession(fromPath(normal)), "normal Session opens");
@@ -129,6 +185,19 @@ int main(int argc, char* argv[]) {
         require(waitForReplayEnd(session), "raw-only replay reaches its end");
         require(session.timeSeries().fields().empty(),
                 "raw-only replay never sends CDR bytes into CSV processing");
+
+        require(session.openReplaySession(fromPath(structuredRosbag)),
+                "structured rosbag Session opens");
+        require(!openedRawOnly && openedStructuredRosbag,
+                "structured rosbag replay mode reaches the application layer");
+        require(waitForReplayEnd(session),
+                "structured rosbag replay reaches its end");
+        const auto points = session.timeSeries().snapshot("/temperature.data");
+        require(points.size() == 1 && points.front().timestamp == 100 &&
+                    points.front().value == 42.5,
+                "structured rosbag CDR enters the curve without entering CSV parsing");
+        require(replayFields.contains(QStringLiteral("/temperature.data")),
+                "structured replay publishes discovered curve fields to the UI");
         session.closeReplay();
 
         std::error_code cleanupError;

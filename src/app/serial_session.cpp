@@ -1,11 +1,13 @@
 #include "app/serial_session.hpp"
 
+#include "lab/adapters/rosbag2/cdr_field_mapper.hpp"
 #include "lab/core/protocol_json_loader.hpp"
 #include "lab/core/timestamp.hpp"
 
 #include <QFile>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
@@ -231,12 +233,69 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
 
     replay_.setCallbacks({
         [this](const lab::core::DataChunk& chunk) {
-            std::scoped_lock routeLock(routingMutex_);
-            if (!replayRawOnly_.load() && chunk.direction == lab::core::Direction::Rx) {
-                processing_.push(chunk);
+            QStringList discoveredFields;
+            std::string mappingWarning;
+            {
+                std::scoped_lock routeLock(routingMutex_);
+                if (replayStructuredRosbag_.load() &&
+                    chunk.direction == lab::core::Direction::Rx) {
+                    const auto topic = rosbagReplayTopics_.find(chunk.sourceId);
+                    if (topic != rosbagReplayTopics_.end()) {
+                        const auto mapping =
+                            lab::adapters::rosbag2::mapStructuredCdrFields(
+                                topic->second.second, chunk.payload);
+                        if (mapping.success) {
+                            const auto timestamp = mapping.sourceTimestamp != 0
+                                                       ? mapping.sourceTimestamp
+                                                       : chunk.sourceTimestamp;
+                            bool changed = false;
+                            for (const auto& field : mapping.fields) {
+                                const auto name = topic->second.first + "." + field.path;
+                                timeSeries_.append({timestamp,
+                                                    chunk.sourceId,
+                                                    name,
+                                                    field.value,
+                                                    field.unit,
+                                                    chunk.sequence});
+                                changed = replayFieldNames_.insert(name).second || changed;
+                            }
+                            if (changed) {
+                                for (const auto& field : replayFieldNames_) {
+                                    discoveredFields.push_back(QString::fromStdString(field));
+                                }
+                            }
+                        } else if (mapping.supported &&
+                                   replayMappingWarnings_.insert(chunk.sourceId).second) {
+                            mappingWarning = mapping.warning;
+                        }
+                    }
+                } else if (!replayRawOnly_.load() &&
+                           chunk.direction == lab::core::Direction::Rx) {
+                    processing_.push(chunk);
+                }
             }
-            std::scoped_lock lock(uiQueueMutex_);
-            uiQueue_.push_back(chunk);
+            if (!discoveredFields.isEmpty()) {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, discoveredFields] {
+                        emit replayFieldsDiscovered(discoveredFields);
+                    },
+                    Qt::QueuedConnection);
+            }
+            if (!mappingWarning.empty()) {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, mappingWarning] {
+                        emit sourceError(
+                            tr("rosbag2 结构化解析已回退为原始 CDR：%1")
+                                .arg(QString::fromStdString(mappingWarning)));
+                    },
+                    Qt::QueuedConnection);
+            }
+            {
+                std::scoped_lock lock(uiQueueMutex_);
+                uiQueue_.push_back(chunk);
+            }
         },
         {},
         [this](const std::string& message) {
@@ -545,7 +604,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.12.0";
+    options.softwareVersion = "0.13.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -661,19 +720,72 @@ bool SerialSession::openReplaySession(const QString& directory) {
     }
     const auto protocolPath = QDir(sessionDirectory).filePath(QStringLiteral("protocol/initial.json"));
     bool rawOnly = false;
+    bool structuredRosbag = false;
     QFile metadataFile(QDir(sessionDirectory).filePath(QStringLiteral("metadata.json")));
     if (metadataFile.open(QIODevice::ReadOnly)) {
         const auto document = QJsonDocument::fromJson(metadataFile.readAll());
-        rawOnly = document.isObject() &&
-                  document.object().value(QStringLiteral("replay_mode")).toString() ==
-                      QStringLiteral("raw-only");
+        const auto replayMode = document.isObject()
+                                    ? document.object()
+                                          .value(QStringLiteral("replay_mode"))
+                                          .toString()
+                                    : QString{};
+        rawOnly = replayMode == QStringLiteral("raw-only");
+        structuredRosbag = replayMode == QStringLiteral("rosbag2-structured");
     }
-    replayRawOnly_.store(rawOnly);
+
+    decltype(rosbagReplayTopics_) rosbagTopics;
+    if (structuredRosbag) {
+        QFile catalogFile(QDir(sessionDirectory).filePath(
+            QStringLiteral("configuration/rosbag2.json")));
+        if (!catalogFile.open(QIODevice::ReadOnly)) {
+            emit replayOpenFailed(tr("结构化 rosbag2 Session 缺少 Topic 配置目录"));
+            return false;
+        }
+        const auto catalog = QJsonDocument::fromJson(catalogFile.readAll());
+        if (!catalog.isObject()) {
+            emit replayOpenFailed(tr("结构化 rosbag2 Topic 配置已损坏"));
+            return false;
+        }
+        for (const auto value :
+             catalog.object().value(QStringLiteral("topics")).toArray()) {
+            const auto item = value.toObject();
+            if (item.value(QStringLiteral("field_mapping")).toString() !=
+                QStringLiteral("built-in")) {
+                continue;
+            }
+            const auto nameBytes =
+                item.value(QStringLiteral("name")).toString().toUtf8();
+            const auto typeBytes =
+                item.value(QStringLiteral("type")).toString().toUtf8();
+            std::string name(nameBytes.constData(),
+                             static_cast<std::size_t>(nameBytes.size()));
+            std::string type(typeBytes.constData(),
+                             static_cast<std::size_t>(typeBytes.size()));
+            if (name.empty() || type.empty()) continue;
+            const auto source =
+                lab::adapters::rosbag2::rosbag2SourceId(name, type);
+            rosbagTopics.emplace(
+                source, std::pair{std::move(name), std::move(type)});
+        }
+        if (rosbagTopics.empty()) {
+            emit replayOpenFailed(tr("结构化 rosbag2 Session 没有可用的字段映射"));
+            return false;
+        }
+    }
+    {
+        std::scoped_lock routeLock(routingMutex_);
+        rosbagReplayTopics_ = std::move(rosbagTopics);
+        replayFieldNames_.clear();
+        replayMappingWarnings_.clear();
+    }
+    const auto safeCdrRouting = rawOnly || structuredRosbag;
+    replayRawOnly_.store(safeCdrRouting);
+    replayStructuredRosbag_.store(structuredRosbag);
     clearProtocol();
-    if (!rawOnly && QFileInfo::exists(protocolPath)) {
+    if (!safeCdrRouting && QFileInfo::exists(protocolPath)) {
         loadProtocolFile(protocolPath);
     }
-    if (!rawOnly && activeProtocolName_.empty()) {
+    if (!safeCdrRouting && activeProtocolName_.empty()) {
         QFile fieldsFile(QDir(sessionDirectory).filePath(
             QStringLiteral("configuration/csv_fields.txt")));
         if (fieldsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -693,11 +805,19 @@ bool SerialSession::openReplaySession(const QString& directory) {
     replay_.setPath(std::filesystem::path(rawPath.toStdWString()));
     if (!replay_.open()) {
         replayRawOnly_.store(false);
+        replayStructuredRosbag_.store(false);
+        {
+            std::scoped_lock routeLock(routingMutex_);
+            rosbagReplayTopics_.clear();
+        }
         emit replayOpenFailed(tr("无法打开回放文件；详细原因已写入状态栏和日志"));
         return false;
     }
     const auto replayStatus = replay_.status();
-    emit replayOpened(sessionDirectory, replayStatus.recoveredTruncatedTail, rawOnly);
+    emit replayOpened(sessionDirectory,
+                      replayStatus.recoveredTruncatedTail,
+                      rawOnly,
+                      structuredRosbag);
     return true;
 }
 
@@ -748,6 +868,8 @@ void SerialSession::inspectRosbag2(const QString& source, const QString& destina
                                     QString::fromUtf8(topic.serializationFormat));
                         item.insert(QStringLiteral("message_count"),
                                     static_cast<qulonglong>(topic.messageCount));
+                        item.insert(QStringLiteral("structured_fields"),
+                                    topic.structuredFields);
                         topics.push_back(item);
                     }
                     const auto message = result.cancelled
@@ -803,7 +925,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.12.0";
+            options.softwareVersion = "0.13.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {
@@ -855,9 +977,10 @@ void SerialSession::importRosbag2(const QString& source,
                         return;
                     }
                     const auto message =
-                        tr("已导入 %1 条消息、%2 个 Topic")
+                        tr("已导入 %1 条消息、%2 个 Topic，生成 %3 个曲线采样点")
                             .arg(result.messageCount)
-                            .arg(static_cast<quint64>(result.topics.size()));
+                            .arg(static_cast<quint64>(result.topics.size()))
+                            .arg(result.sampleCount);
                     emit rosbagImportFinished(true,
                                               directory,
                                               message,
@@ -878,6 +1001,11 @@ void SerialSession::cancelRosbag2Import() {
 void SerialSession::closeReplay() {
     replay_.close();
     replayRawOnly_.store(false);
+    replayStructuredRosbag_.store(false);
+    std::scoped_lock routeLock(routingMutex_);
+    rosbagReplayTopics_.clear();
+    replayFieldNames_.clear();
+    replayMappingWarnings_.clear();
 }
 
 void SerialSession::pauseReplay() {

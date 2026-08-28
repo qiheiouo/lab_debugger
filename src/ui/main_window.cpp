@@ -152,6 +152,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             remoteAgentPanel_, &RemoteAgentPanel::setTopicFields);
     connect(&session_, &lab::app::SerialSession::remoteFieldsDiscovered,
             plot_, &PlotWidget::useExternalFields);
+    connect(&session_, &lab::app::SerialSession::replayFieldsDiscovered,
+            plot_, &PlotWidget::useExternalFields);
     connect(&session_, &lab::app::SerialSession::protocolLoaded,
             protocol_, &ProtocolWidget::setProtocolLoaded);
     connect(&session_, &lab::app::SerialSession::protocolLoaded,

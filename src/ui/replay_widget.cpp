@@ -164,9 +164,13 @@ void ReplayWidget::chooseRosbagSource(bool directory) {
 
 void ReplayWidget::setOpened(const QString& directory,
                              bool recoveredTruncatedTail,
-                             bool rawOnly) {
-    pathLabel_->setText(rawOnly ? tr("Session（rosbag2 原始 CDR）：%1").arg(directory)
-                                : tr("Session：%1").arg(directory));
+                             bool rawOnly,
+                             bool structuredRosbag) {
+    pathLabel_->setText(
+        structuredRosbag
+            ? tr("Session（rosbag2 原始 CDR + 结构化曲线）：%1").arg(directory)
+            : rawOnly ? tr("Session（rosbag2 原始 CDR）：%1").arg(directory)
+                      : tr("Session：%1").arg(directory));
     pathLabel_->setStyleSheet(recoveredTruncatedTail
                                   ? QStringLiteral("color: #f2cc60;")
                                   : QStringLiteral("color: #5fd19a;"));

@@ -29,7 +29,10 @@ signals:
     void seekRequested(double fraction);
 
 public slots:
-    void setOpened(const QString& directory, bool recoveredTruncatedTail, bool rawOnly);
+    void setOpened(const QString& directory,
+                   bool recoveredTruncatedTail,
+                   bool rawOnly,
+                   bool structuredRosbag);
     void showOpenError(const QString& message);
     void setInspectionStarted(const QString& source, const QString& destination);
     void showInspectionResult(bool success,

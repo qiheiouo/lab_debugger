@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lab::adapters::rosbag2 {
@@ -15,6 +16,7 @@ struct Rosbag2TopicInfo {
     std::string type;
     std::string serializationFormat;
     std::uint64_t messageCount{};
+    bool structuredFields{};
 };
 
 struct Rosbag2TopicSelector {
@@ -48,6 +50,9 @@ struct Rosbag2ImportResult {
     std::uint64_t databaseCount{};
     std::uint64_t messageCount{};
     std::uint64_t payloadBytes{};
+    std::uint64_t mappedMessageCount{};
+    std::uint64_t sampleCount{};
+    std::uint64_t mappingFailures{};
     lab::core::Timestamp firstTimestamp{};
     lab::core::Timestamp lastTimestamp{};
     std::string error;
@@ -57,6 +62,9 @@ using Rosbag2ProgressCallback =
     std::function<bool(std::uint64_t importedMessages, std::uint64_t totalMessages)>;
 
 using Rosbag2CancellationCallback = std::function<bool()>;
+
+[[nodiscard]] std::string rosbag2SourceId(std::string_view topic,
+                                         std::string_view messageType);
 
 Rosbag2InspectionResult inspectRosbag2(
     const std::filesystem::path& source,

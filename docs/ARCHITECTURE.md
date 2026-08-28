@@ -74,7 +74,7 @@ rosbag2 std::jthread       Qt Sql 前向读取、分卷时间归并与同步 Raw
 
 `ReplaySource` 实现同一个 `IDataSource` 接口，按原始接收时间调度 `DataChunk`，所以回放复用 Monitor、Protocol 和 Plot 全链路。跳转会暂停回放、等待处理队列空闲、重置流解析器后再切换索引位置。
 
-`Rosbag2Importer` 位于 Qt 适配器层：QSQLITE 只负责读取 rosbag2 数据库，纯核心 `RawLogWriter` 负责流式生成标准 `.ldraw`。预检先合并分卷 Topic/类型/格式与计数，UI 再提交明确的 Topic 选择；正式查询按各数据库本地 topic id 限定数据。分卷 bag 同时保留每卷一个前向游标，并按时间戳、文件序和行号做确定性归并，因此导入内存取决于分卷数和单条消息大小，而不是消息总量。生成的 Session 标记为 `raw-only`；应用层据此把 CDR 送入终端但绕过 CSV/自定义协议处理。
+`Rosbag2Importer` 位于 Qt 适配器层：QSQLITE 只负责读取 rosbag2 数据库，纯核心 `RawLogWriter` 负责流式生成标准 `.ldraw`。预检先合并分卷 Topic/类型/格式与计数，UI 再提交明确的 Topic 选择；正式查询按各数据库本地 topic id 限定数据。分卷 bag 同时保留每卷一个前向游标，并按时间戳、文件序和行号做确定性归并，因此导入内存取决于分卷数和单条消息大小，而不是消息总量。没有可信结构化采样时 Session 标记为 `raw-only`；存在内置字段时标记为 `rosbag2-structured`。两种模式都让 CDR 绕过普通 CSV/自定义协议处理，后者仅通过专用 CDR 映射器进入曲线。
 
 ## 4. Windows / Linux / ROS2 解耦
 
@@ -95,6 +95,8 @@ Windows remote mode:
 
 Remote Agent v1 帧和负载编解码位于纯 C++ `lab_core`。Windows `RemoteAgentSource` 在独立 Qt 网络线程内执行客户端状态机、指数退避重连、同端点订阅恢复和 Ping/Pong 时钟测量；纯核心 `ClockSyncEstimator` 在最近 16 个样本中选择最低 RTT 样本，给出 Agent 相对客户端的时钟偏移和不确定度。同一核心中的 `ServerSession` 执行 Agent 侧能力协商、客户端命令、统一序号和错误状态机。Ubuntu ament 包把 POSIX TCP 传输、ROS graph、`GenericSubscription`、常见消息语义映射与通用 introspection 组合在服务端状态机外部。协商 `TopicFieldCapabilities` 后，独立的 `TopicFieldCatalog` 与基础目录使用相同 graph revision，把类型探测结果送到 UI；未协商时仍只发送旧格式 `TopicCatalog`。SampleBatch 的原始 CDR 进入 Raw Recorder，数值与布尔字段直接进入 TimeSeries 和 Session；时钟质量进入 Session 事件。详细格式见 [Remote Agent 协议](REMOTE_AGENT_PROTOCOL.md)。Linux 包此前已经在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 下完成自动构建和真实 ROS/DDS/TCP 联调。
 
+rosbag2 离线链路不把 ROS2 运行时带入 Windows 客户端。Qt QSQLITE 负责 Topic 预检和前向消息游标，纯 C++20 `cdr_field_mapper` 按标准 CDR1 对齐和大小端规则读取常见消息，并复用 Agent 的字段路径与单位。导入阶段把数值写入 `values.csv`，同时始终保存原始 `.ldraw`；回放阶段以原始记录的时间轴、暂停和跳转为准，专用映射路由直接把可信数值送到 `TimeSeriesStore`。未知类型、资源超限和损坏 CDR 不进入普通 CSV/协议处理链，只保留原始字节。
+
 ## 5. 协议引擎边界
 
 `FrameStreamParser` 消费 `DataChunk`，处理固定帧头、固定/动态长度、校验与流重新同步；`ProtocolDecoder` 再按经过严格校验的 `ProtocolDefinition` 解码字段。两层分开，避免每个 STM32 协议重复实现状态机，也使 CRC 错误不会污染字段层。
@@ -109,7 +111,7 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 
 - 当前最小绘图是自绘 Qt Widget，不依赖 Qt Charts；适合 10~20 条常规曲线，但尚未实现高密度 LTTB/min-max downsampling。
 - 回放索引当前在打开文件时同步建立，每条原始记录占 16 字节索引内存；超长 Session 的后台建索引与稀疏缓存仍待实现。
-- rosbag2 当前支持 SQLite3/CDR；MCAP、压缩存储、Topic 过滤和离线结构化字段仍待实现。
+- rosbag2 当前支持 SQLite3/CDR、Topic 过滤和一组常见消息的离线结构化；MCAP、压缩存储、完整 `metadata.yaml`、动态类型描述及更多消息仍待实现。
 - CSV 解析器只处理换行分隔的数值；二进制帧、单位和校验由独立协议引擎处理。
 - 串口断开后提供手动重连；自动退避重连和端口热插拔恢复留到后续。
 - TCP 当前服务一个活动客户端；UDP 远端目前要求数字 IPv4/IPv6 地址。自动重连、TLS、组播和多客户端管理留到后续。

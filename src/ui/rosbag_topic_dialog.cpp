@@ -18,6 +18,7 @@ constexpr int nameRole = Qt::UserRole;
 constexpr int typeRole = Qt::UserRole + 1;
 constexpr int supportedRole = Qt::UserRole + 2;
 constexpr int countRole = Qt::UserRole + 3;
+constexpr int structuredRole = Qt::UserRole + 4;
 
 }  // namespace
 
@@ -32,7 +33,7 @@ RosbagTopicDialog::RosbagTopicDialog(QString source,
 
     auto* root = new QVBoxLayout(this);
     auto* introduction = new QLabel(
-        tr("已读取 rosbag2 目录。请选择需要回放的 Topic；未选数据不会写入新 Session。"),
+        tr("已读取 rosbag2 目录。请选择需要回放的 Topic；常见消息可直接生成曲线，其他消息仍安全保留原始 CDR。"),
         this);
     introduction->setWordWrap(true);
     root->addWidget(introduction);
@@ -48,9 +49,9 @@ RosbagTopicDialog::RosbagTopicDialog(QString source,
     search_->setClearButtonEnabled(true);
     root->addWidget(search_);
 
-    topics_ = new QTableWidget(static_cast<int>(topics.size()), 4, this);
+    topics_ = new QTableWidget(static_cast<int>(topics.size()), 5, this);
     topics_->setHorizontalHeaderLabels(
-        {tr("Topic"), tr("消息类型"), tr("消息数"), tr("序列化")});
+        {tr("Topic"), tr("消息类型"), tr("消息数"), tr("序列化"), tr("回放能力")});
     topics_->setSelectionBehavior(QAbstractItemView::SelectRows);
     topics_->setSelectionMode(QAbstractItemView::SingleSelection);
     topics_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -60,6 +61,7 @@ RosbagTopicDialog::RosbagTopicDialog(QString source,
     topics_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     topics_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     topics_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    topics_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
 
     topics_->blockSignals(true);
     for (int row = 0; row < topics.size(); ++row) {
@@ -69,12 +71,15 @@ RosbagTopicDialog::RosbagTopicDialog(QString source,
         const auto format = topic.value(QStringLiteral("serialization_format")).toString();
         const auto count = topic.value(QStringLiteral("message_count")).toULongLong();
         const auto supported = format == QStringLiteral("cdr");
+        const auto structured =
+            topic.value(QStringLiteral("structured_fields")).toBool();
 
         auto* nameItem = new QTableWidgetItem(name);
         nameItem->setData(nameRole, name);
         nameItem->setData(typeRole, type);
         nameItem->setData(supportedRole, supported);
         nameItem->setData(countRole, count);
+        nameItem->setData(structuredRole, structured);
         if (supported) {
             nameItem->setFlags(nameItem->flags() | Qt::ItemIsUserCheckable);
             nameItem->setCheckState(Qt::Checked);
@@ -93,6 +98,13 @@ RosbagTopicDialog::RosbagTopicDialog(QString source,
             3,
             new QTableWidgetItem(supported ? tr("CDR（支持）")
                                            : tr("%1（不支持）").arg(format)));
+        topics_->setItem(
+            row,
+            4,
+            new QTableWidgetItem(
+                !supported ? tr("不可导入")
+                           : structured ? tr("原始 CDR + 曲线")
+                                        : tr("仅原始 CDR")));
     }
     topics_->blockSignals(false);
     root->addWidget(topics_, 1);
@@ -172,17 +184,20 @@ void RosbagTopicDialog::setVisibleSelection(Qt::CheckState state) {
 void RosbagTopicDialog::updateSelectionSummary() {
     quint64 selectedMessages{};
     int selectedCount{};
+    int structuredCount{};
     for (int row = 0; row < topics_->rowCount(); ++row) {
         const auto* item = topics_->item(row, 0);
         if (item != nullptr && item->checkState() == Qt::Checked &&
             item->data(supportedRole).toBool()) {
             ++selectedCount;
             selectedMessages += item->data(countRole).toULongLong();
+            if (item->data(structuredRole).toBool()) ++structuredCount;
         }
     }
-    summary_->setText(tr("已选 %1 个 Topic，%2 条消息")
+    summary_->setText(tr("已选 %1 个 Topic，%2 条消息，%3 个可生成曲线")
                           .arg(selectedCount)
-                          .arg(selectedMessages));
+                          .arg(selectedMessages)
+                          .arg(structuredCount));
     importButton_->setEnabled(selectedCount > 0);
 }
 

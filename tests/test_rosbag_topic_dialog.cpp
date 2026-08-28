@@ -19,12 +19,17 @@ void require(bool condition, const std::string& message) {
     }
 }
 
-QVariantMap topic(QString name, QString type, QString format, quint64 count) {
+QVariantMap topic(QString name,
+                  QString type,
+                  QString format,
+                  quint64 count,
+                  bool structured = false) {
     QVariantMap result;
     result.insert(QStringLiteral("name"), std::move(name));
     result.insert(QStringLiteral("type"), std::move(type));
     result.insert(QStringLiteral("serialization_format"), std::move(format));
     result.insert(QStringLiteral("message_count"), count);
+    result.insert(QStringLiteral("structured_fields"), structured);
     return result;
 }
 
@@ -38,7 +43,8 @@ int main(int argc, char* argv[]) {
             topic(QStringLiteral("/temperature"),
                   QStringLiteral("std_msgs/msg/Float64"),
                   QStringLiteral("cdr"),
-                  20),
+                  20,
+                  true),
             topic(QStringLiteral("/status"),
                   QStringLiteral("std_msgs/msg/String"),
                   QStringLiteral("cdr"),
@@ -55,6 +61,10 @@ int main(int argc, char* argv[]) {
                 "Topic selection table contains every inspected Topic");
         require(dialog.selectedTopics().size() == 2,
                 "all supported CDR Topics are selected by default");
+        require(table->columnCount() == 5 &&
+                    table->item(0, 4)->text().contains(QStringLiteral("曲线")) &&
+                    table->item(1, 4)->text().contains(QStringLiteral("仅原始")),
+                "dialog distinguishes structured curves from raw-only replay");
         require(!(table->item(2, 0)->flags() & Qt::ItemIsEnabled) &&
                     table->item(2, 0)->checkState() != Qt::Checked,
                 "unsupported serialization is visible but cannot be selected");

@@ -111,11 +111,13 @@ void testSplitBagImport(const std::filesystem::path& root) {
             "inspection merges topic catalogs across split files");
     require(inspection.messageCount == 4 && inspection.payloadBytes == 4,
             "inspection reports exact total counts without importing");
+    require(inspection.topics[0].structuredFields != inspection.topics[1].structuredFields,
+            "inspection distinguishes curve-capable and raw-only message types");
 
     const auto destination = root / "imported_session";
     std::uint64_t lastProgress{};
     const auto result = lab::adapters::rosbag2::importRosbag2(
-        {source, destination, "split-import", "0.12.0"},
+        {source, destination, "split-import", "0.13.0"},
         [&lastProgress](std::uint64_t imported, std::uint64_t) {
             lastProgress = imported;
             return true;
@@ -124,6 +126,8 @@ void testSplitBagImport(const std::filesystem::path& root) {
     require(result.databaseCount == 2, "split database count is preserved");
     require(result.messageCount == 4 && result.payloadBytes == 4,
             "message and byte counts are exact");
+    require(result.sampleCount == 0 && result.mappingFailures == 3,
+            "damaged built-in CDR remains raw-only and is counted without aborting import");
     require(result.topics.size() == 2, "topic catalog is merged across split files");
     require(result.firstTimestamp == 100 && result.lastTimestamp == 300,
             "imported timeline covers all databases");
@@ -160,7 +164,7 @@ void testSplitBagImport(const std::filesystem::path& root) {
 
     const auto filteredDestination = root / "filtered_session";
     lab::adapters::rosbag2::Rosbag2ImportOptions filteredOptions{
-        source, filteredDestination, "filtered-import", "0.12.0"};
+        source, filteredDestination, "filtered-import", "0.13.0"};
     filteredOptions.includedTopics.push_back(
         {"/status", "std_msgs/msg/String"});
     const auto filtered = lab::adapters::rosbag2::importRosbag2(filteredOptions);
@@ -193,6 +197,58 @@ void testSplitBagImport(const std::filesystem::path& root) {
             "Session configuration records the explicit filtered catalog");
 }
 
+void testStructuredImport(const std::filesystem::path& root) {
+    const auto bag = root / "structured.db3";
+    createBag(QString::fromStdWString(bag.wstring()),
+              QStringLiteral("cdr"),
+              {{1,
+                123,
+                QByteArray::fromHex("000100000000000000404540")}});
+    const auto destination = root / "structured_session";
+    const auto result = lab::adapters::rosbag2::importRosbag2(
+        {bag, destination, "structured", "0.13.0"});
+    require(result.success && result.messageCount == 1 &&
+                result.mappedMessageCount == 1 && result.sampleCount == 1 &&
+                result.mappingFailures == 0,
+            "valid common CDR produces one structured numeric sample");
+
+    QFile values(QString::fromStdWString((destination / "values.csv").wstring()));
+    require(values.open(QIODevice::ReadOnly | QIODevice::Text),
+            "structured values.csv exists");
+    const auto valuesText = values.readAll();
+    require(valuesText.contains("123,rosbag2:/temperature [std_msgs/msg/Float64],0,/temperature.data,42.5,"),
+            "values.csv preserves bag time, source, field path, value, and sequence");
+
+    QFile metadata(QString::fromStdWString((destination / "metadata.json").wstring()));
+    require(metadata.open(QIODevice::ReadOnly), "structured metadata exists");
+    const auto document = QJsonDocument::fromJson(metadata.readAll()).object();
+    require(document.value(QStringLiteral("replay_mode")).toString() ==
+                QStringLiteral("rosbag2-structured") &&
+                document.value(QStringLiteral("counts"))
+                        .toObject()
+                        .value(QStringLiteral("samples"))
+                        .toInteger() == 1 &&
+                document.value(QStringLiteral("import"))
+                        .toObject()
+                        .value(QStringLiteral("mapped_message_count"))
+                        .toInteger() == 1,
+            "metadata enables safe structured rosbag replay and records exact counts");
+
+    QFile catalog(
+        QString::fromStdWString((destination / "configuration" / "rosbag2.json").wstring()));
+    require(catalog.open(QIODevice::ReadOnly), "structured Topic catalog exists");
+    const auto topics = QJsonDocument::fromJson(catalog.readAll())
+                            .object()
+                            .value(QStringLiteral("topics"))
+                            .toArray();
+    require(topics.size() == 1 &&
+                topics.at(0)
+                        .toObject()
+                        .value(QStringLiteral("field_mapping"))
+                        .toString() == QStringLiteral("built-in"),
+            "Topic catalog records built-in structured replay capability");
+}
+
 void testCancellationAndValidation(const std::filesystem::path& root) {
     const auto bag = root / "single.db3";
     createBag(QString::fromStdWString(bag.wstring()),
@@ -200,7 +256,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
               {{1, 100, QByteArray::fromHex("0102")}});
     const auto cancelledDestination = root / "cancelled_session";
     const auto cancelled = lab::adapters::rosbag2::importRosbag2(
-        {bag, cancelledDestination, "cancelled", "0.12.0"},
+        {bag, cancelledDestination, "cancelled", "0.13.0"},
         [](std::uint64_t, std::uint64_t) { return false; });
     require(!cancelled.success && cancelled.cancelled,
             "cancel callback stops import explicitly");
@@ -218,7 +274,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
                 unsupportedInspection.topics.front().serializationFormat == "json",
             "inspection reports unsupported formats so the UI can disable them");
     const auto unsupported = lab::adapters::rosbag2::importRosbag2(
-        {unsupportedBag, unsupportedDestination, "unsupported", "0.12.0"});
+        {unsupportedBag, unsupportedDestination, "unsupported", "0.13.0"});
     require(!unsupported.success &&
                 unsupported.error.find("serialization format") != std::string::npos,
             "non-CDR bag fails with a clear format error");
@@ -235,7 +291,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
               {{1, 200, QByteArrayLiteral("{}")}});
     const auto mixedDestination = root / "mixed_serialization_session";
     lab::adapters::rosbag2::Rosbag2ImportOptions mixedOptions{
-        mixedSource, mixedDestination, "mixed", "0.12.0"};
+        mixedSource, mixedDestination, "mixed", "0.13.0"};
     mixedOptions.includedTopics.push_back(
         {"/temperature", "std_msgs/msg/Float64"});
     const auto mixed = lab::adapters::rosbag2::importRosbag2(mixedOptions);
@@ -246,7 +302,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
 
     const auto missingDestination = root / "missing_topic_session";
     lab::adapters::rosbag2::Rosbag2ImportOptions missingOptions{
-        bag, missingDestination, "missing", "0.12.0"};
+        bag, missingDestination, "missing", "0.13.0"};
     missingOptions.includedTopics.push_back(
         {"/missing", "std_msgs/msg/String"});
     const auto missing = lab::adapters::rosbag2::importRosbag2(missingOptions);
@@ -258,7 +314,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
     const auto occupied = root / "occupied_session";
     std::filesystem::create_directories(occupied);
     const auto existing = lab::adapters::rosbag2::importRosbag2(
-        {bag, occupied, "occupied", "0.12.0"});
+        {bag, occupied, "occupied", "0.13.0"});
     require(!existing.success &&
                 existing.error.find("already exists") != std::string::npos,
             "import never overwrites an existing destination");
@@ -275,6 +331,7 @@ int main(int argc, char* argv[]) {
                            QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString());
         std::filesystem::create_directories(root);
         testSplitBagImport(root);
+        testStructuredImport(root);
         testCancellationAndValidation(root);
         std::error_code cleanupError;
         std::filesystem::remove_all(root, cleanupError);

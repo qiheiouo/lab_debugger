@@ -1,5 +1,7 @@
 #include "lab/adapters/rosbag2/rosbag2_importer.hpp"
 
+#include "lab/adapters/rosbag2/cdr_field_mapper.hpp"
+
 #include "lab/core/data_chunk.hpp"
 #include "lab/core/raw_log_writer.hpp"
 
@@ -18,6 +20,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <memory>
@@ -27,6 +30,16 @@
 #include <tuple>
 
 namespace lab::adapters::rosbag2 {
+
+std::string rosbag2SourceId(std::string_view topic, std::string_view messageType) {
+    std::string result("rosbag2:");
+    result.append(topic);
+    result.append(" [");
+    result.append(messageType);
+    result.push_back(']');
+    return result;
+}
+
 namespace {
 
 constexpr std::size_t maximumTopicTextBytes = 64 * 1024;
@@ -46,6 +59,21 @@ std::string toUtf8(const QString& value) {
 
 std::string pathText(const std::filesystem::path& path) {
     return toUtf8(fromPath(path));
+}
+
+std::string csvEscape(std::string_view value) {
+    if (value.find_first_of(",\"\r\n") == std::string_view::npos) {
+        return std::string(value);
+    }
+    std::string result;
+    result.reserve(value.size() + 2);
+    result.push_back('"');
+    for (const auto character : value) {
+        if (character == '"') result.push_back('"');
+        result.push_back(character);
+    }
+    result.push_back('"');
+    return result;
 }
 
 class TemporaryTree {
@@ -325,24 +353,18 @@ bool inspectDatabase(DatabaseCursor& cursor,
     return true;
 }
 
-std::string sourceId(const QString& topic, const QString& type) {
-    return toUtf8(QStringLiteral("rosbag2:%1 [%2]").arg(topic, type));
-}
-
 bool writeSessionFiles(const std::filesystem::path& root,
                        const Rosbag2ImportOptions& options,
                        const std::vector<std::filesystem::path>& databases,
                        const Rosbag2ImportResult& result,
                        std::string& error) {
     {
-        std::ofstream values(root / "values.csv", std::ios::trunc);
         std::ofstream frames(root / "frames.jsonl", std::ios::trunc);
         std::ofstream fields(root / "configuration" / "csv_fields.txt", std::ios::trunc);
-        if (!values || !frames || !fields) {
+        if (!frames || !fields) {
             error = "cannot create imported Session result files";
             return false;
         }
-        values << "timestamp_ns,source_id,sequence,field,value,unit\n";
     }
 
     QJsonArray topicArray;
@@ -355,12 +377,14 @@ bool writeSessionFiles(const std::filesystem::path& root,
                     QString::fromUtf8(topic.serializationFormat));
         item.insert(QStringLiteral("message_count"),
                     static_cast<qint64>(topic.messageCount));
+        item.insert(QStringLiteral("field_mapping"),
+                    topic.structuredFields ? QStringLiteral("built-in")
+                                           : QStringLiteral("raw-only"));
         topicArray.push_back(item);
 
         QJsonObject source;
         source.insert(QStringLiteral("id"),
-                      QString::fromStdString(sourceId(QString::fromUtf8(topic.name),
-                                                     QString::fromUtf8(topic.type))));
+                      QString::fromStdString(rosbag2SourceId(topic.name, topic.type)));
         source.insert(QStringLiteral("type"), QStringLiteral("rosbag2-cdr"));
         source.insert(QStringLiteral("name"), QString::fromUtf8(topic.name));
         source.insert(QStringLiteral("message_type"), QString::fromUtf8(topic.type));
@@ -392,8 +416,9 @@ bool writeSessionFiles(const std::filesystem::path& root,
     event.insert(QStringLiteral("severity"), QStringLiteral("info"));
     event.insert(QStringLiteral("category"), QStringLiteral("import"));
     event.insert(QStringLiteral("message"),
-                 QStringLiteral("Imported %1 messages from %2 rosbag2 database(s)")
+                 QStringLiteral("Imported %1 messages and %2 numeric samples from %3 rosbag2 database(s)")
                      .arg(result.messageCount)
+                     .arg(result.sampleCount)
                      .arg(result.databaseCount));
     QFile events(fromPath(root / "events.jsonl"));
     if (!events.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
@@ -406,7 +431,7 @@ bool writeSessionFiles(const std::filesystem::path& root,
     QJsonObject counts;
     counts.insert(QStringLiteral("raw_chunks"), static_cast<qint64>(result.messageCount));
     counts.insert(QStringLiteral("raw_bytes"), static_cast<qint64>(result.payloadBytes));
-    counts.insert(QStringLiteral("samples"), 0);
+    counts.insert(QStringLiteral("samples"), static_cast<qint64>(result.sampleCount));
     counts.insert(QStringLiteral("frames"), 0);
     counts.insert(QStringLiteral("events"), 1);
 
@@ -420,6 +445,10 @@ bool writeSessionFiles(const std::filesystem::path& root,
     import.insert(QStringLiteral("database_count"), static_cast<qint64>(result.databaseCount));
     import.insert(QStringLiteral("selected_topic_count"),
                   static_cast<qint64>(result.topics.size()));
+    import.insert(QStringLiteral("mapped_message_count"),
+                  static_cast<qint64>(result.mappedMessageCount));
+    import.insert(QStringLiteral("mapping_failure_count"),
+                  static_cast<qint64>(result.mappingFailures));
 
     QJsonObject metadata;
     metadata.insert(QStringLiteral("format"), QStringLiteral("lab-debug-session"));
@@ -430,7 +459,9 @@ bool writeSessionFiles(const std::filesystem::path& root,
                     QString::fromUtf8(options.softwareVersion));
     metadata.insert(QStringLiteral("start_time_ns"), result.firstTimestamp);
     metadata.insert(QStringLiteral("end_time_ns"), result.lastTimestamp);
-    metadata.insert(QStringLiteral("replay_mode"), QStringLiteral("raw-only"));
+    metadata.insert(QStringLiteral("replay_mode"),
+                    result.sampleCount > 0 ? QStringLiteral("rosbag2-structured")
+                                           : QStringLiteral("raw-only"));
     metadata.insert(QStringLiteral("protocol"), protocol);
     metadata.insert(QStringLiteral("sources"), sourceArray);
     metadata.insert(QStringLiteral("counts"), counts);
@@ -483,7 +514,11 @@ Rosbag2InspectionResult inspectRosbag2(
     }
     for (const auto& [key, count] : topicCounts) {
         result.topics.push_back(
-            {std::get<0>(key), std::get<1>(key), std::get<2>(key), count});
+            {std::get<0>(key),
+             std::get<1>(key),
+             std::get<2>(key),
+             count,
+             hasStructuredCdrMapping(std::get<1>(key))});
     }
     result.success = true;
     return result;
@@ -560,7 +595,11 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
         return fail("rosbag2 size exceeds the Session metadata range");
     }
     for (const auto& [key, count] : topicCounts) {
-        result.topics.push_back({std::get<0>(key), std::get<1>(key), std::get<2>(key), count});
+        result.topics.push_back({std::get<0>(key),
+                                 std::get<1>(key),
+                                 std::get<2>(key),
+                                 count,
+                                 hasStructuredCdrMapping(std::get<1>(key))});
     }
     if (!options.includedTopics.empty()) {
         std::set<std::pair<std::string, std::string>> requested;
@@ -583,6 +622,11 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
     if (!writer.open(temporaryRoot / "raw" / "stream.ldraw")) {
         return fail(writer.error());
     }
+    std::ofstream values(temporaryRoot / "values.csv", std::ios::trunc);
+    if (!values) {
+        return fail("cannot create imported Session values.csv");
+    }
+    values << "timestamp_ns,source_id,sequence,field,value,unit\n";
 
     std::uint64_t imported{};
     while (true) {
@@ -611,8 +655,10 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
         }
 
         const auto& record = selected->record();
+        const auto topic = toUtf8(record.topicName);
+        const auto messageType = toUtf8(record.topicType);
         lab::core::DataChunk chunk;
-        chunk.sourceId = sourceId(record.topicName, record.topicType);
+        chunk.sourceId = rosbag2SourceId(topic, messageType);
         chunk.sourceTimestamp = record.timestamp;
         chunk.receiveTimestamp = record.timestamp;
         chunk.sequence = imported;
@@ -620,6 +666,30 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
         chunk.payload.assign(record.payload.cbegin(), record.payload.cend());
         if (!writer.write(chunk)) {
             return fail(writer.error());
+        }
+        const auto mapping = mapStructuredCdrFields(messageType, chunk.payload);
+        if (mapping.supported) {
+            if (mapping.success) {
+                ++result.mappedMessageCount;
+                const auto sampleTimestamp = mapping.sourceTimestamp != 0
+                                                 ? mapping.sourceTimestamp
+                                                 : record.timestamp;
+                for (const auto& field : mapping.fields) {
+                    if (result.sampleCount == std::numeric_limits<std::uint64_t>::max()) {
+                        return fail("rosbag2 structured sample count exceeds the supported range");
+                    }
+                    values << sampleTimestamp << ',' << csvEscape(chunk.sourceId) << ','
+                           << imported << ',' << csvEscape(topic + "." + field.path) << ','
+                           << std::setprecision(17) << field.value << ','
+                           << csvEscape(field.unit) << '\n';
+                    ++result.sampleCount;
+                }
+                if (!values) {
+                    return fail("cannot write imported Session values.csv");
+                }
+            } else {
+                ++result.mappingFailures;
+            }
         }
         if (imported == 0) {
             result.firstTimestamp = record.timestamp;
@@ -635,6 +705,15 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
     }
     if (!writer.close()) {
         return fail(writer.error());
+    }
+    values.flush();
+    if (!values) {
+        return fail("cannot finalize imported Session values.csv");
+    }
+    values.close();
+    if (result.sampleCount > static_cast<std::uint64_t>(
+                                 std::numeric_limits<qint64>::max())) {
+        return fail("rosbag2 structured sample count exceeds the Session metadata range");
     }
     if (!writeSessionFiles(temporaryRoot, options, files, result, error)) {
         return fail(std::move(error));
