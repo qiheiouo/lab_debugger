@@ -59,6 +59,6 @@ repeat:
 - 跳转时先建立处理屏障，再清理半帧/半行缓存和旧曲线，避免把跳转前后的字节拼成伪帧；
 - Session 的初始协议或 CSV 字段配置会自动恢复。
 
-rosbag2 导入 Session 在没有结构化采样时标记 `replay_mode: raw-only`，存在可信内置映射时标记 `replay_mode: rosbag2-structured`，并在 `configuration/rosbag2.json` 保存本次选中的 Topic/类型及 `field_mapping`。两种模式都保留选中数据的完整时间轴和原始 CDR，并明确跳过普通 CSV 与自定义二进制协议解析；结构化模式由专用 CDR 映射器按原始记录序号把数值直接送入曲线。`values.csv` 保存同一批结构化结果用于离线分析，`counts.samples`、`mapped_message_count` 和 `mapping_failure_count` 提供可核验计数。单文件、分卷归并、Topic 筛选和限制见 [rosbag2 导入说明](ROSBAG2.md)。
+rosbag2 导入 Session 在没有结构化采样时标记 `replay_mode: raw-only`，存在可信内置映射时标记 `replay_mode: rosbag2-structured`，并在 `configuration/rosbag2.json` 保存本次选中的 Topic/类型及 `field_mapping`。两种模式都保留选中数据的完整时间轴和原始 CDR，并明确跳过普通 CSV 与自定义二进制协议解析；结构化模式由专用 CDR 映射器按原始记录序号把数值直接送入曲线。`values.csv` 保存同一批结构化结果用于离线分析，`counts.samples`、`mapped_message_count` 和 `mapping_failure_count` 提供可核验计数。若来源带 `metadata.yaml`，其原始字节保存到 `configuration/rosbag2_metadata.yaml`，摘要、SHA-256 和 SQLite 交叉校验结果同时写入 `configuration/rosbag2.json` 与 `metadata.json.import.metadata_yaml`。单文件、分卷归并、Topic 筛选和限制见 [rosbag2 导入说明](ROSBAG2.md)。
 
 当前索引是每条原始记录 16 字节的内存索引。后续针对数小时、极高 chunk 频率的数据，会增加后台建索引、稀疏索引和索引缓存；原始格式无需因此改变。

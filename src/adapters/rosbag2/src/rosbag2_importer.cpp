@@ -6,11 +6,14 @@
 #include "lab/core/raw_log_writer.hpp"
 
 #include <QByteArray>
+#include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QStringDecoder>
 #include <QStringList>
 #include <QSqlDatabase>
 #include <QSqlError>
@@ -43,6 +46,13 @@ std::string rosbag2SourceId(std::string_view topic, std::string_view messageType
 namespace {
 
 constexpr std::size_t maximumTopicTextBytes = 64 * 1024;
+constexpr qint64 maximumMetadataBytes = 4 * 1024 * 1024;
+
+struct Rosbag2MetadataDocument {
+    Rosbag2MetadataInfo info;
+    QByteArray bytes;
+    bool loaded{};
+};
 
 QString fromPath(const std::filesystem::path& path) {
 #ifdef _WIN32
@@ -143,6 +153,409 @@ bool writeJson(const std::filesystem::path& path,
         return false;
     }
     return true;
+}
+
+bool writeBytes(const std::filesystem::path& path,
+                const QByteArray& bytes,
+                std::string& error) {
+    QSaveFile output(fromPath(path));
+    if (!output.open(QIODevice::WriteOnly)) {
+        error = "cannot create " + pathText(path.filename());
+        return false;
+    }
+    if (output.write(bytes) != bytes.size() || !output.commit()) {
+        error = "cannot write " + pathText(path.filename());
+        return false;
+    }
+    return true;
+}
+
+QString yamlScalar(QString value, bool& valid) {
+    valid = true;
+    value = value.trimmed();
+    if (value.isEmpty()) {
+        return {};
+    }
+    if (value.startsWith('\'')) {
+        if (value.size() < 2 || !value.endsWith('\'')) {
+            valid = false;
+            return {};
+        }
+        value = value.sliced(1, value.size() - 2);
+        return value.replace(QStringLiteral("''"), QStringLiteral("'"));
+    }
+    if (value.startsWith('"')) {
+        const auto document = QJsonDocument::fromJson(
+            QByteArrayLiteral("[") + value.toUtf8() + QByteArrayLiteral("]"));
+        const auto array = document.array();
+        if (!document.isArray() || array.size() != 1 ||
+            !array.at(0).isString()) {
+            valid = false;
+            return {};
+        }
+        return array.at(0).toString();
+    }
+    for (qsizetype index = 1; index < value.size(); ++index) {
+        if (value.at(index) == '#' && value.at(index - 1).isSpace()) {
+            value = value.first(index).trimmed();
+            break;
+        }
+    }
+    return value;
+}
+
+bool parseUnsignedYaml(QString value, std::uint64_t& result) {
+    bool scalarValid = false;
+    value = yamlScalar(std::move(value), scalarValid);
+    bool numberValid = false;
+    const auto number = value.toULongLong(&numberValid, 10);
+    if (!scalarValid || !numberValid) {
+        return false;
+    }
+    result = number;
+    return true;
+}
+
+void addMetadataWarning(Rosbag2MetadataInfo& info, std::string warning) {
+    if (std::find(info.warnings.begin(), info.warnings.end(), warning) ==
+        info.warnings.end()) {
+        info.warnings.push_back(std::move(warning));
+    }
+}
+
+std::optional<std::filesystem::path> metadataFile(
+    const std::filesystem::path& source) {
+    std::error_code error;
+    auto candidate = std::filesystem::is_directory(source, error)
+                         ? source / "metadata.yaml"
+                         : source.parent_path() / "metadata.yaml";
+    if (!error && std::filesystem::is_regular_file(candidate, error) && !error) {
+        return candidate;
+    }
+    return std::nullopt;
+}
+
+Rosbag2MetadataDocument loadMetadata(const std::filesystem::path& source) {
+    Rosbag2MetadataDocument document;
+    const auto path = metadataFile(source);
+    if (!path) {
+        return document;
+    }
+    auto& info = document.info;
+    info.present = true;
+    info.sourcePath = *path;
+
+    QFile file(fromPath(*path));
+    if (!file.open(QIODevice::ReadOnly)) {
+        addMetadataWarning(info, "metadata.yaml cannot be opened");
+        return document;
+    }
+    const auto size = file.size();
+    if (size < 0) {
+        addMetadataWarning(info, "metadata.yaml size cannot be determined");
+        return document;
+    }
+    info.byteCount = static_cast<std::uint64_t>(size);
+    if (size > maximumMetadataBytes) {
+        addMetadataWarning(info, "metadata.yaml exceeds the 4 MiB safety limit");
+        return document;
+    }
+    document.bytes = file.readAll();
+    if (document.bytes.size() != size) {
+        document.bytes.clear();
+        addMetadataWarning(info, "metadata.yaml could not be read completely");
+        return document;
+    }
+    document.loaded = true;
+    info.sha256 = toUtf8(QCryptographicHash::hash(document.bytes,
+                                                  QCryptographicHash::Sha256)
+                             .toHex());
+
+    QStringDecoder decoder(QStringDecoder::Utf8);
+    const QString text = decoder.decode(document.bytes);
+    if (decoder.hasError()) {
+        addMetadataWarning(info, "metadata.yaml is not valid UTF-8");
+        return document;
+    }
+
+    bool inRoot = false;
+    bool rootSeen = false;
+    QString section;
+    const auto lines = text.split('\n');
+    for (qsizetype lineNumber = 0; lineNumber < lines.size(); ++lineNumber) {
+        auto line = lines.at(lineNumber);
+        if (line.endsWith('\r')) {
+            line.chop(1);
+        }
+        qsizetype indentation = 0;
+        while (indentation < line.size() && line.at(indentation) == ' ') {
+            ++indentation;
+        }
+        if (indentation < line.size() && line.at(indentation) == '\t') {
+            addMetadataWarning(info, "metadata.yaml contains tab indentation");
+            continue;
+        }
+        const auto trimmed = line.sliced(indentation).trimmed();
+        if (trimmed.isEmpty() || trimmed.startsWith('#') || trimmed == QStringLiteral("---") ||
+            trimmed == QStringLiteral("...")) {
+            continue;
+        }
+        if (indentation == 0) {
+            inRoot = trimmed == QStringLiteral("rosbag2_bagfile_information:");
+            if (inRoot) {
+                rootSeen = true;
+            }
+            section.clear();
+            continue;
+        }
+        if (!inRoot) {
+            continue;
+        }
+        if (indentation == 2) {
+            const auto separator = trimmed.indexOf(':');
+            if (separator < 0) {
+                addMetadataWarning(info, "metadata.yaml contains an invalid root field");
+                section.clear();
+                continue;
+            }
+            const auto key = trimmed.first(separator).trimmed();
+            const auto value = trimmed.sliced(separator + 1);
+            section.clear();
+            if (value.trimmed().isEmpty()) {
+                section = key;
+                continue;
+            }
+            std::uint64_t number{};
+            bool scalarValid = false;
+            const auto scalar = yamlScalar(value, scalarValid);
+            if (key == QStringLiteral("version")) {
+                if (parseUnsignedYaml(value, number)) info.version = number;
+                else addMetadataWarning(info, "metadata.yaml version is invalid");
+            } else if (key == QStringLiteral("message_count")) {
+                if (parseUnsignedYaml(value, number)) info.messageCount = number;
+                else addMetadataWarning(info, "metadata.yaml message_count is invalid");
+            } else if (!scalarValid) {
+                addMetadataWarning(info, "metadata.yaml contains an invalid quoted scalar");
+            } else if (key == QStringLiteral("storage_identifier")) {
+                info.storageIdentifier = toUtf8(scalar);
+            } else if (key == QStringLiteral("compression_format")) {
+                info.compressionFormat = toUtf8(scalar);
+            } else if (key == QStringLiteral("compression_mode")) {
+                info.compressionMode = toUtf8(scalar);
+            } else if (key == QStringLiteral("ros_distro")) {
+                info.rosDistro = toUtf8(scalar);
+            }
+            continue;
+        }
+        if (indentation == 4 && section == QStringLiteral("duration")) {
+            const auto prefix = QStringLiteral("nanoseconds:");
+            if (trimmed.startsWith(prefix)) {
+                std::uint64_t value{};
+                if (parseUnsignedYaml(trimmed.sliced(prefix.size()), value)) {
+                    info.durationNanoseconds = value;
+                } else {
+                    addMetadataWarning(info, "metadata.yaml duration is invalid");
+                }
+            }
+        } else if (indentation == 4 &&
+                   section == QStringLiteral("starting_time")) {
+            const auto prefix = QStringLiteral("nanoseconds_since_epoch:");
+            if (trimmed.startsWith(prefix)) {
+                std::uint64_t value{};
+                if (parseUnsignedYaml(trimmed.sliced(prefix.size()), value)) {
+                    info.startingTimeNanoseconds = value;
+                } else {
+                    addMetadataWarning(info, "metadata.yaml starting_time is invalid");
+                }
+            }
+        } else if (indentation == 4 &&
+                   section == QStringLiteral("relative_file_paths") &&
+                   trimmed.startsWith('-')) {
+            bool valid = false;
+            const auto scalar = yamlScalar(trimmed.sliced(1), valid);
+            if (!valid || scalar.isEmpty()) {
+                addMetadataWarning(info,
+                                   "metadata.yaml contains an invalid relative file path");
+            } else {
+                info.relativeFilePaths.push_back(toUtf8(scalar));
+            }
+        }
+    }
+    info.parsed = rootSeen;
+    if (!rootSeen) {
+        addMetadataWarning(info,
+                           "metadata.yaml has no rosbag2_bagfile_information root");
+    }
+    return document;
+}
+
+QString normalizedRelativePath(QString path, bool& safe) {
+    path = path.trimmed();
+    path.replace('\\', '/');
+    const auto windowsAbsolute =
+        path.size() >= 3 && path.at(0).isLetter() && path.at(1) == ':' &&
+        path.at(2) == '/';
+    const auto pieces = path.split('/', Qt::SkipEmptyParts);
+    safe = !path.isEmpty() && !QDir::isAbsolutePath(path) && !windowsAbsolute &&
+           !path.startsWith(QStringLiteral("//")) &&
+           std::none_of(pieces.cbegin(), pieces.cend(), [](const auto& piece) {
+               return piece == QStringLiteral("..");
+           });
+    path = QDir::cleanPath(path);
+#ifdef _WIN32
+    path = path.toLower();
+#endif
+    return path;
+}
+
+void validateMetadata(Rosbag2MetadataInfo& info,
+                      const std::filesystem::path& source,
+                      const std::vector<std::filesystem::path>& databases,
+                      std::optional<std::uint64_t> databaseMessageCount) {
+    if (!info.present || !info.parsed) {
+        return;
+    }
+    if (!info.storageIdentifier.empty()) {
+        info.storageIdentifierMatches =
+            QString::fromUtf8(info.storageIdentifier).compare(
+                QStringLiteral("sqlite3"), Qt::CaseInsensitive) == 0;
+        if (!*info.storageIdentifierMatches) {
+            addMetadataWarning(info,
+                               "metadata.yaml storage_identifier does not match SQLite3");
+        }
+    }
+
+    if (!info.relativeFilePaths.empty()) {
+        std::set<QString> declared;
+        bool allSafe = true;
+        for (const auto& relative : info.relativeFilePaths) {
+            bool safe = false;
+            auto normalized = normalizedRelativePath(QString::fromUtf8(relative), safe);
+            if (!safe) {
+                allSafe = false;
+                addMetadataWarning(info,
+                                   "metadata.yaml contains an unsafe relative file path");
+                continue;
+            }
+            declared.insert(std::move(normalized));
+        }
+        std::set<QString> actual;
+        std::error_code sourceError;
+        const auto base = std::filesystem::is_directory(source, sourceError)
+                              ? source
+                              : source.parent_path();
+        for (const auto& database : databases) {
+            std::error_code error;
+            const auto relative = std::filesystem::relative(database, base, error);
+            bool safe = false;
+            auto normalized = normalizedRelativePath(
+                fromPath(error ? database.filename() : relative), safe);
+            if (!safe) {
+                allSafe = false;
+                continue;
+            }
+            actual.insert(std::move(normalized));
+        }
+        info.databaseFilesMatch = allSafe && declared == actual;
+        if (!*info.databaseFilesMatch) {
+            addMetadataWarning(info,
+                               "metadata.yaml relative_file_paths do not match the imported databases");
+        }
+    }
+    if (info.messageCount && databaseMessageCount) {
+        info.messageCountMatches = *info.messageCount == *databaseMessageCount;
+        if (!*info.messageCountMatches) {
+            addMetadataWarning(info,
+                               "metadata.yaml message_count does not match the SQLite data");
+        }
+    }
+}
+
+QJsonValue jsonUnsigned(std::uint64_t value) {
+    if (value <= static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())) {
+        return static_cast<qint64>(value);
+    }
+    return QString::number(value);
+}
+
+QJsonObject metadataJson(const Rosbag2MetadataDocument& document) {
+    const auto& info = document.info;
+    QJsonObject metadata;
+    metadata.insert(QStringLiteral("present"), info.present);
+    metadata.insert(QStringLiteral("parsed"), info.parsed);
+    if (!info.present) {
+        metadata.insert(QStringLiteral("validation_status"),
+                        QStringLiteral("not-present"));
+        return metadata;
+    }
+    metadata.insert(QStringLiteral("source"), fromPath(info.sourcePath));
+    metadata.insert(QStringLiteral("byte_count"), jsonUnsigned(info.byteCount));
+    metadata.insert(QStringLiteral("sha256"), QString::fromStdString(info.sha256));
+    if (document.loaded) {
+        metadata.insert(QStringLiteral("preserved_as"),
+                        QStringLiteral("configuration/rosbag2_metadata.yaml"));
+    }
+    if (info.version) metadata.insert(QStringLiteral("version"), jsonUnsigned(*info.version));
+    if (!info.storageIdentifier.empty()) {
+        metadata.insert(QStringLiteral("storage_identifier"),
+                        QString::fromUtf8(info.storageIdentifier));
+    }
+    if (info.durationNanoseconds) {
+        metadata.insert(QStringLiteral("duration_nanoseconds"),
+                        jsonUnsigned(*info.durationNanoseconds));
+    }
+    if (info.startingTimeNanoseconds) {
+        metadata.insert(QStringLiteral("starting_time_nanoseconds"),
+                        jsonUnsigned(*info.startingTimeNanoseconds));
+    }
+    if (info.messageCount) {
+        metadata.insert(QStringLiteral("message_count"),
+                        jsonUnsigned(*info.messageCount));
+    }
+    if (!info.compressionFormat.empty()) {
+        metadata.insert(QStringLiteral("compression_format"),
+                        QString::fromUtf8(info.compressionFormat));
+    }
+    if (!info.compressionMode.empty()) {
+        metadata.insert(QStringLiteral("compression_mode"),
+                        QString::fromUtf8(info.compressionMode));
+    }
+    if (!info.rosDistro.empty()) {
+        metadata.insert(QStringLiteral("ros_distro"),
+                        QString::fromUtf8(info.rosDistro));
+    }
+    QJsonArray paths;
+    for (const auto& path : info.relativeFilePaths) {
+        paths.push_back(QString::fromUtf8(path));
+    }
+    metadata.insert(QStringLiteral("relative_file_paths"), paths);
+    QJsonObject validation;
+    const auto addCheck = [&validation](QString key, const std::optional<bool>& value) {
+        validation.insert(std::move(key), value ? QJsonValue(*value) : QJsonValue::Null);
+    };
+    addCheck(QStringLiteral("storage_identifier_matches"),
+             info.storageIdentifierMatches);
+    addCheck(QStringLiteral("database_files_match"), info.databaseFilesMatch);
+    addCheck(QStringLiteral("message_count_matches"), info.messageCountMatches);
+    metadata.insert(QStringLiteral("validation"), validation);
+    QJsonArray warnings;
+    for (const auto& warning : info.warnings) {
+        warnings.push_back(QString::fromStdString(warning));
+    }
+    metadata.insert(QStringLiteral("warnings"), warnings);
+    const auto fullyValidated =
+        info.storageIdentifierMatches.value_or(false) &&
+        info.databaseFilesMatch.value_or(false) &&
+        info.messageCountMatches.value_or(false);
+    metadata.insert(
+        QStringLiteral("validation_status"),
+        !info.parsed
+            ? QStringLiteral("unparsed")
+            : !info.warnings.empty()
+                  ? QStringLiteral("warning")
+                  : fullyValidated ? QStringLiteral("validated")
+                                   : QStringLiteral("parsed"));
+    return metadata;
 }
 
 struct CursorRecord {
@@ -353,10 +766,30 @@ bool inspectDatabase(DatabaseCursor& cursor,
     return true;
 }
 
+bool countDatabaseMessages(DatabaseCursor& cursor,
+                           std::uint64_t& totalMessages,
+                           std::string& error) {
+    QSqlQuery query(cursor.database());
+    if (!query.exec(QStringLiteral("SELECT COUNT(*) FROM messages")) || !query.next()) {
+        error = "cannot count rosbag2 messages in " + pathText(cursor.path().filename()) +
+                ": " + toUtf8(query.lastError().text());
+        return false;
+    }
+    bool countOk = false;
+    const auto count = query.value(0).toULongLong(&countOk);
+    if (!countOk || count > std::numeric_limits<std::uint64_t>::max() - totalMessages) {
+        error = "rosbag2 message count exceeds the supported range";
+        return false;
+    }
+    totalMessages += count;
+    return true;
+}
+
 bool writeSessionFiles(const std::filesystem::path& root,
                        const Rosbag2ImportOptions& options,
                        const std::vector<std::filesystem::path>& databases,
                        const Rosbag2ImportResult& result,
+                       const Rosbag2MetadataDocument& sourceMetadata,
                        std::string& error) {
     {
         std::ofstream frames(root / "frames.jsonl", std::ios::trunc);
@@ -403,6 +836,13 @@ bool writeSessionFiles(const std::filesystem::path& root,
     catalog.insert(QStringLiteral("source"), fromPath(options.source));
     catalog.insert(QStringLiteral("databases"), databaseArray);
     catalog.insert(QStringLiteral("topics"), topicArray);
+    catalog.insert(QStringLiteral("metadata_yaml"), metadataJson(sourceMetadata));
+    if (sourceMetadata.loaded &&
+        !writeBytes(root / "configuration" / "rosbag2_metadata.yaml",
+                    sourceMetadata.bytes,
+                    error)) {
+        return false;
+    }
     if (!writeJson(root / "configuration" / "rosbag2.json",
                    QJsonDocument(catalog),
                    error)) {
@@ -449,6 +889,7 @@ bool writeSessionFiles(const std::filesystem::path& root,
                   static_cast<qint64>(result.mappedMessageCount));
     import.insert(QStringLiteral("mapping_failure_count"),
                   static_cast<qint64>(result.mappingFailures));
+    import.insert(QStringLiteral("metadata_yaml"), metadataJson(sourceMetadata));
 
     QJsonObject metadata;
     metadata.insert(QStringLiteral("format"), QStringLiteral("lab-debug-session"));
@@ -489,6 +930,7 @@ Rosbag2InspectionResult inspectRosbag2(
         return fail(std::move(error));
     }
     result.databaseCount = files.size();
+    auto sourceMetadata = loadMetadata(source);
 
     std::map<TopicKey, std::uint64_t> topicCounts;
     for (std::size_t index = 0; index < files.size(); ++index) {
@@ -520,6 +962,11 @@ Rosbag2InspectionResult inspectRosbag2(
              count,
              hasStructuredCdrMapping(std::get<1>(key))});
     }
+    validateMetadata(sourceMetadata.info,
+                     source,
+                     files,
+                     result.messageCount);
+    result.metadata = sourceMetadata.info;
     result.success = true;
     return result;
 }
@@ -550,6 +997,7 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
         return fail(std::move(error));
     }
     result.databaseCount = files.size();
+    auto sourceMetadata = loadMetadata(options.source);
 
     auto parent = options.destination.parent_path();
     if (parent.empty()) {
@@ -573,6 +1021,7 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
 
     std::vector<std::unique_ptr<DatabaseCursor>> cursors;
     std::map<TopicKey, std::uint64_t> topicCounts;
+    std::uint64_t metadataMessageCount{};
     for (std::size_t index = 0; index < files.size(); ++index) {
         auto cursor = std::make_unique<DatabaseCursor>(files[index], index);
         if (!cursor->open(error) ||
@@ -583,11 +1032,23 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
                              options.includedTopics,
                              false,
                              error) ||
+            (sourceMetadata.info.messageCount && !options.includedTopics.empty() &&
+             !countDatabaseMessages(*cursor, metadataMessageCount, error)) ||
             !cursor->start(options.includedTopics, error)) {
             return fail(std::move(error));
         }
         cursors.push_back(std::move(cursor));
     }
+    if (options.includedTopics.empty()) {
+        metadataMessageCount = result.messageCount;
+    }
+    validateMetadata(sourceMetadata.info,
+                     options.source,
+                     files,
+                     sourceMetadata.info.messageCount
+                         ? std::optional<std::uint64_t>(metadataMessageCount)
+                         : std::nullopt);
+    result.metadata = sourceMetadata.info;
     if (result.messageCount > static_cast<std::uint64_t>(
                                   std::numeric_limits<qint64>::max()) ||
         result.payloadBytes > static_cast<std::uint64_t>(
@@ -715,7 +1176,12 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
                                  std::numeric_limits<qint64>::max())) {
         return fail("rosbag2 structured sample count exceeds the Session metadata range");
     }
-    if (!writeSessionFiles(temporaryRoot, options, files, result, error)) {
+    if (!writeSessionFiles(temporaryRoot,
+                           options,
+                           files,
+                           result,
+                           sourceMetadata,
+                           error)) {
         return fail(std::move(error));
     }
 

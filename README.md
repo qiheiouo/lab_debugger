@@ -23,7 +23,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - Remote Agent 本机模拟服务器回环测试；
 - 已在 Ubuntu 22.04/ROS2 Humble + GCC 11 验证的 `lab_debug_agent` ament 包、单客户端 TCP 服务端和 graph 更新；
 - 基于 `GenericSubscription` 的任意类型 CDR 转发、常见消息语义映射，以及自定义消息的运行时 introspection 字段展开；
-- 后台 rosbag2 SQLite 预检/导入、可搜索 Topic 筛选、分卷时间归并、原始 CDR 安全回放和常见 ROS 消息离线曲线；
+- 后台 rosbag2 SQLite 预检/导入、`metadata.yaml` 无损保存与交叉校验、可搜索 Topic 筛选、分卷时间归并、原始 CDR 安全回放和常见 ROS 消息离线曲线；
 - 可测试的 `MockDataSource` 与核心测试。
 
 详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
@@ -68,7 +68,7 @@ cmake --install build --config Release --prefix dist/LabDebugger
 
 打开“Session 回放”页选择历史目录即可回放。回放默认暂停，数据进入与实时串口完全相同的终端、协议和曲线链路；可选择倍速并拖动时间轴跳转。格式与恢复规则见 [记录与回放说明](docs/SESSION_FORMAT.md)。
 
-同一页面可直接导入单个 rosbag2 `.db3` 文件或包含多个分卷的 bag 目录。程序先在后台合并 Topic 目录，再提供搜索、消息计数、曲线能力和选择窗口，正式任务只写入选中 Topic；成功后自动打开标准 Session。Float32/64、Int32/UInt32、Bool、Twist、Pose、Imu、JointState、Odometry 等常见 CDR 会生成带 Topic 前缀的曲线，所有消息仍保留原始字节；未知或损坏 CDR 不会被送进 CSV。详细规则见 [rosbag2 导入说明](docs/ROSBAG2.md)。
+同一页面可直接导入单个 rosbag2 `.db3` 文件或包含多个分卷的 bag 目录。程序先在后台合并 Topic 目录，再提供搜索、消息计数、曲线能力和选择窗口，正式任务只写入选中 Topic；成功后自动打开标准 Session。若存在 `metadata.yaml`，程序会原样保存全部 QoS、自定义数据及未知扩展，同时提取稳定字段与 SQLite 文件/消息数交叉校验；任何不一致只形成警告，不能覆盖数据库事实。Float32/64、Int32/UInt32、Bool、Twist、Pose、Imu、JointState、Odometry 等常见 CDR 会生成带 Topic 前缀的曲线，所有消息仍保留原始字节；未知或损坏 CDR 不会被送进 CSV。详细规则见 [rosbag2 导入说明](docs/ROSBAG2.md)。
 
 ## TCP/UDP 快速验证
 

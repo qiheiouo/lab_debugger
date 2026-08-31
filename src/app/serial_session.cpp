@@ -604,7 +604,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.13.0";
+    options.softwareVersion = "0.14.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -872,10 +872,24 @@ void SerialSession::inspectRosbag2(const QString& source, const QString& destina
                                     topic.structuredFields);
                         topics.push_back(item);
                     }
+                    QString successMessage;
+                    if (result.success) {
+                        if (!result.metadata.present) {
+                            successMessage =
+                                tr("Topic 目录读取完成；未发现 metadata.yaml，统计以 SQLite 为准");
+                        } else if (result.metadata.warnings.empty()) {
+                            successMessage =
+                                tr("Topic 目录读取完成；metadata.yaml 已通过数据库交叉校验");
+                        } else {
+                            successMessage =
+                                tr("Topic 目录读取完成；metadata.yaml 有 %1 项校验警告，统计仍以 SQLite 为准")
+                                    .arg(result.metadata.warnings.size());
+                        }
+                    }
                     const auto message = result.cancelled
                                              ? tr("rosbag2 目录读取已取消")
                                              : result.success
-                                                   ? tr("Topic 目录读取完成")
+                                                   ? successMessage
                                                    : tr("rosbag2 目录读取失败：%1")
                                                          .arg(QString::fromStdString(
                                                              result.error));
@@ -925,7 +939,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.13.0";
+            options.softwareVersion = "0.14.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {
@@ -976,11 +990,17 @@ void SerialSession::importRosbag2(const QString& source,
                         emit rosbagImportFinished(false, {}, message, 0, 0);
                         return;
                     }
-                    const auto message =
+                    auto message =
                         tr("已导入 %1 条消息、%2 个 Topic，生成 %3 个曲线采样点")
                             .arg(result.messageCount)
                             .arg(static_cast<quint64>(result.topics.size()))
                             .arg(result.sampleCount);
+                    if (result.metadata.present) {
+                        message += result.metadata.warnings.empty()
+                                       ? tr("；metadata.yaml 已完整保留并通过校验")
+                                       : tr("；metadata.yaml 已完整保留（%1 项校验警告，未覆盖 SQLite 统计）")
+                                             .arg(result.metadata.warnings.size());
+                    }
                     emit rosbagImportFinished(true,
                                               directory,
                                               message,

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.13.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.14.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -115,6 +115,13 @@ if(LAB_DEBUGGER_BUILD_GUI)
         target_link_libraries(lab_rosbag2_adapter
             PUBLIC lab_core lab_rosbag_cdr Qt6::Core Qt6::Sql
         )
+        if(MSVC)
+            target_compile_options(lab_rosbag2_adapter PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(lab_rosbag2_adapter PRIVATE
+                -Wall -Wextra -Wpedantic
+            )
+        endif()
 
         add_library(lab_app_ui STATIC
             src/app/serial_session.cpp
@@ -240,6 +247,13 @@ if(LAB_DEBUGGER_BUILD_TESTS)
         target_link_libraries(lab_rosbag2_tests
             PRIVATE lab_rosbag2_adapter Qt6::Core Qt6::Sql
         )
+        if(MSVC)
+            target_compile_options(lab_rosbag2_tests PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(lab_rosbag2_tests PRIVATE
+                -Wall -Wextra -Wpedantic
+            )
+        endif()
         add_test(NAME lab_rosbag2_tests COMMAND lab_rosbag2_tests)
         set_tests_properties(lab_rosbag2_tests PROPERTIES
             ENVIRONMENT_MODIFICATION

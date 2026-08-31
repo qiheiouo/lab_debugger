@@ -74,7 +74,7 @@ rosbag2 std::jthread       Qt Sql 前向读取、分卷时间归并与同步 Raw
 
 `ReplaySource` 实现同一个 `IDataSource` 接口，按原始接收时间调度 `DataChunk`，所以回放复用 Monitor、Protocol 和 Plot 全链路。跳转会暂停回放、等待处理队列空闲、重置流解析器后再切换索引位置。
 
-`Rosbag2Importer` 位于 Qt 适配器层：QSQLITE 只负责读取 rosbag2 数据库，纯核心 `RawLogWriter` 负责流式生成标准 `.ldraw`。预检先合并分卷 Topic/类型/格式与计数，UI 再提交明确的 Topic 选择；正式查询按各数据库本地 topic id 限定数据。分卷 bag 同时保留每卷一个前向游标，并按时间戳、文件序和行号做确定性归并，因此导入内存取决于分卷数和单条消息大小，而不是消息总量。没有可信结构化采样时 Session 标记为 `raw-only`；存在内置字段时标记为 `rosbag2-structured`。两种模式都让 CDR 绕过普通 CSV/自定义协议处理，后者仅通过专用 CDR 映射器进入曲线。
+`Rosbag2Importer` 位于 Qt 适配器层：QSQLITE 只负责读取 rosbag2 数据库，纯核心 `RawLogWriter` 负责流式生成标准 `.ldraw`。预检先合并分卷 Topic/类型/格式与计数，UI 再提交明确的 Topic 选择；正式查询按各数据库本地 topic id 限定数据。分卷 bag 同时保留每卷一个前向游标，并按时间戳、文件序和行号做确定性归并，因此导入内存取决于分卷数和单条消息大小，而不是消息总量。`metadata.yaml` 作为不可信的辅助输入：限制大小后原样保存，稳定字段用于同 SQLite 文件集合和消息总数交叉校验，但从不决定打开哪些数据库或覆盖查询计数。没有可信结构化采样时 Session 标记为 `raw-only`；存在内置字段时标记为 `rosbag2-structured`。两种模式都让 CDR 绕过普通 CSV/自定义协议处理，后者仅通过专用 CDR 映射器进入曲线。
 
 ## 4. Windows / Linux / ROS2 解耦
 
@@ -111,7 +111,7 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 
 - 当前最小绘图是自绘 Qt Widget，不依赖 Qt Charts；适合 10~20 条常规曲线，但尚未实现高密度 LTTB/min-max downsampling。
 - 回放索引当前在打开文件时同步建立，每条原始记录占 16 字节索引内存；超长 Session 的后台建索引与稀疏缓存仍待实现。
-- rosbag2 当前支持 SQLite3/CDR、Topic 过滤和一组常见消息的离线结构化；MCAP、压缩存储、完整 `metadata.yaml`、动态类型描述及更多消息仍待实现。
+- rosbag2 当前支持 SQLite3/CDR、Topic 过滤、一组常见消息的离线结构化，以及 `metadata.yaml` 全文保存和稳定字段校验；MCAP、压缩存储、通用 YAML 编辑、动态类型描述及更多消息仍待实现。
 - CSV 解析器只处理换行分隔的数值；二进制帧、单位和校验由独立协议引擎处理。
 - 串口断开后提供手动重连；自动退避重连和端口热插拔恢复留到后续。
 - TCP 当前服务一个活动客户端；UDP 远端目前要求数字 IPv4/IPv6 地址。自动重连、TLS、组播和多客户端管理留到后续。

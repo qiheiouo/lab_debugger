@@ -91,6 +91,19 @@ void createBag(const QString& path,
     QSqlDatabase::removeDatabase(connection);
 }
 
+void writeFile(const std::filesystem::path& path, const QByteArray& bytes) {
+    QFile file(QString::fromStdWString(path.wstring()));
+    require(file.open(QIODevice::WriteOnly | QIODevice::Truncate),
+            "test fixture file opens");
+    require(file.write(bytes) == bytes.size(), "test fixture file is complete");
+}
+
+QByteArray readFile(const std::filesystem::path& path) {
+    QFile file(QString::fromStdWString(path.wstring()));
+    require(file.open(QIODevice::ReadOnly), "test result file opens");
+    return file.readAll();
+}
+
 void testSplitBagImport(const std::filesystem::path& root) {
     const auto source = root / "split_bag";
     std::filesystem::create_directories(source);
@@ -117,7 +130,7 @@ void testSplitBagImport(const std::filesystem::path& root) {
     const auto destination = root / "imported_session";
     std::uint64_t lastProgress{};
     const auto result = lab::adapters::rosbag2::importRosbag2(
-        {source, destination, "split-import", "0.13.0"},
+        {source, destination, "split-import", "0.14.0"},
         [&lastProgress](std::uint64_t imported, std::uint64_t) {
             lastProgress = imported;
             return true;
@@ -164,7 +177,7 @@ void testSplitBagImport(const std::filesystem::path& root) {
 
     const auto filteredDestination = root / "filtered_session";
     lab::adapters::rosbag2::Rosbag2ImportOptions filteredOptions{
-        source, filteredDestination, "filtered-import", "0.13.0"};
+        source, filteredDestination, "filtered-import", "0.14.0"};
     filteredOptions.includedTopics.push_back(
         {"/status", "std_msgs/msg/String"});
     const auto filtered = lab::adapters::rosbag2::importRosbag2(filteredOptions);
@@ -206,7 +219,7 @@ void testStructuredImport(const std::filesystem::path& root) {
                 QByteArray::fromHex("000100000000000000404540")}});
     const auto destination = root / "structured_session";
     const auto result = lab::adapters::rosbag2::importRosbag2(
-        {bag, destination, "structured", "0.13.0"});
+        {bag, destination, "structured", "0.14.0"});
     require(result.success && result.messageCount == 1 &&
                 result.mappedMessageCount == 1 && result.sampleCount == 1 &&
                 result.mappingFailures == 0,
@@ -249,6 +262,144 @@ void testStructuredImport(const std::filesystem::path& root) {
             "Topic catalog records built-in structured replay capability");
 }
 
+void testMetadataPreservationAndValidation(const std::filesystem::path& root) {
+    const auto source = root / "metadata_bag";
+    std::filesystem::create_directories(source);
+    createBag(QString::fromStdWString((source / "bag_0.db3").wstring()),
+              QStringLiteral("cdr"),
+              {{1, 100, QByteArray::fromHex("01")},
+               {1, 200, QByteArray::fromHex("02")}});
+    const QByteArray metadata = QByteArrayLiteral(
+        "rosbag2_bagfile_information:\n"
+        "  version: 5\n"
+        "  storage_identifier: sqlite3\n"
+        "  duration:\n"
+        "    nanoseconds: 100\n"
+        "  starting_time:\n"
+        "    nanoseconds_since_epoch: 100\n"
+        "  message_count: 2\n"
+        "  relative_file_paths:\n"
+        "    - \"bag_0.db3\"\n"
+        "  compression_format: ''\n"
+        "  compression_mode: ''\n"
+        "  ros_distro: humble\n"
+        "  topics_with_message_count:\n"
+        "    - topic_metadata:\n"
+        "        name: /temperature\n"
+        "        type: std_msgs/msg/Float64\n"
+        "        serialization_format: cdr\n"
+        "        offered_qos_profiles: |-\n"
+        "          - history: 3\n"
+        "            depth: 0\n"
+        "      message_count: 2\n"
+        "  custom_data:\n"
+        "    robot: test-rig\n");
+    writeFile(source / "metadata.yaml", metadata);
+
+    const auto inspection = lab::adapters::rosbag2::inspectRosbag2(source);
+    require(inspection.success && inspection.metadata.present &&
+                inspection.metadata.parsed && inspection.metadata.version == 5 &&
+                inspection.metadata.storageIdentifier == "sqlite3" &&
+                inspection.metadata.durationNanoseconds == 100 &&
+                inspection.metadata.startingTimeNanoseconds == 100 &&
+                inspection.metadata.messageCount == 2 &&
+                inspection.metadata.rosDistro == "humble",
+            "metadata.yaml stable fields are parsed without replacing SQLite truth");
+    require(inspection.metadata.relativeFilePaths ==
+                std::vector<std::string>{"bag_0.db3"} &&
+                inspection.metadata.storageIdentifierMatches == true &&
+                inspection.metadata.databaseFilesMatch == true &&
+                inspection.metadata.messageCountMatches == true &&
+                inspection.metadata.warnings.empty() &&
+                inspection.metadata.sha256.size() == 64,
+            "metadata.yaml matches the inspected SQLite files and message count");
+
+    const auto destination = root / "metadata_session";
+    lab::adapters::rosbag2::Rosbag2ImportOptions metadataOptions{
+        source, destination, "metadata", "0.14.0"};
+    metadataOptions.includedTopics.push_back(
+        {"/temperature", "std_msgs/msg/Float64"});
+    const auto result =
+        lab::adapters::rosbag2::importRosbag2(metadataOptions);
+    require(result.success && result.metadata.messageCountMatches == true,
+            "validated metadata.yaml does not change successful import");
+    require(readFile(destination / "configuration" / "rosbag2_metadata.yaml") ==
+                metadata,
+            "complete metadata.yaml bytes, including QoS and custom data, are preserved");
+
+    const auto catalog = QJsonDocument::fromJson(
+                             readFile(destination / "configuration" / "rosbag2.json"))
+                             .object();
+    const auto summary = catalog.value(QStringLiteral("metadata_yaml")).toObject();
+    require(summary.value(QStringLiteral("validation_status")).toString() ==
+                QStringLiteral("validated") &&
+                summary.value(QStringLiteral("sha256")).toString().size() == 64 &&
+                summary.value(QStringLiteral("validation"))
+                    .toObject()
+                    .value(QStringLiteral("database_files_match"))
+                    .toBool(),
+            "Session catalog records metadata identity and validation results");
+    const auto sessionMetadata = QJsonDocument::fromJson(
+                                     readFile(destination / "metadata.json"))
+                                     .object();
+    require(sessionMetadata.value(QStringLiteral("import"))
+                    .toObject()
+                    .value(QStringLiteral("metadata_yaml"))
+                    .toObject()
+                    .value(QStringLiteral("preserved_as"))
+                    .toString() ==
+                QStringLiteral("configuration/rosbag2_metadata.yaml"),
+            "top-level Session metadata links the preserved rosbag2 metadata");
+
+    const auto mismatchSource = root / "metadata_mismatch_bag";
+    std::filesystem::create_directories(mismatchSource);
+    createBag(QString::fromStdWString((mismatchSource / "actual.db3").wstring()),
+              QStringLiteral("cdr"),
+              {{1, 300, QByteArray::fromHex("01")}});
+    const QByteArray mismatchMetadata = QByteArrayLiteral(
+        "rosbag2_bagfile_information:\n"
+        "  version: 5\n"
+        "  storage_identifier: mcap\n"
+        "  message_count: 99\n"
+        "  relative_file_paths:\n"
+        "    - ../outside.db3\n");
+    writeFile(mismatchSource / "metadata.yaml", mismatchMetadata);
+    const auto mismatchInspection =
+        lab::adapters::rosbag2::inspectRosbag2(mismatchSource);
+    require(mismatchInspection.success &&
+                mismatchInspection.metadata.storageIdentifierMatches == false &&
+                mismatchInspection.metadata.databaseFilesMatch == false &&
+                mismatchInspection.metadata.messageCountMatches == false &&
+                mismatchInspection.metadata.warnings.size() >= 4,
+            "untrusted metadata mismatches become warnings while SQLite remains readable");
+    const auto mismatchDestination = root / "metadata_mismatch_session";
+    const auto mismatchResult = lab::adapters::rosbag2::importRosbag2(
+        {mismatchSource, mismatchDestination, "metadata-mismatch", "0.14.0"});
+    require(mismatchResult.success &&
+                readFile(mismatchDestination / "configuration" /
+                         "rosbag2_metadata.yaml") == mismatchMetadata,
+            "mismatched metadata is preserved for audit but cannot block or rewrite SQLite import");
+
+    const auto invalidSource = root / "metadata_invalid_utf8_bag";
+    std::filesystem::create_directories(invalidSource);
+    createBag(QString::fromStdWString((invalidSource / "data.db3").wstring()),
+              QStringLiteral("cdr"),
+              {{1, 400, QByteArray::fromHex("01")}});
+    QByteArray invalidMetadata("rosbag2_bagfile_information:\n  ros_distro: ");
+    invalidMetadata.push_back(static_cast<char>(0xff));
+    invalidMetadata.push_back('\n');
+    writeFile(invalidSource / "metadata.yaml", invalidMetadata);
+    const auto invalidDestination = root / "metadata_invalid_utf8_session";
+    const auto invalidResult = lab::adapters::rosbag2::importRosbag2(
+        {invalidSource, invalidDestination, "metadata-invalid", "0.14.0"});
+    require(invalidResult.success && invalidResult.metadata.present &&
+                !invalidResult.metadata.parsed &&
+                !invalidResult.metadata.warnings.empty() &&
+                readFile(invalidDestination / "configuration" /
+                         "rosbag2_metadata.yaml") == invalidMetadata,
+            "invalid UTF-8 metadata is losslessly preserved and ignored as authority");
+}
+
 void testCancellationAndValidation(const std::filesystem::path& root) {
     const auto bag = root / "single.db3";
     createBag(QString::fromStdWString(bag.wstring()),
@@ -256,7 +407,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
               {{1, 100, QByteArray::fromHex("0102")}});
     const auto cancelledDestination = root / "cancelled_session";
     const auto cancelled = lab::adapters::rosbag2::importRosbag2(
-        {bag, cancelledDestination, "cancelled", "0.13.0"},
+        {bag, cancelledDestination, "cancelled", "0.14.0"},
         [](std::uint64_t, std::uint64_t) { return false; });
     require(!cancelled.success && cancelled.cancelled,
             "cancel callback stops import explicitly");
@@ -274,12 +425,41 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
                 unsupportedInspection.topics.front().serializationFormat == "json",
             "inspection reports unsupported formats so the UI can disable them");
     const auto unsupported = lab::adapters::rosbag2::importRosbag2(
-        {unsupportedBag, unsupportedDestination, "unsupported", "0.13.0"});
+        {unsupportedBag, unsupportedDestination, "unsupported", "0.14.0"});
     require(!unsupported.success &&
                 unsupported.error.find("serialization format") != std::string::npos,
             "non-CDR bag fails with a clear format error");
     require(!std::filesystem::exists(unsupportedDestination),
             "invalid input does not publish a partial Session");
+
+    const auto oversizedMetadataSource = root / "oversized_metadata_bag";
+    std::filesystem::create_directories(oversizedMetadataSource);
+    createBag(QString::fromStdWString(
+                  (oversizedMetadataSource / "data.db3").wstring()),
+              QStringLiteral("cdr"),
+              {{1, 100, QByteArray::fromHex("01")}});
+    QFile oversizedMetadata(QString::fromStdWString(
+        (oversizedMetadataSource / "metadata.yaml").wstring()));
+    require(oversizedMetadata.open(QIODevice::WriteOnly) &&
+                oversizedMetadata.resize(4 * 1024 * 1024 + 1),
+            "oversized metadata fixture is created");
+    oversizedMetadata.close();
+    const auto oversizedInspection =
+        lab::adapters::rosbag2::inspectRosbag2(oversizedMetadataSource);
+    require(oversizedInspection.success && oversizedInspection.metadata.present &&
+                !oversizedInspection.metadata.parsed &&
+                !oversizedInspection.metadata.warnings.empty(),
+            "oversized metadata is ignored without hiding the SQLite catalog");
+    const auto oversizedDestination = root / "oversized_metadata_session";
+    const auto oversizedResult = lab::adapters::rosbag2::importRosbag2(
+        {oversizedMetadataSource,
+         oversizedDestination,
+         "oversized-metadata",
+         "0.14.0"});
+    require(oversizedResult.success &&
+                !std::filesystem::exists(oversizedDestination / "configuration" /
+                                         "rosbag2_metadata.yaml"),
+            "metadata above the safety limit is neither loaded nor copied");
 
     const auto mixedSource = root / "mixed_serialization_bag";
     std::filesystem::create_directories(mixedSource);
@@ -291,7 +471,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
               {{1, 200, QByteArrayLiteral("{}")}});
     const auto mixedDestination = root / "mixed_serialization_session";
     lab::adapters::rosbag2::Rosbag2ImportOptions mixedOptions{
-        mixedSource, mixedDestination, "mixed", "0.13.0"};
+        mixedSource, mixedDestination, "mixed", "0.14.0"};
     mixedOptions.includedTopics.push_back(
         {"/temperature", "std_msgs/msg/Float64"});
     const auto mixed = lab::adapters::rosbag2::importRosbag2(mixedOptions);
@@ -302,7 +482,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
 
     const auto missingDestination = root / "missing_topic_session";
     lab::adapters::rosbag2::Rosbag2ImportOptions missingOptions{
-        bag, missingDestination, "missing", "0.13.0"};
+        bag, missingDestination, "missing", "0.14.0"};
     missingOptions.includedTopics.push_back(
         {"/missing", "std_msgs/msg/String"});
     const auto missing = lab::adapters::rosbag2::importRosbag2(missingOptions);
@@ -314,7 +494,7 @@ void testCancellationAndValidation(const std::filesystem::path& root) {
     const auto occupied = root / "occupied_session";
     std::filesystem::create_directories(occupied);
     const auto existing = lab::adapters::rosbag2::importRosbag2(
-        {bag, occupied, "occupied", "0.13.0"});
+        {bag, occupied, "occupied", "0.14.0"});
     require(!existing.success &&
                 existing.error.find("already exists") != std::string::npos,
             "import never overwrites an existing destination");
@@ -332,6 +512,7 @@ int main(int argc, char* argv[]) {
         std::filesystem::create_directories(root);
         testSplitBagImport(root);
         testStructuredImport(root);
+        testMetadataPreservationAndValidation(root);
         testCancellationAndValidation(root);
         std::error_code cleanupError;
         std::filesystem::remove_all(root, cleanupError);

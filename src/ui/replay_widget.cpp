@@ -225,10 +225,11 @@ void ReplayWidget::showInspectionResult(bool success,
         return;
     }
 
-    importLabel_->setText(tr("已读取 %1 个数据库、%2 个 Topic、%3 条消息")
+    importLabel_->setText(tr("已读取 %1 个数据库、%2 个 Topic、%3 条消息\n%4")
                               .arg(databaseCount)
                               .arg(topics.size())
-                              .arg(messageCount));
+                              .arg(messageCount)
+                              .arg(message));
     importLabel_->setStyleSheet(QStringLiteral("color: #5fd19a;"));
     RosbagTopicDialog dialog(source, destination, topics, this);
     if (dialog.exec() != QDialog::Accepted) {

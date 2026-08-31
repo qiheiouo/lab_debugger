@@ -1,6 +1,6 @@
 # rosbag2 导入与回放
 
-Lab Debugger 0.11 提供 Phase 7 的第一版 rosbag2 离线链路，0.12 增加导入前 Topic 预检与筛选，0.13 增加常见 ROS 消息的无 ROS 依赖 CDR 解析与曲线回放：Windows 客户端无需安装 ROS2，即可把需要的 rosbag2 SQLite 数据转换成标准 Lab Debugger Session，再复用现有回放时间轴。
+Lab Debugger 0.11 提供 Phase 7 的第一版 rosbag2 离线链路，0.12 增加导入前 Topic 预检与筛选，0.13 增加常见 ROS 消息的无 ROS 依赖 CDR 解析与曲线回放，0.14 增加 `metadata.yaml` 无损保存与数据库交叉校验：Windows 客户端无需安装 ROS2，即可把需要的 rosbag2 SQLite 数据转换成标准 Lab Debugger Session，再复用现有回放时间轴。
 
 ## 使用方法
 
@@ -21,6 +21,13 @@ Lab Debugger 0.11 提供 Phase 7 的第一版 rosbag2 离线链路，0.12 增加
 - rosbag 的消息时间戳同时写入 Session 的 `sourceTimestamp` 与 `receiveTimestamp`，同一时间戳按数据库文件顺序和行号稳定排序。
 - 每条记录的 `sourceId` 同时携带 topic 名和 ROS 消息类型，终端行会显示这个来源；原始 CDR 字节逐字节保留。
 - `metadata.json` 使用 `replay_mode: rosbag2-structured` 或 `raw-only`，`configuration/rosbag2.json` 保存来源数据库、Topic、类型、序列化格式、消息计数和字段映射能力。
+
+## metadata.yaml
+
+- bag 目录或单个 `.db3` 的同级目录存在 `metadata.yaml` 时，原始字节会完整保存为 `configuration/rosbag2_metadata.yaml`。QoS block scalar、`custom_data` 和当前版本不认识的扩展键不会因解析器升级而丢失。
+- `configuration/rosbag2.json` 和 Session `metadata.json` 保存 SHA-256、字节数、rosbag2 版本、存储标识、起始时间、持续时间、消息数、压缩信息、ROS 发行版及相对数据库路径摘要。
+- 程序用实际打开的 SQLite 数据库交叉校验 `storage_identifier`、`relative_file_paths` 和总消息数；数据库内容始终是导入、筛选和计数的事实来源。缺失、损坏、超限、路径穿越或与 SQLite 不一致的 YAML 只产生显式警告，不能改变查询目标或伪造 Session 计数。
+- 元数据读取限制为 4 MiB，并要求可解析摘要为 UTF-8。无法解析的文件仍会在限制内逐字节保存，供后续审计或由其他 ROS 工具处理。
 - 结构化字段同时写入 `values.csv` 便于分析导出；回放时仍以 `.ldraw` 原始记录为调度主线，按 Topic 类型安全解析后直接进入 `TimeSeriesStore`，不会把二进制送入 CSV 或自定义协议解析器。
 
 CDR 是 ROS 的二进制序列化数据，不是 CSV 文本。0.13 内置 `std_msgs/msg/Float32`、`Float64`、`Int32`、`UInt32`、`Bool`，`geometry_msgs/msg/Twist`、`TwistStamped`、`PoseStamped`，`sensor_msgs/msg/Imu`、`JointState` 和 `nav_msgs/msg/Odometry`。字段路径与 Remote Agent 保持一致，并保留 `m`、`m/s`、`rad`、`rad/s`、`m/s^2` 等单位；曲线字段带 Topic 前缀，避免多个 Topic 的 `data` 或 `pose` 相互覆盖。Header 时间戳非零时用于曲线，零时间戳回退到 bag 消息时间。
@@ -34,7 +41,7 @@ CDR 是 ROS 的二进制序列化数据，不是 CSV 文本。0.13 内置 `std_m
 - 当前离线映射支持标准 CDR1 大小端封装；其他封装表示会安全回退，不尝试猜测布局。
 - 非 `cdr` 序列化、缺少标准表/列、非法时间戳、数据库读写错误会明确拒绝导入。
 - 当前不支持 MCAP、压缩 bag、加密存储和 ROS1 `.bag`。
-- 本版不解析 `metadata.yaml` 中的所有 QoS/自定义元数据；SQLite Topic/类型目录仍会完整保留在导入结果中。
+- QoS、自定义数据和未知 YAML 扩展目前以原文完整保留，不转换成可编辑的通用 JSON 树；SQLite Topic/类型目录仍会完整保留在导入结果中。
 - 当前回放仍会在打开 Session 时同步建立逐记录内存索引；超长 bag 的后台/稀疏索引属于下一批优化。
 
 ## 开发依赖

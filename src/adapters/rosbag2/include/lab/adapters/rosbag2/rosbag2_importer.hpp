@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,6 +25,27 @@ struct Rosbag2TopicSelector {
     std::string type;
 };
 
+struct Rosbag2MetadataInfo {
+    bool present{};
+    bool parsed{};
+    std::filesystem::path sourcePath;
+    std::uint64_t byteCount{};
+    std::string sha256;
+    std::optional<std::uint64_t> version;
+    std::string storageIdentifier;
+    std::optional<std::uint64_t> durationNanoseconds;
+    std::optional<std::uint64_t> startingTimeNanoseconds;
+    std::optional<std::uint64_t> messageCount;
+    std::string compressionFormat;
+    std::string compressionMode;
+    std::string rosDistro;
+    std::vector<std::string> relativeFilePaths;
+    std::optional<bool> storageIdentifierMatches;
+    std::optional<bool> databaseFilesMatch;
+    std::optional<bool> messageCountMatches;
+    std::vector<std::string> warnings;
+};
+
 struct Rosbag2InspectionResult {
     bool success{};
     bool cancelled{};
@@ -31,6 +53,7 @@ struct Rosbag2InspectionResult {
     std::uint64_t databaseCount{};
     std::uint64_t messageCount{};
     std::uint64_t payloadBytes{};
+    Rosbag2MetadataInfo metadata;
     std::string error;
 };
 
@@ -55,6 +78,7 @@ struct Rosbag2ImportResult {
     std::uint64_t mappingFailures{};
     lab::core::Timestamp firstTimestamp{};
     lab::core::Timestamp lastTimestamp{};
+    Rosbag2MetadataInfo metadata;
     std::string error;
 };
 
