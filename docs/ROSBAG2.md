@@ -27,6 +27,7 @@ Lab Debugger 0.11 提供 Phase 7 的第一版 rosbag2 离线链路，0.12 增加
 - bag 目录或单个 `.db3` 的同级目录存在 `metadata.yaml` 时，原始字节会完整保存为 `configuration/rosbag2_metadata.yaml`。QoS block scalar、`custom_data` 和当前版本不认识的扩展键不会因解析器升级而丢失。
 - `configuration/rosbag2.json` 和 Session `metadata.json` 保存 SHA-256、字节数、rosbag2 版本、存储标识、起始时间、持续时间、消息数、压缩信息、ROS 发行版及相对数据库路径摘要。
 - 程序用实际打开的 SQLite 数据库交叉校验 `storage_identifier`、`relative_file_paths` 和总消息数；数据库内容始终是导入、筛选和计数的事实来源。缺失、损坏、超限、路径穿越或与 SQLite 不一致的 YAML 只产生显式警告，不能改变查询目标或伪造 Session 计数。
+- 重复的根字段、时间字段或相对数据库路径会产生校验警告，即使最后一次出现的值碰巧与 SQLite 一致，也不会标记为完全验证通过。
 - 元数据读取限制为 4 MiB，并要求可解析摘要为 UTF-8。无法解析的文件仍会在限制内逐字节保存，供后续审计或由其他 ROS 工具处理。
 - 结构化字段同时写入 `values.csv` 便于分析导出；回放时仍以 `.ldraw` 原始记录为调度主线，按 Topic 类型安全解析后直接进入 `TimeSeriesStore`，不会把二进制送入 CSV 或自定义协议解析器。
 
@@ -49,3 +50,5 @@ CDR 是 ROS 的二进制序列化数据，不是 CSV 文本。0.13 内置 `std_m
 GUI 构建使用 Qt Sql 和随 Qt 部署的 QSQLITE 驱动。离线 CDR 字段映射本身是纯 C++20，不链接 ROS2；无 GUI 构建仍不依赖 Qt、SQLite 或 ROS2。
 
 ROS2 Agent 测试包中的 `lab_debug_agent_cdr_compatibility_tests` 会使用 Humble 的 `rclcpp::Serialization<T>` 生成真实 CDR，再直接编译并调用客户端共享的 `cdr_field_mapper.cpp`，同时逐项比较 Remote Agent 字段路径、单位、数值和 Header 时间戳。该目标只属于 ROS 测试体系，不会把 ROS2 依赖传播到 `lab_rosbag_cdr`、`lab_core` 或 Windows GUI。
+
+构建 Qt 测试后，可用 `lab_rosbag2_tests --verify-external-bag BAG SESSION` 直接调用 `Rosbag2Importer` 验证外部 SQLite3 bag。该入口会交叉核对真实数据库消息、Session 原始 CDR、结构化 Float64 曲线、原始与保存 metadata 字节及 SHA-256；`SESSION` 必须是尚不存在的目标目录。

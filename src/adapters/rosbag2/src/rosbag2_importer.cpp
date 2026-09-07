@@ -281,6 +281,9 @@ Rosbag2MetadataDocument loadMetadata(const std::filesystem::path& source) {
     bool inRoot = false;
     bool rootSeen = false;
     QString section;
+    std::set<QString> rootFields;
+    std::set<QString> nestedFields;
+    std::set<QString> relativePaths;
     const auto lines = text.split('\n');
     for (qsizetype lineNumber = 0; lineNumber < lines.size(); ++lineNumber) {
         auto line = lines.at(lineNumber);
@@ -303,6 +306,11 @@ Rosbag2MetadataDocument loadMetadata(const std::filesystem::path& source) {
         if (indentation == 0) {
             inRoot = trimmed == QStringLiteral("rosbag2_bagfile_information:");
             if (inRoot) {
+                if (rootSeen) {
+                    addMetadataWarning(
+                        info,
+                        "metadata.yaml contains a duplicate rosbag2_bagfile_information root");
+                }
                 rootSeen = true;
             }
             section.clear();
@@ -320,6 +328,11 @@ Rosbag2MetadataDocument loadMetadata(const std::filesystem::path& source) {
             }
             const auto key = trimmed.first(separator).trimmed();
             const auto value = trimmed.sliced(separator + 1);
+            if (!rootFields.insert(key).second) {
+                addMetadataWarning(
+                    info,
+                    "metadata.yaml contains a duplicate root field: " + toUtf8(key));
+            }
             section.clear();
             if (value.trimmed().isEmpty()) {
                 section = key;
@@ -350,6 +363,11 @@ Rosbag2MetadataDocument loadMetadata(const std::filesystem::path& source) {
         if (indentation == 4 && section == QStringLiteral("duration")) {
             const auto prefix = QStringLiteral("nanoseconds:");
             if (trimmed.startsWith(prefix)) {
+                if (!nestedFields.insert(QStringLiteral("duration.nanoseconds")).second) {
+                    addMetadataWarning(
+                        info,
+                        "metadata.yaml contains a duplicate duration.nanoseconds field");
+                }
                 std::uint64_t value{};
                 if (parseUnsignedYaml(trimmed.sliced(prefix.size()), value)) {
                     info.durationNanoseconds = value;
@@ -361,6 +379,13 @@ Rosbag2MetadataDocument loadMetadata(const std::filesystem::path& source) {
                    section == QStringLiteral("starting_time")) {
             const auto prefix = QStringLiteral("nanoseconds_since_epoch:");
             if (trimmed.startsWith(prefix)) {
+                if (!nestedFields
+                         .insert(QStringLiteral("starting_time.nanoseconds_since_epoch"))
+                         .second) {
+                    addMetadataWarning(
+                        info,
+                        "metadata.yaml contains a duplicate starting_time timestamp field");
+                }
                 std::uint64_t value{};
                 if (parseUnsignedYaml(trimmed.sliced(prefix.size()), value)) {
                     info.startingTimeNanoseconds = value;
@@ -377,6 +402,11 @@ Rosbag2MetadataDocument loadMetadata(const std::filesystem::path& source) {
                 addMetadataWarning(info,
                                    "metadata.yaml contains an invalid relative file path");
             } else {
+                if (!relativePaths.insert(scalar).second) {
+                    addMetadataWarning(
+                        info,
+                        "metadata.yaml contains a duplicate relative file path");
+                }
                 info.relativeFilePaths.push_back(toUtf8(scalar));
             }
         }
@@ -681,8 +711,10 @@ public:
             error = "rosbag2 message contains an invalid timestamp, id, topic, or type";
             return false;
         }
-        if (record.topicName.toUtf8().size() > maximumTopicTextBytes ||
-            record.topicType.toUtf8().size() > maximumTopicTextBytes) {
+        if (record.topicName.toUtf8().size() >
+                static_cast<qsizetype>(maximumTopicTextBytes) ||
+            record.topicType.toUtf8().size() >
+                static_cast<qsizetype>(maximumTopicTextBytes)) {
             error = "rosbag2 topic name or type exceeds the safety limit";
             return false;
         }
@@ -850,7 +882,8 @@ bool writeSessionFiles(const std::filesystem::path& root,
     }
 
     QJsonObject event;
-    event.insert(QStringLiteral("timestamp_ns"), result.firstTimestamp);
+    event.insert(QStringLiteral("timestamp_ns"),
+                 static_cast<qint64>(result.firstTimestamp));
     event.insert(QStringLiteral("sequence"), 0);
     event.insert(QStringLiteral("source_id"), QStringLiteral("rosbag2-import"));
     event.insert(QStringLiteral("severity"), QStringLiteral("info"));
@@ -898,8 +931,10 @@ bool writeSessionFiles(const std::filesystem::path& root,
     metadata.insert(QStringLiteral("name"), QString::fromUtf8(options.sessionName));
     metadata.insert(QStringLiteral("software_version"),
                     QString::fromUtf8(options.softwareVersion));
-    metadata.insert(QStringLiteral("start_time_ns"), result.firstTimestamp);
-    metadata.insert(QStringLiteral("end_time_ns"), result.lastTimestamp);
+    metadata.insert(QStringLiteral("start_time_ns"),
+                    static_cast<qint64>(result.firstTimestamp));
+    metadata.insert(QStringLiteral("end_time_ns"),
+                    static_cast<qint64>(result.lastTimestamp));
     metadata.insert(QStringLiteral("replay_mode"),
                     result.sampleCount > 0 ? QStringLiteral("rosbag2-structured")
                                            : QStringLiteral("raw-only"));

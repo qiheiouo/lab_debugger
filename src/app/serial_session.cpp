@@ -1113,7 +1113,8 @@ void SerialSession::drainUiQueue() {
                 item.insert(QStringLiteral("kind"), QStringLiteral("decode_error"));
                 break;
             }
-            item.insert(QStringLiteral("timestampNs"), event.sourceTimestamp);
+            item.insert(QStringLiteral("timestampNs"),
+                        static_cast<qlonglong>(event.sourceTimestamp));
             item.insert(QStringLiteral("raw"),
                         QByteArray(reinterpret_cast<const char*>(event.rawBytes.data()),
                                    static_cast<qsizetype>(event.rawBytes.size())));
