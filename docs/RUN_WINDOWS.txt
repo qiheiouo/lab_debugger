@@ -12,6 +12,8 @@ Lab Debugger Windows 便携版
 5. 回放 ROS2 数据时，打开“Session 回放”，可导入单个 .db3 或整个 bag 目录；
    在目录窗口选择需要的 Topic，并查看“原始 CDR + 曲线”或“仅原始 CDR”能力。
    导入成功后会自动打开；常见消息直接进入曲线，所有原始 CDR 都会保留且不会被当成 CSV。
+6. 串口、网络和 ROS Agent 可以同时连接并进入同一个 Session；原始字节发送前，
+   在发送区的“发送到”选择串口或网络。同名曲线会显示为 sourceId.字段名，互不混合。
 
 程序不要求系统安装 Qt。原始记录使用 .ldraw 格式；源码仓库的
 docs/ARCHITECTURE.md 说明了格式、线程模型和后续扩展边界。

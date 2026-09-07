@@ -41,7 +41,9 @@ private slots:
 
 private:
     [[nodiscard]] QStringList configuredFields() const;
+    [[nodiscard]] QStringList visibleFieldNames() const;
     void rebuildFieldControls(bool notifyParser);
+    void rebuildVisibleFields(const QStringList& fields, bool preserveChecks);
 
     const lab::core::TimeSeriesStore* store_;
     PlotCanvas* canvas_{};

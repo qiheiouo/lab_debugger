@@ -15,6 +15,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QSet>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTableWidget>
@@ -335,8 +336,7 @@ void PlotWidget::useExternalFields(const QStringList& fields) {
     if (fields.isEmpty()) {
         return;
     }
-    fields_->setText(fields.join(QStringLiteral(",")));
-    rebuildFieldControls(false);
+    rebuildVisibleFields(fields, true);
 }
 
 QStringList PlotWidget::fieldNames() const {
@@ -349,17 +349,30 @@ void PlotWidget::applyFields() {
 
 void PlotWidget::rebuildFieldControls(bool notifyParser) {
     const auto names = configuredFields();
-    visibleFields_->blockSignals(true);
-    visibleFields_->clear();
-    for (const auto& name : names) {
-        auto* item = new QListWidgetItem(name, visibleFields_);
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(Qt::Checked);
-    }
-    visibleFields_->blockSignals(false);
+    rebuildVisibleFields(names, false);
     if (notifyParser) {
         emit fieldsChanged(names);
     }
+}
+
+void PlotWidget::rebuildVisibleFields(const QStringList& fields, bool preserveChecks) {
+    QSet<QString> unchecked;
+    if (preserveChecks) {
+        for (int row = 0; row < visibleFields_->count(); ++row) {
+            const auto* item = visibleFields_->item(row);
+            if (item->checkState() != Qt::Checked) {
+                unchecked.insert(item->text());
+            }
+        }
+    }
+    visibleFields_->blockSignals(true);
+    visibleFields_->clear();
+    for (const auto& name : fields) {
+        auto* item = new QListWidgetItem(name, visibleFields_);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(unchecked.contains(name) ? Qt::Unchecked : Qt::Checked);
+    }
+    visibleFields_->blockSignals(false);
     updateSelectedFields();
 }
 
@@ -367,7 +380,7 @@ void PlotWidget::updatePlotAndStatistics() {
     if (!paused_->isChecked()) {
         canvas_->update();
     }
-    const auto fields = configuredFields();
+    const auto fields = visibleFieldNames();
     statistics_->setRowCount(fields.size());
     const auto since = lab::core::nowTimestampNs() -
                        static_cast<lab::core::Timestamp>(timeWindow_->value()) * 1'000'000'000;
@@ -415,6 +428,15 @@ QStringList PlotWidget::configuredFields() const {
     }
     if (result.isEmpty()) {
         result.push_back(QStringLiteral("field0"));
+    }
+    return result;
+}
+
+QStringList PlotWidget::visibleFieldNames() const {
+    QStringList result;
+    result.reserve(visibleFields_->count());
+    for (int row = 0; row < visibleFields_->count(); ++row) {
+        result.push_back(visibleFields_->item(row)->text());
     }
     return result;
 }

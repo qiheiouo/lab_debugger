@@ -8,6 +8,7 @@
 #include "lab/core/processing_pipeline.hpp"
 #include "lab/core/replay_source.hpp"
 #include "lab/core/session_recorder.hpp"
+#include "lab/core/source_manager.hpp"
 #include "lab/core/time_series_store.hpp"
 
 #include <QByteArray>
@@ -48,6 +49,7 @@ public slots:
     void connectRemoteAgent(lab::adapters::remote_agent::RemoteAgentSettings settings);
     void disconnectRemoteAgent();
     void reconnectRemoteAgent();
+    void setSendTarget(int target);
     void requestRemoteTopics();
     void subscribeRemoteTopic(lab::core::agent::SubscriptionRequest request);
     void unsubscribeRemoteTopic(lab::core::agent::SubscriptionRequest request);
@@ -87,7 +89,7 @@ signals:
                               quint32 sampleCount);
     void remoteTopicsChanged(QVariantList topics, quint64 graphRevision);
     void remoteTopicFieldsChanged(QVariantList topics, quint64 graphRevision);
-    void remoteFieldsDiscovered(QStringList fields);
+    void liveFieldsDiscovered(QStringList fields);
     void replayFieldsDiscovered(QStringList fields);
     void sourceError(QString message);
     void statisticsChanged(quint64 rxBytes, quint64 txBytes, qsizetype parserBacklog);
@@ -136,13 +138,15 @@ private slots:
     void drainUiQueue();
 
 private:
-    enum class LiveSourceKind { Serial, Network, RemoteAgent };
+    enum class SendTarget { Serial = 0, Network = 1 };
 
-    [[nodiscard]] std::string activeSourceId() const;
+    void discoverLiveField(const std::string& field);
+    [[nodiscard]] bool isDeclaredRecordingSource(const std::string& key) const noexcept;
 
     lab::adapters::serial::SerialSource source_;
     lab::adapters::network::NetworkSource network_;
     lab::adapters::remote_agent::RemoteAgentSource remoteAgent_;
+    lab::core::SourceManager sourceManager_;
     lab::core::ReplaySource replay_;
     std::atomic_bool replayRawOnly_{};
     std::atomic_bool replayStructuredRosbag_{};
@@ -153,15 +157,18 @@ private:
     lab::adapters::remote_agent::RemoteAgentSettings lastRemoteAgentSettings_;
     bool networkConfigured_{};
     bool remoteAgentConfigured_{};
-    LiveSourceKind activeLiveSource_{LiveSourceKind::Serial};
+    SendTarget sendTarget_{SendTarget::Serial};
+    std::atomic_bool recordingSerial_{};
+    std::atomic_bool recordingNetwork_{};
+    std::atomic_bool recordingRemoteAgent_{};
     lab::core::TimeSeriesStore timeSeries_{120'000};
     std::mutex uiQueueMutex_;
     std::deque<lab::core::DataChunk> uiQueue_;
     std::mutex protocolQueueMutex_;
     std::deque<lab::core::FrameEvent> protocolQueue_;
     std::mutex routingMutex_;
-    std::mutex remoteFieldsMutex_;
-    std::set<std::string> remoteFieldNames_;
+    std::mutex liveFieldsMutex_;
+    std::set<std::string> liveFieldNames_;
     std::unordered_map<std::string, std::pair<std::string, std::string>>
         rosbagReplayTopics_;
     std::set<std::string> replayFieldNames_;

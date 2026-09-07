@@ -14,6 +14,7 @@
 #include <optional>
 #include <stop_token>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace lab::core {
@@ -31,6 +32,7 @@ public:
 
     void push(DataChunk chunk);
     void setFieldNames(std::vector<std::string> names);
+    void setQualifyFieldNames(bool enabled);
     void setSampleHandler(SampleHandler handler);
     void setProtocolDefinition(ProtocolDefinition definition);
     void clearProtocolDefinition();
@@ -42,6 +44,14 @@ public:
     void flush();
 
 private:
+    struct SourceParsers {
+        SourceParsers(std::vector<std::string> fieldNames,
+                      const std::optional<ProtocolDefinition>& definition);
+
+        CsvStreamParser csv;
+        std::unique_ptr<FrameStreamParser> frame;
+    };
+
     void run(std::stop_token stopToken);
 
     TimeSeriesStore& store_;
@@ -52,9 +62,10 @@ private:
     bool processingChunk_{};
 
     mutable std::mutex parserMutex_;
-    CsvStreamParser parser_;
-    std::unique_ptr<FrameStreamParser> frameParser_;
-    bool csvEnabled_{true};
+    std::vector<std::string> fieldNames_{"field0", "field1", "field2"};
+    std::optional<ProtocolDefinition> protocolDefinition_;
+    std::unordered_map<std::string, SourceParsers> sourceParsers_;
+    bool qualifyFieldNames_{};
 
     std::mutex handlerMutex_;
     SampleHandler sampleHandler_;

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.14.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.15.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -39,6 +39,7 @@ add_library(lab_core STATIC
     src/core/src/replay_source.cpp
     src/core/src/remote_agent_session.cpp
     src/core/src/session_recorder.cpp
+    src/core/src/source_manager.cpp
     src/core/src/time_series_store.cpp
 )
 target_include_directories(lab_core PUBLIC src/core/include)
@@ -280,6 +281,20 @@ if(LAB_DEBUGGER_BUILD_TESTS)
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
             TIMEOUT 15
+        )
+        add_executable(lab_multi_source_session_tests
+            tests/test_multi_source_session.cpp
+        )
+        target_link_libraries(lab_multi_source_session_tests
+            PRIVATE lab_app_ui Qt6::Core Qt6::Network
+        )
+        add_test(NAME lab_multi_source_session_tests
+            COMMAND lab_multi_source_session_tests
+        )
+        set_tests_properties(lab_multi_source_session_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 20
         )
         add_executable(lab_gui_smoke_tests tests/test_gui_smoke.cpp)
         target_link_libraries(lab_gui_smoke_tests PRIVATE lab_app_ui)

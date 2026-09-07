@@ -18,9 +18,14 @@ class SendPanel final : public QWidget {
 
 public:
     explicit SendPanel(QWidget* parent = nullptr);
+    [[nodiscard]] int target() const;
+
+public slots:
+    void setTarget(int target);
 
 signals:
     void sendRequested(QByteArray bytes);
+    void targetChanged(int target);
 
 private slots:
     void sendNow();
@@ -32,6 +37,7 @@ private:
     void rememberHistory(const QString& text);
     void saveFavorites() const;
 
+    QComboBox* target_{};
     QComboBox* mode_{};
     QComboBox* input_{};
     QComboBox* lineEnding_{};
@@ -43,4 +49,3 @@ private:
 };
 
 }  // namespace lab::ui
-

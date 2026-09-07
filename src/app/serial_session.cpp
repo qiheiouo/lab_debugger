@@ -20,139 +20,122 @@
 #include <string_view>
 
 namespace lab::app {
+namespace {
+
+constexpr std::string_view serialSourceKey = "serial";
+constexpr std::string_view networkSourceKey = "network";
+constexpr std::string_view remoteAgentSourceKey = "remote_agent";
+
+bool sameSettings(const lab::adapters::serial::SerialSettings& left,
+                  const lab::adapters::serial::SerialSettings& right) {
+    return left.portName == right.portName && left.baudRate == right.baudRate &&
+           left.dataBits == right.dataBits && left.stopBits == right.stopBits &&
+           left.parity == right.parity && left.flowControl == right.flowControl;
+}
+
+bool sameSettings(const lab::adapters::network::NetworkSettings& left,
+                  const lab::adapters::network::NetworkSettings& right) {
+    return left.mode == right.mode && left.remoteHost == right.remoteHost &&
+           left.remotePort == right.remotePort && left.bindAddress == right.bindAddress &&
+           left.localPort == right.localPort;
+}
+
+bool sameSettings(const lab::adapters::remote_agent::RemoteAgentSettings& left,
+                  const lab::adapters::remote_agent::RemoteAgentSettings& right) {
+    return left.host == right.host && left.port == right.port &&
+           left.clientName == right.clientName && left.clientVersion == right.clientVersion &&
+           left.autoReconnect == right.autoReconnect;
+}
+
+}  // namespace
 
 SerialSession::SerialSession(QObject* parent) : QObject(parent) {
-    source_.setCallbacks({
-        [this](const lab::core::DataChunk& chunk) {
+    sourceManager_.setCallbacks({
+        [this](const std::string& key, const lab::core::DataChunk& chunk) {
             std::scoped_lock routeLock(routingMutex_);
-            recorder_.enqueueRaw(chunk);
-            if (chunk.direction == lab::core::Direction::Rx) {
+            const auto recording = recorder_.isRecording();
+            const auto declared = isDeclaredRecordingSource(key);
+            if (declared) {
+                recorder_.enqueueRaw(chunk);
+            }
+            if (key != remoteAgentSourceKey &&
+                chunk.direction == lab::core::Direction::Rx &&
+                (!recording || declared)) {
                 processing_.push(chunk);
             }
             std::scoped_lock lock(uiQueueMutex_);
             uiQueue_.push_back(chunk);
         },
-        [this](lab::core::SourceState state) {
-            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                    source_.sourceId(),
-                                    "info",
-                                    "source_state",
-                                    "Serial state changed to " +
-                                        std::to_string(static_cast<int>(state)),
-                                    0});
-            QMetaObject::invokeMethod(
-                this,
-                [this, state] { emit sourceStateChanged(static_cast<int>(state)); },
-                Qt::QueuedConnection);
-        },
-        [this](const std::string& message) {
-            recorder_.enqueueEvent({
-                lab::core::nowTimestampNs(), source_.sourceId(), "error", "source", message, 0});
-            QMetaObject::invokeMethod(
-                this,
-                [this, message] { emit sourceError(QString::fromStdString(message)); },
-                Qt::QueuedConnection);
-        }});
-
-    network_.setCallbacks({
-        [this](const lab::core::DataChunk& chunk) {
-            std::scoped_lock routeLock(routingMutex_);
-            recorder_.enqueueRaw(chunk);
-            if (chunk.direction == lab::core::Direction::Rx) {
-                processing_.push(chunk);
+        [this](const std::string& key,
+               const std::string& sourceId,
+               lab::core::SourceState state) {
+            const auto label = key == serialSourceKey
+                                   ? "Serial"
+                                   : key == networkSourceKey ? "Network" : "Remote Agent";
+            if (isDeclaredRecordingSource(key)) {
+                recorder_.enqueueEvent({lab::core::nowTimestampNs(),
+                                        sourceId,
+                                        "info",
+                                        "source_state",
+                                        std::string(label) + " state changed to " +
+                                            std::to_string(static_cast<int>(state)),
+                                        0});
             }
-            std::scoped_lock lock(uiQueueMutex_);
-            uiQueue_.push_back(chunk);
-        },
-        [this](lab::core::SourceState state) {
-            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                    network_.sourceId(),
-                                    "info",
-                                    "source_state",
-                                    "Network state changed to " +
-                                        std::to_string(static_cast<int>(state)),
-                                    0});
             QMetaObject::invokeMethod(
                 this,
-                [this, state] { emit networkStateChanged(static_cast<int>(state)); },
-                Qt::QueuedConnection);
-        },
-        [this](const std::string& message) {
-            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                    network_.sourceId(),
-                                    "error",
-                                    "source",
-                                    message,
-                                    0});
-            QMetaObject::invokeMethod(
-                this,
-                [this, message] {
-                    emit sourceError(tr("网络：%1").arg(QString::fromStdString(message)));
-                },
-                Qt::QueuedConnection);
-        }});
-
-    remoteAgent_.setCallbacks({
-        [this](const lab::core::DataChunk& chunk) {
-            std::scoped_lock routeLock(routingMutex_);
-            recorder_.enqueueRaw(chunk);
-            std::scoped_lock lock(uiQueueMutex_);
-            uiQueue_.push_back(chunk);
-        },
-        [this](lab::core::SourceState state) {
-            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                    remoteAgent_.sourceId(),
-                                    "info",
-                                    "source_state",
-                                    "Remote Agent state changed to " +
-                                        std::to_string(static_cast<int>(state)),
-                                    0});
-            QMetaObject::invokeMethod(
-                this,
-                [this, state] {
-                    emit remoteAgentStateChanged(static_cast<int>(state));
+                [this, key, state] {
+                    if (key == serialSourceKey) {
+                        emit sourceStateChanged(static_cast<int>(state));
+                    } else if (key == networkSourceKey) {
+                        emit networkStateChanged(static_cast<int>(state));
+                    } else {
+                        emit remoteAgentStateChanged(static_cast<int>(state));
+                    }
                 },
                 Qt::QueuedConnection);
         },
-        [this](const std::string& message) {
-            recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                    remoteAgent_.sourceId(),
-                                    "error",
-                                    "remote_agent",
-                                    message,
-                                    0});
+        [this](const std::string& key,
+               const std::string& sourceId,
+               const std::string& message) {
+            if (isDeclaredRecordingSource(key)) {
+                recorder_.enqueueEvent({
+                    lab::core::nowTimestampNs(),
+                    sourceId,
+                    "error",
+                    key == remoteAgentSourceKey ? "remote_agent" : "source",
+                    message,
+                    0});
+            }
             QMetaObject::invokeMethod(
                 this,
-                [this, message] {
-                    emit sourceError(
-                        tr("Remote Agent：%1").arg(QString::fromStdString(message)));
+                [this, key, message] {
+                    const auto detail = QString::fromStdString(message);
+                    if (key == networkSourceKey) {
+                        emit sourceError(tr("网络：%1").arg(detail));
+                    } else if (key == remoteAgentSourceKey) {
+                        emit sourceError(tr("Remote Agent：%1").arg(detail));
+                    } else {
+                        emit sourceError(detail);
+                    }
                 },
                 Qt::QueuedConnection);
         },
-        [this](const lab::core::DataSample& sample) {
+        [this](const std::string& key, const lab::core::DataSample& sample) {
+            if (key != remoteAgentSourceKey) {
+                return;
+            }
             {
                 std::scoped_lock routeLock(routingMutex_);
                 timeSeries_.append(sample);
-                recorder_.enqueueSample(sample);
-            }
-            QStringList fields;
-            bool changed = false;
-            {
-                std::scoped_lock lock(remoteFieldsMutex_);
-                changed = remoteFieldNames_.insert(sample.field).second;
-                if (changed) {
-                    for (const auto& name : remoteFieldNames_) {
-                        fields.push_back(QString::fromStdString(name));
-                    }
+                if (isDeclaredRecordingSource(key)) {
+                    recorder_.enqueueSample(sample);
                 }
             }
-            if (changed) {
-                QMetaObject::invokeMethod(
-                    this,
-                    [this, fields] { emit remoteFieldsDiscovered(fields); },
-                    Qt::QueuedConnection);
-            }
+            discoverLiveField(sample.field);
         }});
+    static_cast<void>(sourceManager_.add(std::string(serialSourceKey), source_));
+    static_cast<void>(sourceManager_.add(std::string(networkSourceKey), network_));
+    static_cast<void>(sourceManager_.add(std::string(remoteAgentSourceKey), remoteAgent_));
 
     remoteAgent_.setAgentCallbacks({
         [this](const lab::core::agent::Hello& hello) {
@@ -189,16 +172,18 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
         {},
         {},
         [this](const lab::core::ClockSyncEstimate& estimate) {
-            recorder_.enqueueEvent({
-                estimate.measuredAtNs,
-                remoteAgent_.sourceId(),
-                "info",
-                "clock_sync",
-                "offset_ns=" + std::to_string(estimate.offsetNs) +
-                    ";round_trip_ns=" + std::to_string(estimate.roundTripNs) +
-                    ";uncertainty_ns=" + std::to_string(estimate.uncertaintyNs) +
-                    ";samples=" + std::to_string(estimate.sampleCount),
-                0});
+            if (recordingRemoteAgent_.load()) {
+                recorder_.enqueueEvent({
+                    estimate.measuredAtNs,
+                    remoteAgent_.sourceId(),
+                    "info",
+                    "clock_sync",
+                    "offset_ns=" + std::to_string(estimate.offsetNs) +
+                        ";round_trip_ns=" + std::to_string(estimate.roundTripNs) +
+                        ";uncertainty_ns=" + std::to_string(estimate.uncertaintyNs) +
+                        ";samples=" + std::to_string(estimate.sampleCount),
+                    0});
+            }
             QMetaObject::invokeMethod(
                 this,
                 [this, estimate] {
@@ -307,8 +292,10 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 Qt::QueuedConnection);
         }});
 
+    processing_.setQualifyFieldNames(true);
     processing_.setSampleHandler([this](const lab::core::DataSample& sample) {
         recorder_.enqueueSample(sample);
+        discoverLiveField(sample.field);
     });
 
     processing_.setFrameHandler([this](const lab::core::FrameEvent& event) {
@@ -340,9 +327,9 @@ SerialSession::~SerialSession() {
         rosbagImportWorker_.request_stop();
         rosbagImportWorker_.join();
     }
-    source_.close();
-    network_.close();
-    remoteAgent_.close();
+    sourceManager_.closeAll();
+    sourceManager_.setCallbacks({});
+    remoteAgent_.setAgentCallbacks({});
     replay_.close();
     processing_.flush();
     recorder_.stop();
@@ -356,31 +343,53 @@ const lab::core::TimeSeriesStore& SerialSession::timeSeries() const noexcept {
     return timeSeries_;
 }
 
-std::string SerialSession::activeSourceId() const {
-    switch (activeLiveSource_) {
-    case LiveSourceKind::Serial: return source_.sourceId();
-    case LiveSourceKind::Network: return network_.sourceId();
-    case LiveSourceKind::RemoteAgent: return remoteAgent_.sourceId();
+void SerialSession::discoverLiveField(const std::string& field) {
+    QStringList fields;
+    {
+        std::scoped_lock lock(liveFieldsMutex_);
+        if (!liveFieldNames_.insert(field).second) {
+            return;
+        }
+        fields.reserve(static_cast<qsizetype>(liveFieldNames_.size()));
+        for (const auto& name : liveFieldNames_) {
+            fields.push_back(QString::fromStdString(name));
+        }
     }
-    return "unknown";
+    QMetaObject::invokeMethod(
+        this,
+        [this, fields] { emit liveFieldsDiscovered(fields); },
+        Qt::QueuedConnection);
+}
+
+bool SerialSession::isDeclaredRecordingSource(const std::string& key) const noexcept {
+    if (key == serialSourceKey) {
+        return recordingSerial_.load();
+    }
+    if (key == networkSourceKey) {
+        return recordingNetwork_.load();
+    }
+    if (key == remoteAgentSourceKey) {
+        return recordingRemoteAgent_.load();
+    }
+    return false;
 }
 
 void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings) {
-    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::Serial) {
-        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+    if (recorder_.isRecording() &&
+        (!recordingSerial_.load() || !sameSettings(settings, lastSettings_))) {
+        emit sourceError(tr("当前 Session 未声明此串口配置，停止记录后才能更改"));
         return;
     }
-    network_.close();
-    remoteAgent_.close();
     replay_.close();
-    activeLiveSource_ = LiveSourceKind::Serial;
+    sendTarget_ = SendTarget::Serial;
+    sourceManager_.close(std::string(serialSourceKey));
     lastSettings_ = std::move(settings);
     source_.setSettings(lastSettings_);
-    source_.open();
+    sourceManager_.open(std::string(serialSourceKey));
 }
 
 void SerialSession::disconnectSerial() {
-    source_.close();
+    sourceManager_.close(std::string(serialSourceKey));
 }
 
 void SerialSession::reconnectSerial() {
@@ -388,36 +397,34 @@ void SerialSession::reconnectSerial() {
         emit sourceError(tr("请先选择并连接一次目标串口"));
         return;
     }
-    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::Serial) {
-        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+    if (recorder_.isRecording() && !recordingSerial_.load()) {
+        emit sourceError(tr("当前 Session 未声明串口源，停止记录后才能加入"));
         return;
     }
-    network_.close();
-    remoteAgent_.close();
     replay_.close();
-    activeLiveSource_ = LiveSourceKind::Serial;
-    source_.close();
+    sendTarget_ = SendTarget::Serial;
+    sourceManager_.close(std::string(serialSourceKey));
     source_.setSettings(lastSettings_);
-    source_.open();
+    sourceManager_.open(std::string(serialSourceKey));
 }
 
 void SerialSession::connectNetwork(lab::adapters::network::NetworkSettings settings) {
-    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::Network) {
-        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+    if (recorder_.isRecording() &&
+        (!recordingNetwork_.load() || !sameSettings(settings, lastNetworkSettings_))) {
+        emit sourceError(tr("当前 Session 未声明此网络配置，停止记录后才能更改"));
         return;
     }
-    source_.close();
-    remoteAgent_.close();
     replay_.close();
-    activeLiveSource_ = LiveSourceKind::Network;
+    sendTarget_ = SendTarget::Network;
+    sourceManager_.close(std::string(networkSourceKey));
     lastNetworkSettings_ = std::move(settings);
     networkConfigured_ = true;
     network_.setSettings(lastNetworkSettings_);
-    network_.open();
+    sourceManager_.open(std::string(networkSourceKey));
 }
 
 void SerialSession::disconnectNetwork() {
-    network_.close();
+    sourceManager_.close(std::string(networkSourceKey));
 }
 
 void SerialSession::reconnectNetwork() {
@@ -425,41 +432,35 @@ void SerialSession::reconnectNetwork() {
         emit sourceError(tr("请先配置并打开一次网络数据源"));
         return;
     }
-    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::Network) {
-        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+    if (recorder_.isRecording() && !recordingNetwork_.load()) {
+        emit sourceError(tr("当前 Session 未声明网络源，停止记录后才能加入"));
         return;
     }
-    source_.close();
-    remoteAgent_.close();
     replay_.close();
-    activeLiveSource_ = LiveSourceKind::Network;
-    network_.close();
+    sendTarget_ = SendTarget::Network;
+    sourceManager_.close(std::string(networkSourceKey));
     network_.setSettings(lastNetworkSettings_);
-    network_.open();
+    sourceManager_.open(std::string(networkSourceKey));
 }
 
 void SerialSession::connectRemoteAgent(
     lab::adapters::remote_agent::RemoteAgentSettings settings) {
-    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::RemoteAgent) {
-        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+    if (recorder_.isRecording() &&
+        (!recordingRemoteAgent_.load() ||
+         !sameSettings(settings, lastRemoteAgentSettings_))) {
+        emit sourceError(tr("当前 Session 未声明此 Remote Agent 配置，停止记录后才能更改"));
         return;
     }
-    source_.close();
-    network_.close();
     replay_.close();
-    activeLiveSource_ = LiveSourceKind::RemoteAgent;
+    sourceManager_.close(std::string(remoteAgentSourceKey));
     lastRemoteAgentSettings_ = std::move(settings);
     remoteAgentConfigured_ = true;
-    {
-        std::scoped_lock lock(remoteFieldsMutex_);
-        remoteFieldNames_.clear();
-    }
     remoteAgent_.setSettings(lastRemoteAgentSettings_);
-    remoteAgent_.open();
+    sourceManager_.open(std::string(remoteAgentSourceKey));
 }
 
 void SerialSession::disconnectRemoteAgent() {
-    remoteAgent_.close();
+    sourceManager_.close(std::string(remoteAgentSourceKey));
 }
 
 void SerialSession::reconnectRemoteAgent() {
@@ -467,17 +468,22 @@ void SerialSession::reconnectRemoteAgent() {
         emit sourceError(tr("请先配置并连接一次 Remote Agent"));
         return;
     }
-    if (recorder_.isRecording() && activeLiveSource_ != LiveSourceKind::RemoteAgent) {
-        emit sourceError(tr("Session 记录期间不能切换数据源类型"));
+    if (recorder_.isRecording() && !recordingRemoteAgent_.load()) {
+        emit sourceError(tr("当前 Session 未声明 Remote Agent，停止记录后才能加入"));
         return;
     }
-    source_.close();
-    network_.close();
     replay_.close();
-    activeLiveSource_ = LiveSourceKind::RemoteAgent;
-    remoteAgent_.close();
+    sourceManager_.close(std::string(remoteAgentSourceKey));
     remoteAgent_.setSettings(lastRemoteAgentSettings_);
-    remoteAgent_.open();
+    sourceManager_.open(std::string(remoteAgentSourceKey));
+}
+
+void SerialSession::setSendTarget(int target) {
+    if (target == static_cast<int>(SendTarget::Serial)) {
+        sendTarget_ = SendTarget::Serial;
+    } else if (target == static_cast<int>(SendTarget::Network)) {
+        sendTarget_ = SendTarget::Network;
+    }
 }
 
 void SerialSession::requestRemoteTopics() {
@@ -503,13 +509,10 @@ void SerialSession::unsubscribeRemoteTopic(
 void SerialSession::sendBytes(const QByteArray& bytes) {
     const auto first = reinterpret_cast<const std::uint8_t*>(bytes.constData());
     const auto data = std::span(first, static_cast<std::size_t>(bytes.size()));
-    if (activeLiveSource_ == LiveSourceKind::RemoteAgent) {
-        emit sourceError(tr("Remote Agent 不接受原始字节发送，请使用 Topic 订阅控制"));
-        return;
-    }
-    const auto accepted = activeLiveSource_ == LiveSourceKind::Network
-                              ? network_.write(data)
-                              : source_.write(data);
+    const auto key = sendTarget_ == SendTarget::Network
+                         ? std::string(networkSourceKey)
+                         : std::string(serialSourceKey);
+    const auto accepted = sourceManager_.write(key, data);
     if (!accepted) {
         emit sourceError(tr("发送失败：当前数据源未连接或写入未被接受"));
     }
@@ -524,6 +527,10 @@ void SerialSession::setCsvFields(const QStringList& fields) {
     activeCsvFields_ = names;
     processing_.setFieldNames(std::move(names));
     timeSeries_.clear();
+    {
+        std::scoped_lock lock(liveFieldsMutex_);
+        liveFieldNames_.clear();
+    }
 }
 
 void SerialSession::loadProtocolFile(const QString& path) {
@@ -559,6 +566,10 @@ void SerialSession::loadProtocolFile(const QString& path) {
     processing_.setProtocolDefinition(*result.definition);
     timeSeries_.clear();
     {
+        std::scoped_lock lock(liveFieldsMutex_);
+        liveFieldNames_.clear();
+    }
+    {
         std::scoped_lock lock(protocolQueueMutex_);
         protocolQueue_.clear();
     }
@@ -567,7 +578,7 @@ void SerialSession::loadProtocolFile(const QString& path) {
     recorder_.updateProtocolSnapshot(
         activeProtocolName_, activeProtocolJson_, lab::core::nowTimestampNs());
     recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                            activeSourceId(),
+                            "lab_debugger",
                             "info",
                             "protocol",
                             "Protocol loaded: " + activeProtocolName_,
@@ -584,7 +595,7 @@ void SerialSession::clearProtocol() {
     activeProtocolName_.clear();
     activeProtocolJson_.clear();
     recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                            activeSourceId(),
+                            "lab_debugger",
                             "info",
                             "protocol",
                             "Protocol disabled",
@@ -597,21 +608,22 @@ bool SerialSession::startSession(const QString& directory) {
         emit recordingChanged(false, tr("回放模式下不能开始新的实时 Session 记录"));
         return false;
     }
-    if ((activeLiveSource_ == LiveSourceKind::Serial && lastSettings_.portName.empty()) ||
-        (activeLiveSource_ == LiveSourceKind::Network && !networkConfigured_) ||
-        (activeLiveSource_ == LiveSourceKind::RemoteAgent && !remoteAgentConfigured_)) {
-        emit recordingChanged(false, tr("请先配置并至少连接一次实时数据源"));
+    const auto serialOpen = sourceManager_.isOpen(std::string(serialSourceKey));
+    const auto networkOpen = sourceManager_.isOpen(std::string(networkSourceKey));
+    const auto remoteAgentOpen = sourceManager_.isOpen(std::string(remoteAgentSourceKey));
+    if (!serialOpen && !networkOpen && !remoteAgentOpen) {
+        emit recordingChanged(false, tr("请先连接至少一个实时数据源"));
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.14.0";
+    options.softwareVersion = "0.15.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
     options.protocolName = activeProtocolName_;
     options.protocolJson = activeProtocolJson_;
     options.csvFields = activeCsvFields_;
-    if (activeLiveSource_ == LiveSourceKind::Serial) {
+    if (serialOpen) {
         options.sources.push_back({
             source_.sourceId(),
             "serial",
@@ -622,7 +634,8 @@ bool SerialSession::startSession(const QString& directory) {
              {"stop_bits", std::to_string(static_cast<int>(lastSettings_.stopBits))},
              {"parity", std::to_string(static_cast<int>(lastSettings_.parity))},
              {"flow_control", std::to_string(static_cast<int>(lastSettings_.flowControl))}}});
-    } else if (activeLiveSource_ == LiveSourceKind::Network) {
+    }
+    if (networkOpen) {
         options.sources.push_back({
             network_.sourceId(),
             lab::adapters::network::toString(lastNetworkSettings_.mode),
@@ -631,7 +644,8 @@ bool SerialSession::startSession(const QString& directory) {
              {"remote_port", std::to_string(lastNetworkSettings_.remotePort)},
              {"bind_address", lastNetworkSettings_.bindAddress},
              {"local_port", std::to_string(lastNetworkSettings_.localPort)}}});
-    } else {
+    }
+    if (remoteAgentOpen) {
         options.sources.push_back({
             remoteAgent_.sourceId(),
             "ros_remote_agent",
@@ -647,11 +661,21 @@ bool SerialSession::startSession(const QString& directory) {
               {"clock_sync_interval_ms", "2000"}}});
     }
 
+    const auto sourceCount = options.sources.size();
     bool result = false;
     {
         std::scoped_lock routeLock(routingMutex_);
+        processing_.flush();
+        recordingSerial_.store(serialOpen);
+        recordingNetwork_.store(networkOpen);
+        recordingRemoteAgent_.store(remoteAgentOpen);
         result = recorder_.start(
             std::filesystem::path(directory.toStdWString()), std::move(options));
+        if (!result) {
+            recordingSerial_.store(false);
+            recordingNetwork_.store(false);
+            recordingRemoteAgent_.store(false);
+        }
     }
     const auto message = result
                              ? tr("Session 记录已开始：%1").arg(directory)
@@ -660,10 +684,11 @@ bool SerialSession::startSession(const QString& directory) {
     emit recordingChanged(result, message);
     if (result) {
         recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                activeSourceId(),
+                                "lab_debugger",
                                 "info",
                                 "session",
-                                "Session recording started",
+                                "Session recording started with " +
+                                    std::to_string(sourceCount) + " live sources",
                                 0});
     }
     return result;
@@ -677,12 +702,15 @@ void SerialSession::stopSession() {
         std::scoped_lock routeLock(routingMutex_);
         processing_.flush();
         recorder_.enqueueEvent({lab::core::nowTimestampNs(),
-                                activeSourceId(),
+                                "lab_debugger",
                                 "info",
                                 "session",
                                 "Session recording stopped",
                                 0});
         recorder_.stop();
+        recordingSerial_.store(false);
+        recordingNetwork_.store(false);
+        recordingRemoteAgent_.store(false);
     }
     emit recordingChanged(false, tr("Session 记录已安全结束"));
 }
@@ -704,9 +732,7 @@ bool SerialSession::openReplaySession(const QString& directory) {
         return false;
     }
 
-    source_.close();
-    network_.close();
-    remoteAgent_.close();
+    sourceManager_.closeAll();
     replay_.close();
     {
         std::scoped_lock routeLock(routingMutex_);
@@ -717,6 +743,10 @@ bool SerialSession::openReplaySession(const QString& directory) {
     {
         std::scoped_lock lock(uiQueueMutex_);
         uiQueue_.clear();
+    }
+    {
+        std::scoped_lock lock(liveFieldsMutex_);
+        liveFieldNames_.clear();
     }
     const auto protocolPath = QDir(sessionDirectory).filePath(QStringLiteral("protocol/initial.json"));
     bool rawOnly = false;
@@ -939,7 +969,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.14.0";
+            options.softwareVersion = "0.15.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {
@@ -1156,13 +1186,8 @@ void SerialSession::drainUiQueue() {
                              replayStatus.lastTimestamp,
                              replayStatus.currentTimestamp);
 
-    const auto stats = replayStatus.open
-                           ? replay_.statistics()
-                           : activeLiveSource_ == LiveSourceKind::Network
-                                 ? network_.statistics()
-                                 : activeLiveSource_ == LiveSourceKind::RemoteAgent
-                                       ? remoteAgent_.statistics()
-                                       : source_.statistics();
+    const auto stats = replayStatus.open ? replay_.statistics()
+                                         : sourceManager_.aggregateStatistics();
     emit statisticsChanged(
         stats.receivedBytes,
         stats.transmittedBytes,

@@ -62,7 +62,7 @@ GUI thread                 只处理交互、33 ms 批量终端刷新和绘图�
 Serial QThread             QSerialPort 的 open/read/write/error 生命周期
 Network QThread            QTcpSocket/QTcpServer/QUdpSocket 生命周期
 Remote Agent QThread       QTcpSocket、握手、帧解码、订阅控制、心跳和时钟测量
-Processing std::jthread    CSV/二进制帧解析、TimeSeries 追加、FrameEvent
+Processing std::jthread    按 sourceId 隔离的 CSV/二进制帧解析、TimeSeries 追加、FrameEvent
 Recorder std::jthread      有序写入 RX/TX 原始记录
 Session std::jthread       异步写入数值、结构化帧、事件和配置快照
 rosbag2 std::jthread       Qt Sql 前向读取、分卷时间归并与同步 RawLogWriter
@@ -70,7 +70,7 @@ rosbag2 std::jthread       Qt Sql 前向读取、分卷时间归并与同步 Raw
 
 暂停终端或曲线只影响绘制，不会停止串口、处理线程或记录线程。`TimeSeriesStore` 使用共享锁保护；绘图得到有序快照，不持有内部存储引用。
 
-当前处理和记录队列选择可靠性优先，不在压力下静默丢弃。停止 Session 时，数据源路由短暂进入屏障，等待处理队列变空后再结束记录，确保停止点前的原始数据和解析值一致。队列深度会暴露为指标；后续持续压力策略是背压告警、分块落盘和可配置内存上限，而不是无提示截断。
+当前处理和记录队列选择可靠性优先，不在压力下静默丢弃。`SourceManager` 用稳定 key 管理每个 `IDataSource`，聚合统计并把数据扇出到同一记录器；`ProcessingPipeline` 则为每个 `sourceId` 保留独立半行/半帧状态，任意交错到达都不会跨设备拼接。数值序列使用“`sourceId.字段`”命名，因此不同设备的同名字段不会混成一条曲线。停止 Session 时，数据源路由短暂进入屏障，等待处理队列变空后再结束记录，确保停止点前的原始数据和解析值一致。队列深度会暴露为指标；后续持续压力策略是背压告警、分块落盘和可配置内存上限，而不是无提示截断。
 
 `ReplaySource` 实现同一个 `IDataSource` 接口，按原始接收时间调度 `DataChunk`，所以回放复用 Monitor、Protocol 和 Plot 全链路。跳转会暂停回放、等待处理队列空闲、重置流解析器后再切换索引位置。
 
@@ -105,11 +105,12 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 
 ## 6. 生命周期与多数据源
 
-应用层将演进为 `SourceManager`：管理多个 `IDataSource`、独立状态和计数，并把数据扇出到 Recorder、Parser 与 Global Timeline。当前 UI 可在 `SerialSource`、`NetworkSource` 与 `RemoteAgentSource` 之间切换；它们和 `ReplaySource` 复用统一的显示、统计和记录边界。核心事件和记录格式均带 `sourceId`，但“同时启用多个实时源”仍需 SourceManager 阶段完成。
+应用层已使用 `SourceManager` 同时管理 `SerialSource`、`NetworkSource` 与 `RemoteAgentSource`：三者可以独立连接/断开，终端按 `sourceId` 区分，流解析器互相隔离，状态栏显示聚合流量，Session 在开始时冻结并记录全部已连接源。记录期间允许已声明源按原配置断开和重连，但拒绝加入新配置，避免原始记录出现元数据未声明的来源。`ReplaySource` 与实时源互斥，打开回放会先关闭全部实时源并复用相同的显示、解析和曲线边界。
 
 ## 7. 当前已知边界
 
-- 当前最小绘图是自绘 Qt Widget，不依赖 Qt Charts；适合 10~20 条常规曲线，但尚未实现高密度 LTTB/min-max downsampling。
+- 当前绘图是自绘 Qt Widget，不依赖 Qt Charts；已使用桶内 min/max 降采样保留尖峰，适合 10~20 条常规曲线，但尚未实现 LTTB、GPU 加速和超高密度交互。
+- 当前 UI 各提供一个串口、一个网络端点和一个 Remote Agent 实例；核心管理器可扩展更多实例，但多串口/多网络端点的动态增删界面尚未实现。CSV 字段与二进制协议定义目前由所有本地字节流共享，解析缓存虽按来源隔离，但每个来源使用不同协议配置仍需后续配置层支持。
 - 回放索引当前在打开文件时同步建立，每条原始记录占 16 字节索引内存；超长 Session 的后台建索引与稀疏缓存仍待实现。
 - rosbag2 当前支持 SQLite3/CDR、Topic 过滤、一组常见消息的离线结构化，以及 `metadata.yaml` 全文保存和稳定字段校验；MCAP、压缩存储、通用 YAML 编辑、动态类型描述及更多消息仍待实现。
 - CSV 解析器只处理换行分隔的数值；二进制帧、单位和校验由独立协议引擎处理。

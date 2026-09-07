@@ -53,7 +53,12 @@ void createSession(const std::filesystem::path& directory, bool rawOnly) {
     chunk.receiveTimestamp = 100;
     chunk.sequence = 1;
     chunk.payload = {'4', '2', '\n'};
-    require(writer.write(chunk) && writer.close(), "raw fixture is written");
+    require(writer.write(chunk), "first raw fixture source is written");
+    chunk.sourceId = "routing-other";
+    chunk.sourceTimestamp = 200;
+    chunk.receiveTimestamp = 200;
+    chunk.payload = {'7', '\n'};
+    require(writer.write(chunk) && writer.close(), "multi-source raw fixture is written");
 
     QFile fields(fromPath(directory / "configuration" / "csv_fields.txt"));
     require(fields.open(QIODevice::WriteOnly | QIODevice::Truncate),
@@ -177,8 +182,14 @@ int main(int argc, char* argv[]) {
         require(session.openReplaySession(fromPath(normal)), "normal Session opens");
         require(!openedRawOnly, "normal Session is not marked raw-only");
         require(waitForReplayEnd(session), "normal replay reaches its end");
-        require(session.timeSeries().snapshot("value").size() == 1,
-                "normal replay routes CSV text into the processing pipeline");
+        const auto firstReplaySeries =
+            session.timeSeries().snapshot("routing-test.value");
+        const auto secondReplaySeries =
+            session.timeSeries().snapshot("routing-other.value");
+        require(firstReplaySeries.size() == 1 && secondReplaySeries.size() == 1 &&
+                    firstReplaySeries.front().value == 42.0 &&
+                    secondReplaySeries.front().value == 7.0,
+                "normal replay keeps same-named fields from different sources separate");
 
         require(session.openReplaySession(fromPath(rawOnly)), "raw-only Session opens");
         require(openedRawOnly, "raw-only metadata reaches the application layer");

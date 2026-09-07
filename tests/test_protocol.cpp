@@ -306,6 +306,43 @@ void testProtocolProcessingPipeline() {
     require(stats && stats->decodedFrames == 1, "pipeline exposes parser statistics");
 }
 
+void testProtocolPipelineSeparatesSources() {
+    const auto loaded = lab::core::loadProtocolJson(fixedProtocolJson());
+    require(loaded.success(), "multi-source pipeline protocol loads");
+
+    lab::core::TimeSeriesStore store(100);
+    lab::core::ProcessingPipeline pipeline(store);
+    pipeline.setQualifyFieldNames(true);
+    pipeline.setProtocolDefinition(*loaded.definition);
+    const auto frame = fixedFrame();
+    const auto push = [&pipeline](std::string source,
+                                  std::vector<std::uint8_t> bytes,
+                                  std::uint64_t sequence) {
+        pipeline.push({std::move(source),
+                       1'000'000 + static_cast<lab::core::Timestamp>(sequence),
+                       2'000'000 + static_cast<lab::core::Timestamp>(sequence),
+                       sequence,
+                       lab::core::Direction::Rx,
+                       std::move(bytes)});
+    };
+
+    push("serial:COM5", {frame.begin(), frame.begin() + 5}, 1);
+    push("udp:127.0.0.1:9000", frame, 1);
+    push("serial:COM5", {frame.begin() + 5, frame.end()}, 2);
+    pipeline.flush();
+
+    const auto serial = store.snapshot("serial:COM5.speed");
+    const auto network = store.snapshot("udp:127.0.0.1:9000.speed");
+    require(serial.size() == 1 && network.size() == 1 &&
+                std::abs(serial.front().value - 1.5) < 1e-6 &&
+                std::abs(network.front().value - 1.5) < 1e-6,
+            "interleaved binary fragments decode into independent source series");
+    const auto statistics = pipeline.protocolStatistics();
+    require(statistics && statistics->decodedFrames == 2 &&
+                statistics->checksumErrors == 0 && statistics->discardedBytes == 0,
+            "protocol statistics aggregate isolated parsers without cross-source errors");
+}
+
 void testInvalidDefinitions() {
     auto loaded = lab::core::loadProtocolJson("{ invalid json }");
     require(!loaded.success() && loaded.issues[0].code == "json.syntax", "syntax error");
@@ -339,5 +376,6 @@ void runProtocolTests() {
     testDynamicLengthAndLengthError();
     testAllFieldTypesAndByteArray();
     testProtocolProcessingPipeline();
+    testProtocolPipelineSeparatesSources();
     testInvalidDefinitions();
 }

@@ -6,17 +6,20 @@
 #include "lab/core/replay_source.hpp"
 #include "lab/core/ring_buffer.hpp"
 #include "lab/core/session_recorder.hpp"
+#include "lab/core/source_manager.hpp"
 #include "lab/core/time_series_store.hpp"
 
 #include <chrono>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <condition_variable>
 #include <mutex>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -28,6 +31,13 @@ void require(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+std::filesystem::path uniqueTempPath(const std::string& stem) {
+    std::random_device random;
+    const auto token = (static_cast<std::uint64_t>(random()) << 32U) | random();
+    return std::filesystem::temp_directory_path() /
+           (stem + "-" + std::to_string(token));
 }
 
 void testRingBufferWrapAround() {
@@ -120,6 +130,50 @@ void testMockDataSource() {
     source.close();
 }
 
+void testSourceManager() {
+    lab::core::MockDataSource serial("serial:COM5");
+    lab::core::MockDataSource network("udp:127.0.0.1:9000");
+    lab::core::SourceManager manager;
+    require(manager.add("serial", serial), "source manager accepts serial source");
+    require(manager.add("network", network), "source manager accepts network source");
+    require(!manager.add("serial", network), "source manager rejects duplicate stable key");
+    require(!manager.add("serial-alias", serial),
+            "source manager rejects registering one instance under multiple keys");
+
+    std::vector<std::string> receivedKeys;
+    std::vector<std::string> stateKeys;
+    manager.setCallbacks({
+        [&receivedKeys](const std::string& key, const lab::core::DataChunk&) {
+            receivedKeys.push_back(key);
+        },
+        [&stateKeys](const std::string& key,
+                     const std::string&,
+                     lab::core::SourceState) { stateKeys.push_back(key); },
+        {},
+        {}});
+
+    require(manager.open("serial") && manager.open("network"),
+            "source manager opens multiple sources simultaneously");
+    serial.feed(std::vector<std::uint8_t>{1, 2, 3}, 10);
+    network.feed(std::vector<std::uint8_t>{4, 5}, 20);
+    require(manager.write("network", std::vector<std::uint8_t>{6}),
+            "source manager routes writes to the selected source");
+    require(receivedKeys == std::vector<std::string>({"serial", "network", "network"}),
+            "source manager preserves the stable source key for concurrent traffic");
+
+    const auto statistics = manager.aggregateStatistics();
+    require(statistics.receivedBytes == 5 && statistics.transmittedBytes == 1 &&
+                statistics.receivedChunks == 2 && statistics.transmittedChunks == 1,
+            "source manager aggregates traffic without losing per-source statistics");
+    const auto sources = manager.sources();
+    require(sources.size() == 2 && sources[0].key == "network" && sources[0].open &&
+                sources[1].key == "serial" && sources[1].open,
+            "source manager reports deterministic source snapshots");
+    manager.closeAll();
+    require(!serial.isOpen() && !network.isOpen() && stateKeys.size() == 8,
+            "source manager closes every managed source and forwards state transitions");
+}
+
 void testProcessingPipeline() {
     lab::core::TimeSeriesStore store(100);
     lab::core::ProcessingPipeline pipeline(store);
@@ -140,8 +194,42 @@ void testProcessingPipeline() {
     require(pipeline.pendingChunks() == 0, "pipeline flush handles non-RX chunks");
 }
 
+void testProcessingPipelineSeparatesSources() {
+    lab::core::TimeSeriesStore store(100);
+    lab::core::ProcessingPipeline pipeline(store);
+    pipeline.setFieldNames({"left", "right"});
+    pipeline.setQualifyFieldNames(true);
+
+    const auto push = [&pipeline](std::string source,
+                                  std::string bytes,
+                                  lab::core::Timestamp timestamp,
+                                  std::uint64_t sequence) {
+        pipeline.push({std::move(source),
+                       timestamp,
+                       timestamp + 1,
+                       sequence,
+                       lab::core::Direction::Rx,
+                       std::vector<std::uint8_t>(bytes.begin(), bytes.end())});
+    };
+    push("serial:COM5", "1,", 10, 1);
+    push("udp:127.0.0.1:9000", "10,20\n", 20, 1);
+    push("serial:COM5", "2\n", 30, 2);
+    pipeline.flush();
+
+    const auto serialLeft = store.snapshot("serial:COM5.left");
+    const auto serialRight = store.snapshot("serial:COM5.right");
+    const auto networkLeft = store.snapshot("udp:127.0.0.1:9000.left");
+    const auto networkRight = store.snapshot("udp:127.0.0.1:9000.right");
+    require(serialLeft.size() == 1 && serialRight.size() == 1 &&
+                networkLeft.size() == 1 && networkRight.size() == 1,
+            "interleaved sources produce independently named series");
+    require(networkLeft.front().value == 10.0 && networkRight.front().value == 20.0 &&
+                serialLeft.front().value == 1.0 && serialRight.front().value == 2.0,
+            "partial rows never combine bytes from different sources");
+}
+
 void testRawRecorder() {
-    auto path = std::filesystem::temp_directory_path() / "lab_debugger_test.ldraw";
+    const auto path = uniqueTempPath("lab_debugger_test") += ".ldraw";
     lab::core::RawLogRecorder recorder;
     require(recorder.start(path), "recorder starts");
     recorder.enqueue({
@@ -160,8 +248,7 @@ void testRawRecorder() {
 }
 
 void testTruncatedRawLogRecovery() {
-    const auto path = std::filesystem::temp_directory_path() /
-                      "lab_debugger_truncated_test.ldraw";
+    const auto path = uniqueTempPath("lab_debugger_truncated_test") += ".ldraw";
     lab::core::RawLogRecorder recorder;
     require(recorder.start(path), "truncated test recorder starts");
     recorder.enqueue({"mock", 10, 11, 1, lab::core::Direction::Rx, {1, 2, 3}});
@@ -193,8 +280,7 @@ void testTruncatedRawLogRecovery() {
 }
 
 void testSessionRecorder() {
-    const auto directory = std::filesystem::temp_directory_path() /
-                           "lab_debugger_session_test";
+    const auto directory = uniqueTempPath("lab_debugger_session_test");
     std::error_code cleanupError;
     std::filesystem::remove_all(directory, cleanupError);
 
@@ -243,12 +329,14 @@ void testSessionRecorder() {
             "session metadata contains sample count");
     require(metadataText.find("\"frames\": 1") != std::string::npos,
             "session metadata contains frame count");
+    metadata.close();
 
     std::ifstream values(directory / "values.csv");
     const std::string valuesText{
         std::istreambuf_iterator<char>(values), std::istreambuf_iterator<char>()};
     require(valuesText.find("voltage,24.5,V") != std::string::npos,
             "decoded sample is recorded");
+    values.close();
 
     lab::core::SessionRecorder overwriteGuard;
     require(!overwriteGuard.start(directory, options),
@@ -258,8 +346,7 @@ void testSessionRecorder() {
 }
 
 void testReplaySourceControls() {
-    const auto path = std::filesystem::temp_directory_path() /
-                      "lab_debugger_replay_test.ldraw";
+    const auto path = uniqueTempPath("lab_debugger_replay_test") += ".ldraw";
     lab::core::RawLogRecorder recorder;
     require(recorder.start(path), "replay fixture recorder starts");
     recorder.enqueue({"serial:COM1", 10, 1'000'000'000, 1, lab::core::Direction::Rx, {1}});
@@ -343,7 +430,9 @@ int main() {
         testTimeSeriesAndStatistics();
         testCsvSplitChunksAndInvalidLine();
         testMockDataSource();
+        testSourceManager();
         testProcessingPipeline();
+        testProcessingPipelineSeparatesSources();
         testRawRecorder();
         testTruncatedRawLogRecovery();
         testSessionRecorder();

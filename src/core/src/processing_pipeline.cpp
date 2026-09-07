@@ -1,6 +1,25 @@
 #include "lab/core/processing_pipeline.hpp"
 
+#include <limits>
+
 namespace lab::core {
+namespace {
+
+void saturatingAdd(std::uint64_t& destination, std::uint64_t value) noexcept {
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    destination = value > maximum - destination ? maximum : destination + value;
+}
+
+}  // namespace
+
+ProcessingPipeline::SourceParsers::SourceParsers(
+    std::vector<std::string> fieldNames,
+    const std::optional<ProtocolDefinition>& definition)
+    : csv(std::move(fieldNames)) {
+    if (definition) {
+        frame = std::make_unique<FrameStreamParser>(*definition);
+    }
+}
 
 ProcessingPipeline::ProcessingPipeline(TimeSeriesStore& store)
     : store_(store), worker_([this](std::stop_token token) { run(token); }) {}
@@ -20,8 +39,15 @@ void ProcessingPipeline::push(DataChunk chunk) {
 
 void ProcessingPipeline::setFieldNames(std::vector<std::string> names) {
     std::scoped_lock lock(parserMutex_);
-    parser_.setFieldNames(std::move(names));
-    parser_.reset();
+    fieldNames_ = std::move(names);
+    sourceParsers_.clear();
+}
+
+void ProcessingPipeline::setQualifyFieldNames(bool enabled) {
+    std::scoped_lock lock(parserMutex_, queueMutex_);
+    queue_.clear();
+    sourceParsers_.clear();
+    qualifyFieldNames_ = enabled;
 }
 
 void ProcessingPipeline::setSampleHandler(SampleHandler handler) {
@@ -32,25 +58,20 @@ void ProcessingPipeline::setSampleHandler(SampleHandler handler) {
 void ProcessingPipeline::setProtocolDefinition(ProtocolDefinition definition) {
     std::scoped_lock lock(parserMutex_, queueMutex_);
     queue_.clear();
-    frameParser_ = std::make_unique<FrameStreamParser>(std::move(definition));
-    parser_.reset();
-    csvEnabled_ = false;
+    protocolDefinition_ = std::move(definition);
+    sourceParsers_.clear();
 }
 
 void ProcessingPipeline::clearProtocolDefinition() {
     std::scoped_lock lock(parserMutex_, queueMutex_);
     queue_.clear();
-    frameParser_.reset();
-    parser_.reset();
-    csvEnabled_ = true;
+    protocolDefinition_.reset();
+    sourceParsers_.clear();
 }
 
 void ProcessingPipeline::resetParsers() {
     std::scoped_lock lock(parserMutex_);
-    parser_.reset();
-    if (frameParser_) {
-        frameParser_->reset();
-    }
+    sourceParsers_.clear();
 }
 
 void ProcessingPipeline::setFrameHandler(FrameHandler handler) {
@@ -60,15 +81,28 @@ void ProcessingPipeline::setFrameHandler(FrameHandler handler) {
 
 bool ProcessingPipeline::protocolEnabled() const {
     std::scoped_lock lock(parserMutex_);
-    return frameParser_ != nullptr;
+    return protocolDefinition_.has_value();
 }
 
 std::optional<FrameParserStatistics> ProcessingPipeline::protocolStatistics() const {
     std::scoped_lock lock(parserMutex_);
-    if (!frameParser_) {
+    if (!protocolDefinition_) {
         return std::nullopt;
     }
-    return frameParser_->statistics();
+    FrameParserStatistics result;
+    for (const auto& [sourceId, parsers] : sourceParsers_) {
+        static_cast<void>(sourceId);
+        if (!parsers.frame) {
+            continue;
+        }
+        const auto statistics = parsers.frame->statistics();
+        saturatingAdd(result.decodedFrames, statistics.decodedFrames);
+        saturatingAdd(result.discardedBytes, statistics.discardedBytes);
+        saturatingAdd(result.checksumErrors, statistics.checksumErrors);
+        saturatingAdd(result.lengthErrors, statistics.lengthErrors);
+        saturatingAdd(result.decodeErrors, statistics.decodeErrors);
+    }
+    return result;
 }
 
 std::size_t ProcessingPipeline::pendingChunks() const {
@@ -109,17 +143,27 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
 
         std::vector<DataSample> samples;
         std::vector<FrameEvent> frameEvents;
+        bool qualifyFieldNames = false;
         {
             std::scoped_lock lock(parserMutex_);
-            if (csvEnabled_) {
-                samples = parser_.consume(
+            qualifyFieldNames = qualifyFieldNames_;
+            auto [parsers, inserted] = sourceParsers_.try_emplace(
+                chunk.sourceId, fieldNames_, protocolDefinition_);
+            static_cast<void>(inserted);
+            if (!protocolDefinition_) {
+                samples = parsers->second.csv.consume(
                     chunk.payload,
                     chunk.sourceTimestamp,
                     chunk.sourceId,
                     chunk.sequence);
+                if (qualifyFieldNames) {
+                    for (auto& sample : samples) {
+                        sample.field = chunk.sourceId + "." + sample.field;
+                    }
+                }
             }
-            if (frameParser_) {
-                frameEvents = frameParser_->consume(chunk);
+            if (parsers->second.frame) {
+                frameEvents = parsers->second.frame->consume(chunk);
             }
         }
 
@@ -144,7 +188,8 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
                     DataSample sample{
                         event.sourceTimestamp,
                         event.sourceId,
-                        field.name,
+                        qualifyFieldNames ? event.sourceId + "." + field.name
+                                          : field.name,
                         *field.numericValue,
                         field.unit,
                         event.sequence};

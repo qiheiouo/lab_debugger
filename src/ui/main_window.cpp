@@ -82,19 +82,25 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             statusBar()->showMessage(tr("请先选择串口"), 3000);
             return;
         }
+        sendPanel_->setTarget(0);
         session_.connectSerial(configuration);
     });
     connect(serialPanel_, &SerialPanel::disconnectRequested,
             &session_, &lab::app::SerialSession::disconnectSerial);
-    connect(serialPanel_, &SerialPanel::reconnectRequested,
-            &session_, &lab::app::SerialSession::reconnectSerial);
+    connect(serialPanel_, &SerialPanel::reconnectRequested, this, [this] {
+        sendPanel_->setTarget(0);
+        session_.reconnectSerial();
+    });
     connect(networkPanel_, &NetworkPanel::connectRequested, this, [this] {
+        sendPanel_->setTarget(1);
         session_.connectNetwork(networkPanel_->settings());
     });
     connect(networkPanel_, &NetworkPanel::disconnectRequested,
             &session_, &lab::app::SerialSession::disconnectNetwork);
-    connect(networkPanel_, &NetworkPanel::reconnectRequested,
-            &session_, &lab::app::SerialSession::reconnectNetwork);
+    connect(networkPanel_, &NetworkPanel::reconnectRequested, this, [this] {
+        sendPanel_->setTarget(1);
+        session_.reconnectNetwork();
+    });
     connect(remoteAgentPanel_, &RemoteAgentPanel::connectRequested, this, [this] {
         session_.connectRemoteAgent(remoteAgentPanel_->settings());
     });
@@ -110,6 +116,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::unsubscribeRemoteTopic);
     connect(sendPanel_, &SendPanel::sendRequested,
             &session_, &lab::app::SerialSession::sendBytes);
+    connect(sendPanel_, &SendPanel::targetChanged,
+            &session_, &lab::app::SerialSession::setSendTarget);
     connect(plot_, &PlotWidget::fieldsChanged,
             &session_, &lab::app::SerialSession::setCsvFields);
     connect(protocol_, &ProtocolWidget::loadProtocolRequested,
@@ -150,7 +158,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             remoteAgentPanel_, &RemoteAgentPanel::setTopics);
     connect(&session_, &lab::app::SerialSession::remoteTopicFieldsChanged,
             remoteAgentPanel_, &RemoteAgentPanel::setTopicFields);
-    connect(&session_, &lab::app::SerialSession::remoteFieldsDiscovered,
+    connect(&session_, &lab::app::SerialSession::liveFieldsDiscovered,
             plot_, &PlotWidget::useExternalFields);
     connect(&session_, &lab::app::SerialSession::replayFieldsDiscovered,
             plot_, &PlotWidget::useExternalFields);
@@ -210,10 +218,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             this,
             tr("线程与数据状态"),
             tr("串口/网络 I/O、CSV/二进制协议处理、原始记录分别运行在独立线程。\n"
+               "串口、网络和 ROS Agent 可同时连接；各来源的半行/半帧状态互相隔离。\n"
                "GUI 每 33 ms 批量刷新；暂停显示不会暂停采集或记录。\n"
                "所有数据均携带 sourceId、源时间、接收时间和序号。"));
     });
     session_.setCsvFields(plot_->fieldNames());
+    session_.setSendTarget(sendPanel_->target());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {

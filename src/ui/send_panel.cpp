@@ -13,6 +13,10 @@
 namespace lab::ui {
 
 SendPanel::SendPanel(QWidget* parent) : QWidget(parent) {
+    target_ = new QComboBox(this);
+    target_->addItem(tr("串口"), 0);
+    target_->addItem(tr("网络"), 1);
+
     mode_ = new QComboBox(this);
     mode_->addItems({QStringLiteral("ASCII"), QStringLiteral("HEX")});
 
@@ -46,7 +50,8 @@ SendPanel::SendPanel(QWidget* parent) : QWidget(parent) {
     timer_->setTimerType(Qt::PreciseTimer);
 
     auto* firstRow = new QHBoxLayout;
-    firstRow->addWidget(new QLabel(tr("发送"), this));
+    firstRow->addWidget(new QLabel(tr("发送到"), this));
+    firstRow->addWidget(target_);
     firstRow->addWidget(mode_);
     firstRow->addWidget(input_, 1);
     firstRow->addWidget(lineEnding_);
@@ -66,6 +71,7 @@ SendPanel::SendPanel(QWidget* parent) : QWidget(parent) {
     layout->addLayout(secondRow);
 
     QSettings settings;
+    setTarget(settings.value(QStringLiteral("send/target"), 0).toInt());
     input_->addItems(settings.value(QStringLiteral("send/history")).toStringList());
     for (const auto& favorite : settings.value(QStringLiteral("send/favorites")).toStringList()) {
         favorites_->addItem(favorite);
@@ -77,11 +83,27 @@ SendPanel::SendPanel(QWidget* parent) : QWidget(parent) {
     connect(periodic_, &QCheckBox::toggled, this, &SendPanel::updateTimer);
     connect(periodMs_, &QSpinBox::valueChanged, this, &SendPanel::updateTimer);
     connect(timer_, &QTimer::timeout, this, &SendPanel::sendNow);
+    connect(target_, &QComboBox::currentIndexChanged, this, [this](int) {
+        const auto selected = target();
+        QSettings().setValue(QStringLiteral("send/target"), selected);
+        emit targetChanged(selected);
+    });
     connect(favorites_, &QComboBox::activated, this, [this](int index) {
         if (index > 0) {
             input_->setCurrentText(favorites_->itemText(index));
         }
     });
+}
+
+int SendPanel::target() const {
+    return target_->currentData().toInt();
+}
+
+void SendPanel::setTarget(int target) {
+    const auto index = target_->findData(target);
+    if (index >= 0) {
+        target_->setCurrentIndex(index);
+    }
 }
 
 void SendPanel::sendNow() {

@@ -1,9 +1,10 @@
 # Lab Debugger / 实验室调试助手
 
-Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路、Phase 5 网络数据源、Phase 6 Remote ROS Agent 主链路，并已进入 Phase 7 rosbag2 离线分析：
+Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路、Phase 5 网络数据源、Phase 6 Remote ROS Agent 主链路、Phase 7 rosbag2 离线分析，并已进入 Phase 8 多源同步基础建设：
 
 - 与 Qt UI 解耦的 C++20 数据核心；
-- 多数据源友好的 `IDataSource` 抽象；
+- `IDataSource` 与正式 `SourceManager`，串口、网络和 ROS Agent 可同时连接、统计和记录；
+- CSV/二进制流解析状态按 `sourceId` 隔离，同名字段以“来源.字段”形成独立曲线；
 - 独立线程的串口 I/O、文本解析和原始数据写盘；
 - Windows 串口枚举、连接、收发、ASCII/HEX、定时发送；
 - RX/TX 时间戳终端、暂停显示、保存、复制；
@@ -56,7 +57,7 @@ cmake --install build --config Release --prefix dist/LabDebugger
 2. 点击“连接”，在“终端”页选择 ASCII 或 HEX 观察收发。
 3. STM32 以换行结尾发送 `1.24,3.56,23.80\n`。
 4. 在“实时曲线”页把字段设为 `speed,current,voltage` 并点击“应用”。
-5. 勾选需要观察的字段；曲线以 30 FPS 刷新，采集和解析仍按原始速率进行。
+5. 收到数据后，显示列表会出现类似 `serial:COM5.speed` 的来源限定字段；勾选需要观察的字段。曲线以 30 FPS 刷新，采集和解析仍按原始速率进行。
 
 若 STM32 输出二进制帧，打开“协议解析”页并加载
 `examples/protocols/stm32_status.json`。有效帧、丢弃字节和校验错误会分别统计，
@@ -78,7 +79,7 @@ cmake --install build --config Release --prefix dist/LabDebugger
 - TCP 服务端填写监听地址和本地端口；当前保留一个活动客户端，新连接会替换旧连接；
 - UDP 同时填写本地绑定地址/端口和远端数字 IP/端口；每个收到的数据报形成一个独立数据块。
 
-网络 RX/TX 会进入和串口相同的终端、CSV/二进制协议、曲线及 Session。更完整的模式语义和限制见 [TCP/UDP 使用说明](docs/NETWORK.md)。
+网络 RX/TX 会进入和串口相同的终端、CSV/二进制协议、曲线及 Session。串口、网络和 ROS Agent 可以同时保持连接；发送区的“发送到”明确选择原始字节发往串口或网络。开始 Session 时会一次性记录当前所有已连接实时源，记录期间可以断开并按原配置重连，但不能悄悄加入未声明的新配置。更完整的模式语义和限制见 [TCP/UDP 使用说明](docs/NETWORK.md)。
 
 ## Remote ROS Agent 客户端
 
