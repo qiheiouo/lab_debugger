@@ -13,7 +13,7 @@ int main(int argc, char* argv[]) {
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("LabDebugger"));
     QCoreApplication::setApplicationName(QStringLiteral("Lab Debugger"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.15.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.16.0"));
 
     const auto dataDirectory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     QDir().mkpath(dataDirectory);

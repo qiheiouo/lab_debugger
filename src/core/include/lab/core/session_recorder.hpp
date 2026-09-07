@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lab/core/data_sample.hpp"
+#include "lab/core/derived_field_engine.hpp"
 #include "lab/core/frame_stream_parser.hpp"
 #include "lab/core/raw_log_recorder.hpp"
 
@@ -33,6 +34,7 @@ struct SessionStartOptions {
     std::string operatingSystem;
     std::vector<SessionSourceMetadata> sources;
     std::vector<std::string> csvFields;
+    std::vector<DerivedFieldDefinition> derivedFields;
     std::string protocolName;
     std::string protocolJson;
 };

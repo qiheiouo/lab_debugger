@@ -1,4 +1,5 @@
 #include "lab/core/csv_stream_parser.hpp"
+#include "lab/core/derived_field_engine.hpp"
 #include "lab/core/mock_data_source.hpp"
 #include "lab/core/processing_pipeline.hpp"
 #include "lab/core/raw_log_reader.hpp"
@@ -18,6 +19,7 @@
 #include <fstream>
 #include <iostream>
 #include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <stdexcept>
@@ -94,6 +96,81 @@ void testTimeSeriesAndStatistics() {
     const auto interpolated = analysisStore.interpolate("signal", 5);
     require(interpolated && std::abs(*interpolated - 50.0) < 1e-12,
             "linear interpolation");
+}
+
+void testDerivedFieldEngine() {
+    lab::core::DerivedFieldEngine engine;
+    const auto configured = engine.setDefinitions({
+        {"power", "voltage * current", "W"},
+        {"limited_power", "clamp(abs(power), 0, 1000)", "W"},
+        {"source_error", "`serial:COM5.target-yaw` - `serial:COM5.yaw`", "rad"}});
+    require(configured.success(), "safe derived expressions compile");
+
+    require(engine.consume({10, "serial:COM5", "voltage", 24.0, "V", 1}).empty(),
+            "derived output waits for every dependency");
+    const auto power = engine.consume(
+        {11, "serial:COM5", "current", 2.5, "A", 2});
+    require(power.size() == 2 && power[0].field == "power" &&
+                std::abs(power[0].value - 60.0) < 1e-12 &&
+                power[0].sourceId == "derived" && power[0].unit == "W" &&
+                power[1].field == "limited_power" && power[1].value == 60.0,
+            "derived fields evaluate in dependency order");
+
+    engine.resetValues();
+    require(engine.consume(
+                {14, "serial:COM5", "serial:COM5.voltage", 20.0, "V", 5}).empty(),
+            "unique suffix shorthand waits for the second qualified input");
+    const auto shorthand = engine.consume(
+        {15, "serial:COM5", "serial:COM5.current", 3.0, "A", 6});
+    require(shorthand.size() == 2 && shorthand.front().value == 60.0,
+            "simple variables resolve against one unique qualified source");
+    require(engine.consume(
+                {16, "udp:127.0.0.1:9000", "udp:127.0.0.1:9000.voltage", 10.0, {}, 1})
+                .empty(),
+            "a second matching source makes shorthand ambiguous instead of mixing values");
+
+    require(engine.consume({12, "serial:COM5", "target-yaw", 1.25, {}, 3}).empty(),
+            "quoted source-qualified dependency waits for its pair");
+    const auto error = engine.consume({13, "serial:COM5", "yaw", 0.5, {}, 4});
+    require(error.size() == 1 && error.front().field == "source_error" &&
+                std::abs(error.front().value - 0.75) < 1e-12,
+            "backtick variables support punctuation in source-qualified names");
+
+    const auto batchConfigured = engine.setDefinitions({
+        {"difference", "left - right", {}},
+        {"root", "sqrt(difference)", {}}});
+    require(batchConfigured.success(), "batch expressions compile");
+    const std::array<lab::core::DataSample, 2> batch{{
+        {20, "mock", "left", 25.0, {}, 1},
+        {20, "mock", "right", 9.0, {}, 1}}};
+    const auto batchOutput = engine.consumeBatch(batch);
+    require(batchOutput.size() == 2 && batchOutput[0].value == 16.0 &&
+                batchOutput[1].value == 4.0,
+            "a logical sample batch produces one consistent derived update");
+
+    const auto divided = engine.setDefinitions({{"ratio", "numerator / denominator", {}}});
+    require(divided.success(), "division expression compiles");
+    static_cast<void>(engine.consume({30, "mock", "numerator", 4.0, {}, 1}));
+    require(engine.consume({31, "mock", "denominator", 0.0, {}, 2}).empty(),
+            "division by zero never creates a derived sample");
+    require(engine.consume({32, "mock", "denominator", 2.0, {}, 3}).front().value == 2.0,
+            "valid input recovers after a runtime domain error");
+    require(engine.consume({33,
+                            "mock",
+                            "numerator",
+                            std::numeric_limits<double>::quiet_NaN(),
+                            {},
+                            4}).empty(),
+            "non-finite input invalidates dependent derived values");
+
+    const auto previous = engine.definitions();
+    const auto cycle = engine.setDefinitions({{"a", "b + 1", {}}, {"b", "a + 1", {}}});
+    require(!cycle.success() && cycle.issues.front().code == "dependency_cycle" &&
+                engine.definitions() == previous,
+            "invalid cyclic configuration does not replace the active configuration");
+    const auto unsafe = engine.setDefinitions({{"bad", "system(1)", {}}});
+    require(!unsafe.success() && unsafe.issues.front().code == "invalid_expression",
+            "non-whitelisted functions are rejected");
 }
 
 void testCsvSplitChunksAndInvalidLine() {
@@ -293,6 +370,7 @@ void testSessionRecorder() {
     options.protocolName = "demo";
     options.protocolJson = "{\"name\":\"demo\"}";
     options.csvFields = {"speed", "voltage"};
+    options.derivedFields = {{"power", "voltage * current", "W"}};
     options.sources.push_back({"serial:COM1", "serial", "COM1", {{"baud", "115200"}}});
     require(recorder.start(directory, options), "session recorder starts");
     recorder.enqueueRaw({"serial:COM1", 100, 101, 1, lab::core::Direction::Rx, {0xAA}});
@@ -319,6 +397,8 @@ void testSessionRecorder() {
             "session source configuration exists");
     require(std::filesystem::exists(directory / "configuration" / "csv_fields.txt"),
             "session CSV field configuration exists");
+    require(std::filesystem::exists(directory / "configuration" / "derived_fields.json"),
+            "session derived field configuration exists");
 
     std::ifstream metadata(directory / "metadata.json");
     const std::string metadataText{
@@ -337,6 +417,13 @@ void testSessionRecorder() {
     require(valuesText.find("voltage,24.5,V") != std::string::npos,
             "decoded sample is recorded");
     values.close();
+
+    std::ifstream derived(directory / "configuration" / "derived_fields.json");
+    const std::string derivedText{
+        std::istreambuf_iterator<char>(derived), std::istreambuf_iterator<char>()};
+    require(derivedText.find("\"expression\": \"voltage * current\"") !=
+                std::string::npos,
+            "session preserves safe derived expressions for deterministic replay");
 
     lab::core::SessionRecorder overwriteGuard;
     require(!overwriteGuard.start(directory, options),
@@ -428,6 +515,7 @@ int main() {
     try {
         testRingBufferWrapAround();
         testTimeSeriesAndStatistics();
+        testDerivedFieldEngine();
         testCsvSplitChunksAndInvalidLine();
         testMockDataSource();
         testSourceManager();

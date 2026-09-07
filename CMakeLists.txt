@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.15.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.16.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -26,6 +26,7 @@ add_library(lab_core STATIC
     src/core/src/checksum.cpp
     src/core/src/clock_sync.cpp
     src/core/src/csv_stream_parser.cpp
+    src/core/src/derived_field_engine.cpp
     src/core/src/frame_stream_parser.cpp
     src/core/src/logger.cpp
     src/core/src/mock_data_source.cpp
@@ -127,6 +128,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
         add_library(lab_app_ui STATIC
             src/app/serial_session.cpp
             src/app/serial_session.hpp
+            src/ui/derived_fields_widget.cpp
+            src/ui/derived_fields_widget.hpp
             src/ui/main_window.cpp
             src/ui/main_window.hpp
             src/ui/network_panel.cpp
@@ -292,6 +295,18 @@ if(LAB_DEBUGGER_BUILD_TESTS)
             COMMAND lab_multi_source_session_tests
         )
         set_tests_properties(lab_multi_source_session_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 20
+        )
+        add_executable(lab_derived_field_tests
+            tests/test_derived_fields.cpp
+        )
+        target_link_libraries(lab_derived_field_tests
+            PRIVATE lab_app_ui Qt6::Core Qt6::Network
+        )
+        add_test(NAME lab_derived_field_tests COMMAND lab_derived_field_tests)
+        set_tests_properties(lab_derived_field_tests PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
             TIMEOUT 20

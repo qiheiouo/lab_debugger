@@ -391,6 +391,7 @@ bool SessionRecorder::writeMetadata(const std::string& status, Timestamp endTime
              << "  \"protocol\": {\"name\": \"" << jsonEscape(options.protocolName)
              << "\", \"snapshot\": "
              << (options.protocolJson.empty() ? "null" : "\"protocol/initial.json\"") << "},\n"
+             << "  \"derived_fields\": \"configuration/derived_fields.json\",\n"
              << "  \"sources\": [";
     for (std::size_t index = 0; index < options.sources.size(); ++index) {
         const auto& source = options.sources[index];
@@ -440,6 +441,31 @@ bool SessionRecorder::writeConfigurationFiles() {
         }
         for (const auto& field : options.csvFields) {
             fields << field << '\n';
+        }
+    }
+
+    {
+        std::ofstream derived(
+            root / "configuration" / "derived_fields.json", std::ios::trunc);
+        if (!derived) {
+            std::scoped_lock lock(mutex_);
+            error_ = "cannot write derived field configuration";
+            return false;
+        }
+        derived << "{\n  \"format_version\": 1,\n  \"fields\": [";
+        for (std::size_t index = 0; index < options.derivedFields.size(); ++index) {
+            const auto& field = options.derivedFields[index];
+            derived << (index == 0 ? "\n" : ",\n")
+                    << "    {\"name\": \"" << jsonEscape(field.name)
+                    << "\", \"expression\": \"" << jsonEscape(field.expression)
+                    << "\", \"unit\": \"" << jsonEscape(field.unit) << "\"}";
+        }
+        if (!options.derivedFields.empty()) derived << '\n';
+        derived << "  ]\n}\n";
+        if (!derived) {
+            std::scoped_lock lock(mutex_);
+            error_ = "cannot finish derived field configuration";
+            return false;
         }
     }
 

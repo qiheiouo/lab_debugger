@@ -124,14 +124,22 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
             if (key != remoteAgentSourceKey) {
                 return;
             }
+            std::vector<lab::core::DataSample> derived;
             {
                 std::scoped_lock routeLock(routingMutex_);
+                const auto recording = recorder_.isRecording();
+                const auto declared = isDeclaredRecordingSource(key);
                 timeSeries_.append(sample);
-                if (isDeclaredRecordingSource(key)) {
+                if (declared) {
                     recorder_.enqueueSample(sample);
+                }
+                if (!recording || declared) {
+                    derived = appendDerivedSamples(
+                        std::span<const lab::core::DataSample>(&sample, 1), declared);
                 }
             }
             discoverLiveField(sample.field);
+            for (const auto& output : derived) discoverLiveField(output.field);
         }});
     static_cast<void>(sourceManager_.add(std::string(serialSourceKey), source_));
     static_cast<void>(sourceManager_.add(std::string(networkSourceKey), network_));
@@ -234,15 +242,22 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                                                        ? mapping.sourceTimestamp
                                                        : chunk.sourceTimestamp;
                             bool changed = false;
+                            std::vector<lab::core::DataSample> mappedSamples;
+                            mappedSamples.reserve(mapping.fields.size());
                             for (const auto& field : mapping.fields) {
                                 const auto name = topic->second.first + "." + field.path;
-                                timeSeries_.append({timestamp,
-                                                    chunk.sourceId,
-                                                    name,
-                                                    field.value,
-                                                    field.unit,
-                                                    chunk.sequence});
+                                mappedSamples.push_back({timestamp,
+                                                         chunk.sourceId,
+                                                         name,
+                                                         field.value,
+                                                         field.unit,
+                                                         chunk.sequence});
+                                timeSeries_.append(mappedSamples.back());
                                 changed = replayFieldNames_.insert(name).second || changed;
+                            }
+                            for (const auto& output :
+                                 appendDerivedSamples(mappedSamples, false)) {
+                                changed = replayFieldNames_.insert(output.field).second || changed;
                             }
                             if (changed) {
                                 for (const auto& field : replayFieldNames_) {
@@ -296,6 +311,10 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
     processing_.setSampleHandler([this](const lab::core::DataSample& sample) {
         recorder_.enqueueSample(sample);
         discoverLiveField(sample.field);
+        for (const auto& output : appendDerivedSamples(
+                 std::span<const lab::core::DataSample>(&sample, 1), true)) {
+            discoverLiveField(output.field);
+        }
     });
 
     processing_.setFrameHandler([this](const lab::core::FrameEvent& event) {
@@ -372,6 +391,17 @@ bool SerialSession::isDeclaredRecordingSource(const std::string& key) const noex
         return recordingRemoteAgent_.load();
     }
     return false;
+}
+
+std::vector<lab::core::DataSample> SerialSession::appendDerivedSamples(
+    std::span<const lab::core::DataSample> inputs,
+    bool record) {
+    auto output = derivedFields_.consumeBatch(inputs);
+    for (const auto& sample : output) {
+        timeSeries_.append(sample);
+        if (record) recorder_.enqueueSample(sample);
+    }
+    return output;
 }
 
 void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings) {
@@ -526,11 +556,64 @@ void SerialSession::setCsvFields(const QStringList& fields) {
     }
     activeCsvFields_ = names;
     processing_.setFieldNames(std::move(names));
+    derivedFields_.resetValues();
     timeSeries_.clear();
     {
         std::scoped_lock lock(liveFieldsMutex_);
         liveFieldNames_.clear();
     }
+}
+
+bool SerialSession::setDerivedFields(const QVariantList& definitions) {
+    if (recorder_.isRecording()) {
+        const QStringList messages{
+            tr("Session 记录期间派生变量配置已冻结，请停止记录后再修改")};
+        emit derivedFieldsConfigured(false, messages);
+        return false;
+    }
+
+    std::vector<lab::core::DerivedFieldDefinition> requested;
+    requested.reserve(static_cast<std::size_t>(definitions.size()));
+    for (const auto& value : definitions) {
+        const auto definition = value.toMap();
+        const auto name = definition.value(QStringLiteral("name")).toString().trimmed().toUtf8();
+        const auto expression =
+            definition.value(QStringLiteral("expression")).toString().trimmed().toUtf8();
+        const auto unit = definition.value(QStringLiteral("unit")).toString().trimmed().toUtf8();
+        requested.push_back({
+            std::string(name.constData(), static_cast<std::size_t>(name.size())),
+            std::string(expression.constData(), static_cast<std::size_t>(expression.size())),
+            std::string(unit.constData(), static_cast<std::size_t>(unit.size()))});
+    }
+
+    const auto previous = derivedFields_.definitions();
+    const auto result = derivedFields_.setDefinitions(std::move(requested));
+    if (!result.success()) {
+        QStringList messages;
+        for (const auto& issue : result.issues) {
+            messages.push_back(
+                tr("第 %1 行，第 %2 个字符：%3 [%4]")
+                    .arg(static_cast<qulonglong>(issue.definitionIndex + 1))
+                    .arg(static_cast<qulonglong>(issue.position + 1))
+                    .arg(QString::fromStdString(issue.message),
+                         QString::fromStdString(issue.code)));
+        }
+        emit derivedFieldsConfigured(false, messages);
+        return false;
+    }
+
+    for (const auto& definition : previous) timeSeries_.clear(definition.name);
+    for (const auto& definition : derivedFields_.definitions()) {
+        timeSeries_.clear(definition.name);
+    }
+    const auto count = derivedFields_.definitions().size();
+    emit derivedFieldsConfigured(
+        true,
+        {count == 0
+             ? tr("派生变量已全部关闭")
+             : tr("已应用 %1 个派生变量；新样本到达后会生成曲线")
+                   .arg(static_cast<qulonglong>(count))});
+    return true;
 }
 
 void SerialSession::loadProtocolFile(const QString& path) {
@@ -564,6 +647,7 @@ void SerialSession::loadProtocolFile(const QString& path) {
 
     const auto protocolName = QString::fromStdString(result.definition->name);
     processing_.setProtocolDefinition(*result.definition);
+    derivedFields_.resetValues();
     timeSeries_.clear();
     {
         std::scoped_lock lock(liveFieldsMutex_);
@@ -588,6 +672,7 @@ void SerialSession::loadProtocolFile(const QString& path) {
 
 void SerialSession::clearProtocol() {
     processing_.clearProtocolDefinition();
+    derivedFields_.resetValues();
     {
         std::scoped_lock lock(protocolQueueMutex_);
         protocolQueue_.clear();
@@ -616,13 +701,14 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.15.0";
+    options.softwareVersion = "0.16.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
     options.protocolName = activeProtocolName_;
     options.protocolJson = activeProtocolJson_;
     options.csvFields = activeCsvFields_;
+    options.derivedFields = derivedFields_.definitions();
     if (serialOpen) {
         options.sources.push_back({
             source_.sourceId(),
@@ -666,6 +752,7 @@ bool SerialSession::startSession(const QString& directory) {
     {
         std::scoped_lock routeLock(routingMutex_);
         processing_.flush();
+        derivedFields_.resetValues();
         recordingSerial_.store(serialOpen);
         recordingNetwork_.store(networkOpen);
         recordingRemoteAgent_.store(remoteAgentOpen);
@@ -738,6 +825,7 @@ bool SerialSession::openReplaySession(const QString& directory) {
         std::scoped_lock routeLock(routingMutex_);
         processing_.flush();
         processing_.resetParsers();
+        derivedFields_.resetValues();
         timeSeries_.clear();
     }
     {
@@ -832,6 +920,43 @@ bool SerialSession::openReplaySession(const QString& directory) {
             }
         }
     }
+    QVariantList restoredDerivedFields;
+    const auto derivedPath = QDir(sessionDirectory).filePath(
+        QStringLiteral("configuration/derived_fields.json"));
+    if (QFileInfo::exists(derivedPath)) {
+        QFile derivedFile(derivedPath);
+        if (!derivedFile.open(QIODevice::ReadOnly)) {
+            emit replayOpenFailed(tr("无法读取 Session 派生变量配置"));
+            return false;
+        }
+        const auto document = QJsonDocument::fromJson(derivedFile.readAll());
+        if (!document.isObject() ||
+            !document.object().value(QStringLiteral("fields")).isArray()) {
+            emit replayOpenFailed(tr("Session 派生变量配置已损坏"));
+            return false;
+        }
+        for (const auto& value :
+             document.object().value(QStringLiteral("fields")).toArray()) {
+            if (!value.isObject()) {
+                emit replayOpenFailed(tr("Session 派生变量配置包含无效条目"));
+                return false;
+            }
+            const auto field = value.toObject();
+            QVariantMap restored;
+            restored.insert(QStringLiteral("name"),
+                            field.value(QStringLiteral("name")).toString());
+            restored.insert(QStringLiteral("expression"),
+                            field.value(QStringLiteral("expression")).toString());
+            restored.insert(QStringLiteral("unit"),
+                            field.value(QStringLiteral("unit")).toString());
+            restoredDerivedFields.push_back(restored);
+        }
+    }
+    if (!setDerivedFields(restoredDerivedFields)) {
+        emit replayOpenFailed(tr("Session 派生变量配置无法通过安全校验"));
+        return false;
+    }
+    emit derivedFieldsRestored(restoredDerivedFields);
     replay_.setPath(std::filesystem::path(rawPath.toStdWString()));
     if (!replay_.open()) {
         replayRawOnly_.store(false);
@@ -969,7 +1094,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.15.0";
+            options.softwareVersion = "0.16.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {
@@ -1056,6 +1181,7 @@ void SerialSession::closeReplay() {
     rosbagReplayTopics_.clear();
     replayFieldNames_.clear();
     replayMappingWarnings_.clear();
+    derivedFields_.resetValues();
 }
 
 void SerialSession::pauseReplay() {
@@ -1077,6 +1203,7 @@ void SerialSession::seekReplay(double fraction) {
         std::scoped_lock routeLock(routingMutex_);
         processing_.flush();
         processing_.resetParsers();
+        derivedFields_.resetValues();
         replay_.seekFraction(fraction);
         timeSeries_.clear();
         {

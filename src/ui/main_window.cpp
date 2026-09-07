@@ -1,5 +1,6 @@
 #include "ui/main_window.hpp"
 
+#include "ui/derived_fields_widget.hpp"
 #include "ui/network_panel.hpp"
 #include "ui/remote_agent_panel.hpp"
 #include "ui/plot_widget.hpp"
@@ -42,6 +43,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     remoteAgentPanel_ = new RemoteAgentPanel(this);
     terminal_ = new TerminalWidget(this);
     plot_ = new PlotWidget(&session_.timeSeries(), this);
+    derivedFields_ = new DerivedFieldsWidget(this);
     protocol_ = new ProtocolWidget(this);
     replay_ = new ReplayWidget(this);
     sendPanel_ = new SendPanel(this);
@@ -49,6 +51,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* tabs = new QTabWidget(this);
     tabs->addTab(terminal_, tr("终端"));
     tabs->addTab(plot_, tr("实时曲线"));
+    tabs->addTab(derivedFields_, tr("派生变量"));
     tabs->addTab(protocol_, tr("协议解析"));
     tabs->addTab(replay_, tr("Session 回放"));
 
@@ -120,6 +123,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::setSendTarget);
     connect(plot_, &PlotWidget::fieldsChanged,
             &session_, &lab::app::SerialSession::setCsvFields);
+    connect(derivedFields_, &DerivedFieldsWidget::applyRequested,
+            &session_, &lab::app::SerialSession::setDerivedFields);
     connect(protocol_, &ProtocolWidget::loadProtocolRequested,
             &session_, &lab::app::SerialSession::loadProtocolFile);
     connect(protocol_, &ProtocolWidget::disableProtocolRequested,
@@ -195,6 +200,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             replay_, &ReplayWidget::setImportFinished);
     connect(&session_, &lab::app::SerialSession::csvFieldsRestored,
             plot_, &PlotWidget::useProtocolFields);
+    connect(&session_, &lab::app::SerialSession::derivedFieldsConfigured,
+            derivedFields_, &DerivedFieldsWidget::showConfigurationResult);
+    connect(&session_, &lab::app::SerialSession::derivedFieldsRestored,
+            derivedFields_, &DerivedFieldsWidget::setDefinitions);
     connect(&session_, &lab::app::SerialSession::recordingChanged,
             this, [this](bool active, const QString& message) {
                 recordAction_->setText(active ? tr("停止 Session 记录")

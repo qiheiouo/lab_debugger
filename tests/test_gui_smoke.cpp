@@ -1,4 +1,5 @@
 #include "ui/main_window.hpp"
+#include "ui/derived_fields_widget.hpp"
 #include "ui/plot_widget.hpp"
 #include "ui/send_panel.hpp"
 
@@ -38,10 +39,30 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        lab::ui::DerivedFieldsWidget derivedFields;
+        QVariantMap power;
+        power.insert(QStringLiteral("name"), QStringLiteral("power"));
+        power.insert(QStringLiteral("expression"),
+                     QStringLiteral("voltage * current"));
+        power.insert(QStringLiteral("unit"), QStringLiteral("W"));
+        derivedFields.setDefinitions({power});
+        if (derivedFields.definitions().size() != 1 ||
+            derivedFields.definitions().front().toMap()
+                    .value(QStringLiteral("expression")).toString() !=
+                QStringLiteral("voltage * current")) {
+            std::cerr << "GUI smoke test failed: derived field table does not preserve input\n";
+            return 1;
+        }
+
         lab::ui::MainWindow window;
         window.show();
         if (!window.isVisible()) {
             std::cerr << "GUI smoke test failed: main window is not visible\n";
+            return 1;
+        }
+        if (!window.findChild<lab::ui::DerivedFieldsWidget*>(
+                QStringLiteral("derivedFieldsWidget"))) {
+            std::cerr << "GUI smoke test failed: derived fields tab is missing\n";
             return 1;
         }
         QTimer::singleShot(150, &application, [] {

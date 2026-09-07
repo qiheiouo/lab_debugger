@@ -5,6 +5,7 @@
 #include "lab/adapters/remote_agent/remote_agent_source.hpp"
 #include "lab/adapters/rosbag2/rosbag2_importer.hpp"
 #include "lab/core/data_chunk.hpp"
+#include "lab/core/derived_field_engine.hpp"
 #include "lab/core/processing_pipeline.hpp"
 #include "lab/core/replay_source.hpp"
 #include "lab/core/session_recorder.hpp"
@@ -22,6 +23,7 @@
 #include <atomic>
 #include <mutex>
 #include <set>
+#include <span>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -55,6 +57,7 @@ public slots:
     void unsubscribeRemoteTopic(lab::core::agent::SubscriptionRequest request);
     void sendBytes(const QByteArray& bytes);
     void setCsvFields(const QStringList& fields);
+    bool setDerivedFields(const QVariantList& definitions);
     void loadProtocolFile(const QString& path);
     void clearProtocol();
     bool startSession(const QString& directory);
@@ -118,6 +121,8 @@ signals:
                              qint64 lastTimestamp,
                              qint64 currentTimestamp);
     void csvFieldsRestored(QStringList fields);
+    void derivedFieldsConfigured(bool success, QStringList messages);
+    void derivedFieldsRestored(QVariantList definitions);
     void rosbagInspectionStarted(QString source, QString destination);
     void rosbagInspectionFinished(bool success,
                                   QString source,
@@ -141,6 +146,9 @@ private:
     enum class SendTarget { Serial = 0, Network = 1 };
 
     void discoverLiveField(const std::string& field);
+    [[nodiscard]] std::vector<lab::core::DataSample> appendDerivedSamples(
+        std::span<const lab::core::DataSample> inputs,
+        bool record);
     [[nodiscard]] bool isDeclaredRecordingSource(const std::string& key) const noexcept;
 
     lab::adapters::serial::SerialSource source_;
@@ -162,6 +170,7 @@ private:
     std::atomic_bool recordingNetwork_{};
     std::atomic_bool recordingRemoteAgent_{};
     lab::core::TimeSeriesStore timeSeries_{120'000};
+    lab::core::DerivedFieldEngine derivedFields_;
     std::mutex uiQueueMutex_;
     std::deque<lab::core::DataChunk> uiQueue_;
     std::mutex protocolQueueMutex_;
