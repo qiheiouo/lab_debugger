@@ -23,6 +23,7 @@ struct SourceManagerCallbacks {
     std::function<void(const std::string&, const std::string&, SourceState)> onStateChanged;
     std::function<void(const std::string&, const std::string&, const std::string&)> onError;
     std::function<void(const std::string&, const DataSample&)> onSample;
+    std::function<void(const std::string&, std::span<const DataSample>)> onSamples;
 };
 
 class SourceManager {
@@ -51,6 +52,8 @@ private:
     void dispatchState(const std::string& key, SourceState state) const;
     void dispatchError(const std::string& key, const std::string& message) const;
     void dispatchSample(const std::string& key, const DataSample& sample) const;
+    void dispatchSamples(const std::string& key,
+                         std::span<const DataSample> samples) const;
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, IDataSource*> sources_;

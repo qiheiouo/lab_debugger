@@ -5,7 +5,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 与 Qt UI 解耦的 C++20 数据核心；
 - `IDataSource` 与正式 `SourceManager`，串口、网络和 ROS Agent 可同时连接、统计和记录；
 - CSV/二进制流解析状态按 `sourceId` 隔离，同名字段以“来源.字段”形成独立曲线；
-- 安全派生变量：受限表达式、依赖排序、跨来源显式引用、实时曲线/统计/Session/回放全链路；
+- 安全派生变量：受限表达式、依赖排序、跨来源显式引用，以及低通、高通、移动平均、微分、积分和角度展开；
 - 独立线程的串口 I/O、文本解析和原始数据写盘；
 - Windows 串口枚举、连接、收发、ASCII/HEX、定时发送；
 - RX/TX 时间戳终端、暂停显示、保存、复制；
@@ -60,6 +60,7 @@ cmake --install build --config Release --prefix dist/LabDebugger
 4. 在“实时曲线”页把字段设为 `speed,current,voltage` 并点击“应用”。
 5. 收到数据后，显示列表会出现类似 `serial:COM5.speed` 的来源限定字段；勾选需要观察的字段。曲线以 30 FPS 刷新，采集和解析仍按原始速率进行。
 6. 如需计算功率，在“派生变量”页填写名称 `power`、表达式 `` `serial:COM5.voltage` * `serial:COM5.current` `` 和单位 `W`，应用后即可像普通字段一样勾选、统计和记录。
+7. 如需平滑功率，再添加 `smooth_power`，表达式填写 `lowpass(power, 0.2)`；滤波结果同样进入曲线、Session 与确定性回放。
 
 若 STM32 输出二进制帧，打开“协议解析”页并加载
 `examples/protocols/stm32_status.json`。有效帧、丢弃字节和校验错误会分别统计，

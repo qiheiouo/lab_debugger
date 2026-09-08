@@ -73,13 +73,19 @@ void writeText(const std::filesystem::path& path, const std::string& text) {
 
 QVariantList powerDefinition(quint16 port) {
     const auto source = QStringLiteral("udp:127.0.0.1:%1").arg(port);
-    QVariantMap definition;
-    definition.insert(QStringLiteral("name"), QStringLiteral("power"));
-    definition.insert(
+    QVariantMap power;
+    power.insert(QStringLiteral("name"), QStringLiteral("power"));
+    power.insert(
         QStringLiteral("expression"),
         QStringLiteral("`%1.voltage` * `%1.current`").arg(source));
-    definition.insert(QStringLiteral("unit"), QStringLiteral("W"));
-    return {definition};
+    power.insert(QStringLiteral("unit"), QStringLiteral("W"));
+
+    QVariantMap smoothPower;
+    smoothPower.insert(QStringLiteral("name"), QStringLiteral("smooth_power"));
+    smoothPower.insert(QStringLiteral("expression"),
+                       QStringLiteral("lowpass(power, 0.5)"));
+    smoothPower.insert(QStringLiteral("unit"), QStringLiteral("W"));
+    return {power, smoothPower};
 }
 
 }  // namespace
@@ -124,25 +130,39 @@ int main(int argc, char* argv[]) {
 
         const QByteArray row("24,2\n");
         require(peer.writeDatagram(row, QHostAddress::LocalHost, sessionPort) == row.size(),
-                "UDP row is sent");
+                "first UDP row is sent");
         require(waitFor([&] {
                     const auto points = session.timeSeries().snapshot("power");
-                    return points.size() == 1 && points.front().value == 48.0;
+                    const auto smooth = session.timeSeries().snapshot("smooth_power");
+                    return points.size() == 1 && points.front().value == 48.0 &&
+                           smooth.size() == 1 && smooth.front().value == 48.0;
                 }),
-                "derived sample reaches the shared time-series store");
+                "derived and filtered samples reach the shared time-series store");
+        const QByteArray secondRow("36,2\n");
+        require(peer.writeDatagram(secondRow, QHostAddress::LocalHost, sessionPort) ==
+                    secondRow.size(),
+                "second UDP row is sent");
+        require(waitFor([&] {
+                    const auto points = session.timeSeries().snapshot("power");
+                    const auto smooth = session.timeSeries().snapshot("smooth_power");
+                    return points.size() == 2 && points.back().value == 72.0 &&
+                           smooth.size() == 2 && smooth.back().value == 60.0;
+                }),
+                "stateful filter advances exactly once for the second source row");
         session.stopSession();
 
         const auto values = readText(root / "values.csv");
-        require(values.find("power,48,W") != std::string::npos,
-                "derived sample is recorded as a normal session value");
+        require(values.find("power,48,W") != std::string::npos &&
+                    values.find("smooth_power,60,W") != std::string::npos,
+                "derived and filtered samples are recorded as normal session values");
         const auto configuration = readText(
             root / "configuration" / "derived_fields.json");
         const auto configurationDocument =
             QJsonDocument::fromJson(QByteArray::fromStdString(configuration));
         const auto configuredFields =
             configurationDocument.object().value(QStringLiteral("fields")).toArray();
-        require(configurationDocument.isObject() && configuredFields.size() == 1,
-                "session writes one derived definition in a JSON object");
+        require(configurationDocument.isObject() && configuredFields.size() == 2,
+                "session writes arithmetic and filtered definitions in a JSON object");
         const auto configuredPower = configuredFields.at(0).toObject();
         const auto expectedPower = powerDefinition(sessionPort).front().toMap();
         require(configurationDocument.object()
@@ -180,21 +200,37 @@ int main(int argc, char* argv[]) {
             [&atEnd](bool, bool, bool end, double, quint64, quint64,
                      qint64, qint64, qint64) { atEnd = end; });
         require(session.openReplaySession(fromPath(root)), "recorded session reopens");
-        require(restored.size() == 1 &&
+        require(restored.size() == 2 &&
                     restored.front().toMap().value(QStringLiteral("name")).toString() ==
-                        QStringLiteral("power"),
+                        QStringLiteral("power") &&
+                    restored.back().toMap().value(QStringLiteral("name")).toString() ==
+                        QStringLiteral("smooth_power"),
                 "replay restores derived definitions into the UI model");
         session.setReplaySpeed(10.0);
         session.resumeReplay();
         require(waitFor([&] { return atEnd; }), "derived session replay reaches the end");
         require(waitFor([&] {
                     const auto points = session.timeSeries().snapshot("power");
-                    return points.size() == 1 && points.front().value == 48.0;
+                    const auto smooth = session.timeSeries().snapshot("smooth_power");
+                    return points.size() == 2 && points.front().value == 48.0 &&
+                           points.back().value == 72.0 && smooth.size() == 2 &&
+                           smooth.front().value == 48.0 && smooth.back().value == 60.0;
                 }),
-                "replay deterministically recreates the derived curve");
+                "replay deterministically recreates derived and filtered curves");
         session.seekReplay(0.0);
-        require(session.timeSeries().snapshot("power").empty(),
-                "replay seek clears derived curves and their previous input state");
+        require(session.timeSeries().snapshot("power").empty() &&
+                    session.timeSeries().snapshot("smooth_power").empty(),
+                "replay seek clears derived curves and stateful filter history");
+        atEnd = false;
+        session.resumeReplay();
+        require(waitFor([&] { return atEnd; }),
+                "filtered session replay reaches the end again after seek");
+        require(waitFor([&] {
+                    const auto smooth = session.timeSeries().snapshot("smooth_power");
+                    return smooth.size() == 2 && smooth.front().value == 48.0 &&
+                           smooth.back().value == 60.0;
+                }),
+                "seek reset reproduces the same filtered values from clean state");
         session.closeReplay();
 
         const auto derivedPath = root / "configuration" / "derived_fields.json";
@@ -244,7 +280,9 @@ int main(int argc, char* argv[]) {
                 "UDP row is resent after unsafe replay attempts");
         require(waitFor([&] {
                     const auto points = session.timeSeries().snapshot("power");
-                    return points.size() == 1 && points.front().value == 48.0;
+                    const auto smooth = session.timeSeries().snapshot("smooth_power");
+                    return points.size() == 1 && points.front().value == 48.0 &&
+                           smooth.size() == 1 && smooth.front().value == 48.0;
                 }),
                 "rejected Session configurations do not replace the valid definition");
         session.disconnectNetwork();

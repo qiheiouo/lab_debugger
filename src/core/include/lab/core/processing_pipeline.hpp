@@ -12,6 +12,7 @@
 #include <mutex>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <thread>
 #include <unordered_map>
@@ -22,6 +23,7 @@ namespace lab::core {
 class ProcessingPipeline {
 public:
     using SampleHandler = std::function<void(const DataSample&)>;
+    using SampleBatchHandler = std::function<void(std::span<const DataSample>)>;
     using FrameHandler = std::function<void(const FrameEvent&)>;
 
     explicit ProcessingPipeline(TimeSeriesStore& store);
@@ -34,6 +36,7 @@ public:
     void setFieldNames(std::vector<std::string> names);
     void setQualifyFieldNames(bool enabled);
     void setSampleHandler(SampleHandler handler);
+    void setSampleBatchHandler(SampleBatchHandler handler);
     void setProtocolDefinition(ProtocolDefinition definition);
     void clearProtocolDefinition();
     void resetParsers();
@@ -69,6 +72,7 @@ private:
 
     std::mutex handlerMutex_;
     SampleHandler sampleHandler_;
+    SampleBatchHandler sampleBatchHandler_;
     std::mutex frameHandlerMutex_;
     FrameHandler frameHandler_;
     std::jthread worker_;

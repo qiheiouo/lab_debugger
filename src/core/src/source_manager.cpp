@@ -47,7 +47,10 @@ bool SourceManager::add(std::string key, IDataSource& source) {
         [this, key](const DataChunk& chunk) { dispatchData(key, chunk); },
         [this, key](SourceState state) { dispatchState(key, state); },
         [this, key](const std::string& message) { dispatchError(key, message); },
-        [this, key](const DataSample& sample) { dispatchSample(key, sample); }});
+        [this, key](const DataSample& sample) { dispatchSample(key, sample); },
+        [this, key](std::span<const DataSample> samples) {
+            dispatchSamples(key, samples);
+        }});
     return true;
 }
 
@@ -181,6 +184,16 @@ void SourceManager::dispatchSample(const std::string& key, const DataSample& sam
     if (callback) {
         callback(key, sample);
     }
+}
+
+void SourceManager::dispatchSamples(const std::string& key,
+                                    std::span<const DataSample> samples) const {
+    std::function<void(const std::string&, std::span<const DataSample>)> callback;
+    {
+        std::scoped_lock lock(mutex_);
+        callback = callbacks_.onSamples;
+    }
+    if (callback) callback(key, samples);
 }
 
 }  // namespace lab::core

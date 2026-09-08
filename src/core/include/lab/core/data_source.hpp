@@ -27,6 +27,7 @@ struct DataSourceCallbacks {
     std::function<void(SourceState)> onStateChanged;
     std::function<void(const std::string&)> onError;
     std::function<void(const DataSample&)> onSample;
+    std::function<void(std::span<const DataSample>)> onSamples;
 };
 
 class IDataSource {
@@ -62,6 +63,20 @@ protected:
         if (callback) {
             callback(sample);
         }
+    }
+
+    void publishSamples(std::span<const DataSample> samples) const {
+        std::function<void(const DataSample&)> sampleCallback;
+        std::function<void(std::span<const DataSample>)> batchCallback;
+        {
+            std::scoped_lock lock(callbackMutex_);
+            sampleCallback = callbacks_.onSample;
+            batchCallback = callbacks_.onSamples;
+        }
+        if (sampleCallback) {
+            for (const auto& sample : samples) sampleCallback(sample);
+        }
+        if (batchCallback && !samples.empty()) batchCallback(samples);
     }
 
     void publishState(SourceState state) const {

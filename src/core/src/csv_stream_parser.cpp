@@ -45,13 +45,28 @@ std::vector<DataSample> CsvStreamParser::consume(
     Timestamp timestamp,
     const std::string& sourceId,
     std::uint64_t sequence) {
+    auto batches = consumeBatches(bytes, timestamp, sourceId, sequence);
+    std::vector<DataSample> samples;
+    for (auto& batch : batches) {
+        samples.insert(samples.end(),
+                       std::make_move_iterator(batch.begin()),
+                       std::make_move_iterator(batch.end()));
+    }
+    return samples;
+}
+
+std::vector<std::vector<DataSample>> CsvStreamParser::consumeBatches(
+    std::span<const std::uint8_t> bytes,
+    Timestamp timestamp,
+    const std::string& sourceId,
+    std::uint64_t sequence) {
     pending_.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     if (pending_.size() > kMaximumLineLength && pending_.find('\n') == std::string::npos) {
         pending_.clear();
         return {};
     }
 
-    std::vector<DataSample> samples;
+    std::vector<std::vector<DataSample>> batches;
     std::size_t position = 0;
     while (true) {
         const auto newline = pending_.find('\n', position);
@@ -64,13 +79,10 @@ std::vector<DataSample> CsvStreamParser::consume(
             line.pop_back();
         }
         auto parsed = parseLine(line, timestamp, sourceId, sequence);
-        samples.insert(
-            samples.end(),
-            std::make_move_iterator(parsed.begin()),
-            std::make_move_iterator(parsed.end()));
+        if (!parsed.empty()) batches.push_back(std::move(parsed));
         position = newline + 1;
     }
-    return samples;
+    return batches;
 }
 
 std::vector<DataSample> CsvStreamParser::parseLine(
@@ -102,4 +114,3 @@ std::vector<DataSample> CsvStreamParser::parseLine(
 }
 
 }  // namespace lab::core
-

@@ -253,6 +253,110 @@ void testDerivedFieldEngine() {
             "overly deep expressions are rejected transactionally");
 }
 
+double derivedValue(const std::vector<lab::core::DataSample>& samples,
+                    const std::string& field) {
+    const auto found = std::find_if(
+        samples.begin(), samples.end(), [&field](const auto& sample) {
+            return sample.field == field;
+        });
+    if (found == samples.end()) {
+        throw std::runtime_error("missing derived field: " + field);
+    }
+    return found->value;
+}
+
+void testStatefulDerivedFieldTransforms() {
+    lab::core::DerivedFieldEngine engine;
+    const auto configured = engine.setDefinitions({
+        {"low", "lowpass(signal, 0.5)", {}},
+        {"high", "highpass(signal, 0.5)", {}},
+        {"average", "moving_average(signal, 3)", {}},
+        {"rate", "derivative(signal)", {}},
+        {"area", "integral(signal)", {}},
+        {"unwrapped", "unwrap_angle(angle)", "rad"}});
+    require(configured.success(), "stateful transform expressions compile");
+
+    auto output = engine.consume({0, "mock", "signal", 0.0, {}, 1});
+    require(output.size() == 4 && derivedValue(output, "low") == 0.0 &&
+                derivedValue(output, "high") == 0.0 &&
+                derivedValue(output, "average") == 0.0 &&
+                derivedValue(output, "area") == 0.0,
+            "stateful transforms initialize without a fake derivative");
+
+    output = engine.consume({1'000'000'000, "mock", "signal", 10.0, {}, 2});
+    require(output.size() == 5 &&
+                std::abs(derivedValue(output, "low") - 5.0) < 1e-12 &&
+                std::abs(derivedValue(output, "high") - 5.0) < 1e-12 &&
+                std::abs(derivedValue(output, "average") - 5.0) < 1e-12 &&
+                std::abs(derivedValue(output, "rate") - 10.0) < 1e-12 &&
+                std::abs(derivedValue(output, "area") - 5.0) < 1e-12,
+            "filters derivative and trapezoidal integral use expected state");
+
+    output = engine.consume({2'000'000'000, "mock", "signal", 20.0, {}, 3});
+    require(std::abs(derivedValue(output, "low") - 12.5) < 1e-12 &&
+                std::abs(derivedValue(output, "high") - 7.5) < 1e-12 &&
+                std::abs(derivedValue(output, "average") - 10.0) < 1e-12 &&
+                std::abs(derivedValue(output, "rate") - 10.0) < 1e-12 &&
+                std::abs(derivedValue(output, "area") - 20.0) < 1e-12,
+            "stateful transforms advance once for each relevant sample");
+
+    output = engine.consume({1'500'000'000, "mock", "signal", 100.0, {}, 4});
+    require(std::abs(derivedValue(output, "area") - 20.0) < 1e-12,
+            "integral ignores an out-of-order timestamp without moving its baseline");
+    output = engine.consume({3'000'000'000, "mock", "signal", 30.0, {}, 5});
+    require(std::abs(derivedValue(output, "area") - 45.0) < 1e-12,
+            "integral resumes from the last increasing timestamp");
+
+    static_cast<void>(engine.consume({3'000'000'000, "mock", "angle", 3.0, {}, 1}));
+    output = engine.consume({4'000'000'000, "mock", "angle", -3.0, {}, 2});
+    require(output.size() == 1 &&
+                std::abs(derivedValue(output, "unwrapped") -
+                         3.283185307179586) < 1e-12,
+            "angle unwrap crosses the minus-pi boundary continuously");
+
+    engine.resetValues();
+    output = engine.consume({10'000'000'000, "mock", "signal", 10.0, {}, 4});
+    require(output.size() == 4 && derivedValue(output, "low") == 10.0 &&
+                derivedValue(output, "average") == 10.0 &&
+                derivedValue(output, "area") == 0.0,
+            "reset clears every stateful transform for deterministic seek");
+
+    require(engine.setDefinitions(
+                {{"transactional", "lowpass(signal, 0.5) / divisor", {}}})
+                .success(),
+            "transactional filter expression compiles");
+    static_cast<void>(engine.consume({20, "mock", "divisor", 0.0, {}, 1}));
+    require(engine.consume({21, "mock", "signal", 10.0, {}, 2}).empty() &&
+                engine.consume({22, "mock", "signal", 20.0, {}, 3}).empty(),
+            "invalid outer expression produces no samples");
+    output = engine.consume({23, "mock", "divisor", 1.0, {}, 4});
+    require(output.size() == 1 && output.front().value == 20.0,
+            "failed expression does not secretly advance filter state");
+
+    require(engine.setDefinitions({
+                {"bad_low", "lowpass(signal, 0)", {}},
+                {"bad_window", "moving_average(signal, 4097)", {}}})
+                .success(),
+            "runtime-checked transform parameters still parse safely");
+    require(engine.consume({30, "mock", "signal", 1.0, {}, 5}).empty(),
+            "invalid alpha and moving-average window produce no samples");
+
+    std::vector<lab::core::DerivedFieldDefinition> excessiveState;
+    excessiveState.reserve(103);
+    for (std::size_t index = 0; index < 103; ++index) {
+        auto expression = std::string("signal");
+        for (int nested = 0; nested < 5; ++nested) {
+            expression = "moving_average(" + expression + ", 4096)";
+        }
+        excessiveState.push_back(
+            {"state_" + std::to_string(index), std::move(expression), {}});
+    }
+    const auto excessive = engine.setDefinitions(std::move(excessiveState));
+    require(!excessive.success() &&
+                excessive.issues.front().code == "too_many_stateful_functions",
+            "stateful function count is capped before allocating runtime history");
+}
+
 void testCsvSplitChunksAndInvalidLine() {
     lab::core::CsvStreamParser parser({"speed", "current", "voltage"});
     const std::string first = "1.2,3";
@@ -276,7 +380,7 @@ void testMockDataSource() {
     lab::core::MockDataSource source;
     std::vector<lab::core::DataChunk> events;
     source.setCallbacks(
-        {[&events](const auto& chunk) { events.push_back(chunk); }, {}, {}, {}});
+        {[&events](const auto& chunk) { events.push_back(chunk); }, {}, {}, {}, {}});
     require(source.open(), "mock opens");
     const std::vector<std::uint8_t> rx{1, 2, 3};
     source.feed(rx, 42);
@@ -300,6 +404,8 @@ void testSourceManager() {
 
     std::vector<std::string> receivedKeys;
     std::vector<std::string> stateKeys;
+    std::vector<std::string> sampleKeys;
+    std::vector<std::pair<std::string, std::size_t>> sampleBatches;
     manager.setCallbacks({
         [&receivedKeys](const std::string& key, const lab::core::DataChunk&) {
             receivedKeys.push_back(key);
@@ -308,16 +414,30 @@ void testSourceManager() {
                      const std::string&,
                      lab::core::SourceState) { stateKeys.push_back(key); },
         {},
-        {}});
+        [&sampleKeys](const std::string& key, const lab::core::DataSample&) {
+            sampleKeys.push_back(key);
+        },
+        [&sampleBatches](const std::string& key,
+                         std::span<const lab::core::DataSample> samples) {
+            sampleBatches.emplace_back(key, samples.size());
+        }});
 
     require(manager.open("serial") && manager.open("network"),
             "source manager opens multiple sources simultaneously");
     serial.feed(std::vector<std::uint8_t>{1, 2, 3}, 10);
     network.feed(std::vector<std::uint8_t>{4, 5}, 20);
+    const std::vector<lab::core::DataSample> structured{
+        {30, "serial:COM5", "x", 1.0, {}, 1},
+        {30, "serial:COM5", "y", 2.0, {}, 1}};
+    serial.feedSamples(structured);
     require(manager.write("network", std::vector<std::uint8_t>{6}),
             "source manager routes writes to the selected source");
     require(receivedKeys == std::vector<std::string>({"serial", "network", "network"}),
             "source manager preserves the stable source key for concurrent traffic");
+    require(sampleKeys == std::vector<std::string>({"serial", "serial"}) &&
+                sampleBatches ==
+                    std::vector<std::pair<std::string, std::size_t>>({{"serial", 2}}),
+            "source manager preserves one structured sample batch and its stable key");
 
     const auto statistics = manager.aggregateStatistics();
     require(statistics.receivedBytes == 5 && statistics.transmittedBytes == 1 &&
@@ -336,7 +456,15 @@ void testProcessingPipeline() {
     lab::core::TimeSeriesStore store(100);
     lab::core::ProcessingPipeline pipeline(store);
     pipeline.setFieldNames({"a", "b"});
-    const std::string line = "10,20\n";
+    std::vector<std::vector<double>> batches;
+    pipeline.setSampleBatchHandler(
+        [&batches](std::span<const lab::core::DataSample> samples) {
+            std::vector<double> values;
+            values.reserve(samples.size());
+            for (const auto& sample : samples) values.push_back(sample.value);
+            batches.push_back(std::move(values));
+        });
+    const std::string line = "10,20\n30,40\n";
     pipeline.push({
         "mock",
         1'000,
@@ -345,8 +473,11 @@ void testProcessingPipeline() {
         lab::core::Direction::Rx,
         std::vector<std::uint8_t>(line.begin(), line.end())});
     pipeline.flush();
-    require(store.snapshot("a").size() == 1, "pipeline parses asynchronously");
-    require(store.snapshot("b").front().value == 20.0, "pipeline stores values");
+    require(store.snapshot("a").size() == 2, "pipeline parses asynchronously");
+    require(store.snapshot("b").back().value == 40.0, "pipeline stores values");
+    require(batches == std::vector<std::vector<double>>({{10.0, 20.0},
+                                                         {30.0, 40.0}}),
+            "pipeline preserves one derived-evaluation batch per CSV row");
     pipeline.push({"mock", 2'000, 2'001, 2, lab::core::Direction::Tx, {1}});
     pipeline.flush();
     require(pipeline.pendingChunks() == 0, "pipeline flush handles non-RX chunks");
@@ -536,6 +667,7 @@ void testReplaySourceControls() {
         },
         {},
         {},
+        {},
         {}});
     require(replay.open(), "replay source opens raw log");
     require(replay.status().paused && replay.status().recordCount == 3,
@@ -598,6 +730,7 @@ int main() {
         testRingBufferWrapAround();
         testTimeSeriesAndStatistics();
         testDerivedFieldEngine();
+        testStatefulDerivedFieldTransforms();
         testCsvSplitChunksAndInvalidLine();
         testMockDataSource();
         testSourceManager();

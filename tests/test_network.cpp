@@ -55,6 +55,7 @@ struct Events {
                 std::scoped_lock lock(mutex);
                 errors.push_back(error);
             },
+            {},
             {}};
     }
 

@@ -72,10 +72,13 @@ void MockDataSource::feed(
         std::move(copy)});
 }
 
+void MockDataSource::feedSamples(std::span<const DataSample> samples) {
+    if (isOpen()) publishSamples(samples);
+}
+
 std::vector<std::vector<std::uint8_t>> MockDataSource::writes() const {
     std::scoped_lock lock(writesMutex_);
     return writes_;
 }
 
 }  // namespace lab::core
-

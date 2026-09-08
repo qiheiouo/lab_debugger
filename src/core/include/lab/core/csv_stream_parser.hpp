@@ -23,6 +23,12 @@ public:
         const std::string& sourceId,
         std::uint64_t sequence);
 
+    [[nodiscard]] std::vector<std::vector<DataSample>> consumeBatches(
+        std::span<const std::uint8_t> bytes,
+        Timestamp timestamp,
+        const std::string& sourceId,
+        std::uint64_t sequence);
+
 private:
     [[nodiscard]] std::vector<DataSample> parseLine(
         const std::string& line,
@@ -36,4 +42,3 @@ private:
 };
 
 }  // namespace lab::core
-

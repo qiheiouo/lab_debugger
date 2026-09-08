@@ -55,6 +55,11 @@ void ProcessingPipeline::setSampleHandler(SampleHandler handler) {
     sampleHandler_ = std::move(handler);
 }
 
+void ProcessingPipeline::setSampleBatchHandler(SampleBatchHandler handler) {
+    std::scoped_lock lock(handlerMutex_);
+    sampleBatchHandler_ = std::move(handler);
+}
+
 void ProcessingPipeline::setProtocolDefinition(ProtocolDefinition definition) {
     std::scoped_lock lock(parserMutex_, queueMutex_);
     queue_.clear();
@@ -141,7 +146,7 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
             continue;
         }
 
-        std::vector<DataSample> samples;
+        std::vector<std::vector<DataSample>> sampleBatches;
         std::vector<FrameEvent> frameEvents;
         bool qualifyFieldNames = false;
         {
@@ -151,14 +156,16 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
                 chunk.sourceId, fieldNames_, protocolDefinition_);
             static_cast<void>(inserted);
             if (!protocolDefinition_) {
-                samples = parsers->second.csv.consume(
+                sampleBatches = parsers->second.csv.consumeBatches(
                     chunk.payload,
                     chunk.sourceTimestamp,
                     chunk.sourceId,
                     chunk.sequence);
                 if (qualifyFieldNames) {
-                    for (auto& sample : samples) {
-                        sample.field = chunk.sourceId + "." + sample.field;
+                    for (auto& batch : sampleBatches) {
+                        for (auto& sample : batch) {
+                            sample.field = chunk.sourceId + "." + sample.field;
+                        }
                     }
                 }
             }
@@ -167,32 +174,38 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
             }
         }
 
-        for (const auto& sample : samples) {
-            store_.append(sample);
+        for (const auto& batch : sampleBatches) {
             SampleHandler handler;
+            SampleBatchHandler batchHandler;
             {
                 std::scoped_lock lock(handlerMutex_);
                 handler = sampleHandler_;
+                batchHandler = sampleBatchHandler_;
             }
-            if (handler) {
-                handler(sample);
+            for (const auto& sample : batch) {
+                store_.append(sample);
+                if (handler) handler(sample);
             }
+            if (batchHandler) batchHandler(std::span(batch));
         }
 
         for (const auto& event : frameEvents) {
+            std::vector<DataSample> decodedSamples;
             if (event.kind == FrameEventKind::FrameDecoded) {
+                decodedSamples.reserve(event.fields.size());
                 for (const auto& field : event.fields) {
                     if (!field.numericValue) {
                         continue;
                     }
-                    DataSample sample{
+                    decodedSamples.push_back({
                         event.sourceTimestamp,
                         event.sourceId,
                         qualifyFieldNames ? event.sourceId + "." + field.name
                                           : field.name,
                         *field.numericValue,
                         field.unit,
-                        event.sequence};
+                        event.sequence});
+                    const auto& sample = decodedSamples.back();
                     store_.append(sample);
                     SampleHandler sampleHandler;
                     {
@@ -202,6 +215,14 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
                     if (sampleHandler) {
                         sampleHandler(sample);
                     }
+                }
+                SampleBatchHandler batchHandler;
+                {
+                    std::scoped_lock lock(handlerMutex_);
+                    batchHandler = sampleBatchHandler_;
+                }
+                if (batchHandler && !decodedSamples.empty()) {
+                    batchHandler(std::span(decodedSamples));
                 }
             }
             FrameHandler handler;

@@ -4,6 +4,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <mutex>
@@ -22,6 +23,7 @@ constexpr std::size_t maximumUnitLength = 128;
 constexpr std::size_t maximumExpressionLength = 4096;
 constexpr std::size_t maximumNodes = 512;
 constexpr std::size_t maximumDepth = 64;
+constexpr std::size_t maximumStatefulFunctions = 512;
 
 enum class NodeKind { Number, Variable, Unary, Binary, Function };
 
@@ -31,6 +33,7 @@ struct Node {
     char operation{};
     std::string text;
     std::vector<std::unique_ptr<Node>> children;
+    std::size_t stateIndex{std::numeric_limits<std::size_t>::max()};
 };
 
 struct ParseResult {
@@ -269,9 +272,15 @@ private:
         const auto count = node->children.size();
         const auto valid = (node->text == "abs" && count == 1) ||
                            (node->text == "sqrt" && count == 1) ||
+                           (node->text == "derivative" && count == 1) ||
+                           (node->text == "integral" && count == 1) ||
+                           (node->text == "unwrap_angle" && count == 1) ||
                            (node->text == "min" && count == 2) ||
                            (node->text == "max" && count == 2) ||
                            (node->text == "pow" && count == 2) ||
+                           (node->text == "lowpass" && count == 2) ||
+                           (node->text == "highpass" && count == 2) ||
+                           (node->text == "moving_average" && count == 2) ||
                            (node->text == "clamp" && count == 3);
         if (!valid) {
             failAt("unknown function or invalid argument count", begin);
@@ -344,40 +353,94 @@ void collectDependencies(const Node& node, std::unordered_set<std::string>& resu
     }
 }
 
-std::optional<double> evaluate(
-    const Node& node,
-    const std::unordered_map<std::string, double>& values) {
+bool isStatefulFunction(std::string_view name) {
+    return name == "lowpass" || name == "highpass" ||
+           name == "moving_average" || name == "derivative" ||
+           name == "integral" || name == "unwrap_angle";
+}
+
+void assignStateIndices(Node& node, std::size_t& stateCount) {
+    if (node.kind == NodeKind::Function && isStatefulFunction(node.text)) {
+        node.stateIndex = stateCount++;
+    }
+    for (auto& child : node.children) assignStateIndices(*child, stateCount);
+}
+
+struct FunctionState {
+    bool initialized{};
+    Timestamp timestamp{};
+    double previousInput{};
+    double previousOutput{};
+    double accumulated{};
+    std::size_t windowLimit{};
+    std::deque<double> window;
+    double windowSum{};
+};
+
+enum class EvaluationStatus { Value, Warmup, Invalid };
+
+struct EvaluationResult {
+    EvaluationStatus status{EvaluationStatus::Invalid};
+    double value{};
+};
+
+enum class StateUpdateKind { Replace, PushWindow };
+
+struct StateUpdate {
+    std::size_t index{};
+    StateUpdateKind kind{StateUpdateKind::Replace};
+    FunctionState replacement;
+    double windowValue{};
+    std::size_t windowLimit{};
+    Timestamp timestamp{};
+};
+
+struct EvaluationContext {
+    const std::unordered_map<std::string, double>& values;
+    const std::vector<FunctionState>& states;
+    std::vector<StateUpdate> updates;
+    Timestamp timestamp{};
+};
+
+EvaluationResult valueResult(double value) {
+    return std::isfinite(value)
+               ? EvaluationResult{EvaluationStatus::Value, value}
+               : EvaluationResult{};
+}
+
+EvaluationResult evaluate(Node& node, EvaluationContext& context) {
     switch (node.kind) {
     case NodeKind::Number:
-        return node.number;
+        return valueResult(node.number);
     case NodeKind::Variable: {
-        const auto found = values.find(node.text);
-        if (found != values.end()) return found->second;
-        if (node.text == "pi") return 3.14159265358979323846;
-        if (node.text == "e") return 2.71828182845904523536;
-        return std::nullopt;
+        const auto found = context.values.find(node.text);
+        if (found != context.values.end()) return valueResult(found->second);
+        if (node.text == "pi") return valueResult(3.14159265358979323846);
+        if (node.text == "e") return valueResult(2.71828182845904523536);
+        return {};
     }
     case NodeKind::Unary: {
-        const auto operand = evaluate(*node.children.front(), values);
-        if (!operand) return std::nullopt;
-        return node.operation == '-' ? -*operand : *operand;
+        const auto operand = evaluate(*node.children.front(), context);
+        if (operand.status != EvaluationStatus::Value) return operand;
+        return valueResult(node.operation == '-' ? -operand.value : operand.value);
     }
     case NodeKind::Binary: {
-        const auto left = evaluate(*node.children[0], values);
-        const auto right = evaluate(*node.children[1], values);
-        if (!left || !right) return std::nullopt;
+        const auto left = evaluate(*node.children[0], context);
+        if (left.status != EvaluationStatus::Value) return left;
+        const auto right = evaluate(*node.children[1], context);
+        if (right.status != EvaluationStatus::Value) return right;
         double result{};
         switch (node.operation) {
-        case '+': result = *left + *right; break;
-        case '-': result = *left - *right; break;
-        case '*': result = *left * *right; break;
+        case '+': result = left.value + right.value; break;
+        case '-': result = left.value - right.value; break;
+        case '*': result = left.value * right.value; break;
         case '/':
-            if (*right == 0.0) return std::nullopt;
-            result = *left / *right;
+            if (right.value == 0.0) return {};
+            result = left.value / right.value;
             break;
-        default: return std::nullopt;
+        default: return {};
         }
-        return std::isfinite(result) ? std::optional<double>{result} : std::nullopt;
+        return valueResult(result);
     }
     case NodeKind::Function:
         break;
@@ -385,16 +448,129 @@ std::optional<double> evaluate(
 
     std::vector<double> arguments;
     arguments.reserve(node.children.size());
-    for (const auto& child : node.children) {
-        const auto argument = evaluate(*child, values);
-        if (!argument) return std::nullopt;
-        arguments.push_back(*argument);
+    for (auto& child : node.children) {
+        const auto argument = evaluate(*child, context);
+        if (argument.status != EvaluationStatus::Value) return argument;
+        arguments.push_back(argument.value);
     }
+
+    if (isStatefulFunction(node.text)) {
+        if (node.stateIndex >= context.states.size()) return {};
+        const auto& state = context.states[node.stateIndex];
+        const auto input = arguments[0];
+        FunctionState next = state;
+        next.initialized = true;
+        next.timestamp = context.timestamp;
+        next.previousInput = input;
+
+        if (node.text == "lowpass") {
+            const auto alpha = arguments[1];
+            if (!(alpha > 0.0 && alpha <= 1.0)) return {};
+            const auto output = state.initialized
+                                    ? alpha * input + (1.0 - alpha) * state.previousOutput
+                                    : input;
+            if (!std::isfinite(output)) return {};
+            next.previousOutput = output;
+            context.updates.push_back(
+                {node.stateIndex, StateUpdateKind::Replace, std::move(next), 0.0, 0, 0});
+            return valueResult(output);
+        }
+        if (node.text == "highpass") {
+            const auto alpha = arguments[1];
+            if (!(alpha > 0.0 && alpha <= 1.0)) return {};
+            const auto output = state.initialized
+                                    ? alpha * (state.previousOutput + input -
+                                               state.previousInput)
+                                    : 0.0;
+            if (!std::isfinite(output)) return {};
+            next.previousOutput = output;
+            context.updates.push_back(
+                {node.stateIndex, StateUpdateKind::Replace, std::move(next), 0.0, 0, 0});
+            return valueResult(output);
+        }
+        if (node.text == "moving_average") {
+            const auto requested = arguments[1];
+            if (requested < 1.0 || requested > 4096.0 ||
+                std::floor(requested) != requested) {
+                return {};
+            }
+            const auto limit = static_cast<std::size_t>(requested);
+            double sum = input;
+            std::size_t count = 1;
+            if (state.initialized && state.windowLimit == limit) {
+                sum += state.windowSum;
+                count += state.window.size();
+                if (state.window.size() >= limit) {
+                    sum -= state.window.front();
+                    --count;
+                }
+            }
+            const auto output = sum / static_cast<double>(count);
+            if (!std::isfinite(output)) return {};
+            context.updates.push_back({node.stateIndex,
+                                       StateUpdateKind::PushWindow,
+                                       {},
+                                       input,
+                                       limit,
+                                       context.timestamp});
+            return valueResult(output);
+        }
+        if (node.text == "derivative") {
+            if (!state.initialized || context.timestamp <= state.timestamp) {
+                context.updates.push_back(
+                    {node.stateIndex, StateUpdateKind::Replace, std::move(next), 0.0, 0, 0});
+                return {EvaluationStatus::Warmup, 0.0};
+            }
+            const auto elapsed = static_cast<double>(
+                static_cast<long double>(context.timestamp) -
+                static_cast<long double>(state.timestamp)) / 1'000'000'000.0;
+            const auto output = (input - state.previousInput) / elapsed;
+            if (!std::isfinite(output)) return {};
+            next.previousOutput = output;
+            context.updates.push_back(
+                {node.stateIndex, StateUpdateKind::Replace, std::move(next), 0.0, 0, 0});
+            return valueResult(output);
+        }
+        if (node.text == "integral") {
+            if (state.initialized && context.timestamp <= state.timestamp) {
+                return valueResult(state.accumulated);
+            }
+            auto output = 0.0;
+            if (state.initialized) {
+                const auto elapsed = static_cast<double>(
+                    static_cast<long double>(context.timestamp) -
+                    static_cast<long double>(state.timestamp)) / 1'000'000'000.0;
+                output = state.accumulated +
+                         0.5 * (state.previousInput + input) * elapsed;
+            }
+            if (!std::isfinite(output)) return {};
+            next.accumulated = output;
+            next.previousOutput = output;
+            context.updates.push_back(
+                {node.stateIndex, StateUpdateKind::Replace, std::move(next), 0.0, 0, 0});
+            return valueResult(output);
+        }
+        if (node.text == "unwrap_angle") {
+            auto output = input;
+            if (state.initialized) {
+                constexpr double twoPi = 6.28318530717958647692;
+                const auto delta = std::remainder(input - state.previousInput, twoPi);
+                output = state.previousOutput + delta;
+            }
+            if (!std::isfinite(output)) return {};
+            next.previousOutput = output;
+            context.updates.push_back(
+                {node.stateIndex, StateUpdateKind::Replace, std::move(next), 0.0, 0, 0});
+            return valueResult(output);
+        }
+        return {};
+    }
+
     double result{};
     if (node.text == "abs") {
         result = std::abs(arguments[0]);
     } else if (node.text == "sqrt") {
-        if (arguments[0] < 0.0) return std::nullopt;
+        if (arguments[0] < 0.0) return {};
         result = std::sqrt(arguments[0]);
     } else if (node.text == "min") {
         result = std::min(arguments[0], arguments[1]);
@@ -403,12 +579,39 @@ std::optional<double> evaluate(
     } else if (node.text == "pow") {
         result = std::pow(arguments[0], arguments[1]);
     } else if (node.text == "clamp") {
-        if (arguments[1] > arguments[2]) return std::nullopt;
+        if (arguments[1] > arguments[2]) return {};
         result = std::clamp(arguments[0], arguments[1], arguments[2]);
     } else {
-        return std::nullopt;
+        return {};
     }
-    return std::isfinite(result) ? std::optional<double>{result} : std::nullopt;
+    return valueResult(result);
+}
+
+void commitStateUpdates(std::vector<FunctionState>& states,
+                        const std::vector<StateUpdate>& updates) {
+    for (const auto& update : updates) {
+        if (update.index >= states.size()) continue;
+        if (update.kind == StateUpdateKind::Replace) {
+            states[update.index] = update.replacement;
+            continue;
+        }
+        auto& state = states[update.index];
+        if (!state.initialized || state.windowLimit != update.windowLimit) {
+            state = {};
+            state.initialized = true;
+            state.windowLimit = update.windowLimit;
+        }
+        state.timestamp = update.timestamp;
+        state.previousInput = update.windowValue;
+        state.window.push_back(update.windowValue);
+        state.windowSum += update.windowValue;
+        while (state.window.size() > state.windowLimit) {
+            state.windowSum -= state.window.front();
+            state.window.pop_front();
+        }
+        state.previousOutput =
+            state.windowSum / static_cast<double>(state.window.size());
+    }
 }
 
 std::string qualifiedName(const DataSample& sample) {
@@ -425,6 +628,7 @@ struct DerivedFieldEngine::Impl {
         DerivedFieldDefinition definition;
         std::unique_ptr<Node> expression;
         std::unordered_set<std::string> dependencies;
+        std::vector<FunctionState> states;
     };
 
     mutable std::mutex mutex;
@@ -454,6 +658,7 @@ DerivedFieldConfigurationResult DerivedFieldEngine::setDefinitions(
     std::vector<Impl::CompiledDefinition> compiled;
     compiled.reserve(definitions.size());
     std::unordered_map<std::string, std::size_t> indices;
+    std::size_t totalStatefulFunctions = 0;
     for (std::size_t index = 0; index < definitions.size(); ++index) {
         auto& definition = definitions[index];
         if (definition.name.empty()) {
@@ -505,8 +710,20 @@ DerivedFieldConfigurationResult DerivedFieldEngine::setDefinitions(
         }
         std::unordered_set<std::string> dependencies;
         collectDependencies(*parsed.root, dependencies);
-        compiled.push_back(
-            {std::move(definition), std::move(parsed.root), std::move(dependencies)});
+        std::size_t stateCount = 0;
+        assignStateIndices(*parsed.root, stateCount);
+        if (stateCount > maximumStatefulFunctions - totalStatefulFunctions) {
+            result.issues.push_back({index,
+                                     "too_many_stateful_functions",
+                                     "at most 512 stateful functions are allowed",
+                                     0});
+            continue;
+        }
+        totalStatefulFunctions += stateCount;
+        compiled.push_back({std::move(definition),
+                            std::move(parsed.root),
+                            std::move(dependencies),
+                            std::vector<FunctionState>(stateCount)});
     }
     if (!result.success()) return result;
 
@@ -573,6 +790,9 @@ void DerivedFieldEngine::clear() {
 void DerivedFieldEngine::resetValues() {
     std::scoped_lock lock(impl_->mutex);
     impl_->latestValues.clear();
+    for (auto& definition : impl_->compiled) {
+        definition.states.assign(definition.states.size(), {});
+    }
     impl_->aliasOwners.clear();
     impl_->ambiguousAliases.clear();
     impl_->nextSequence = 0;
@@ -649,18 +869,27 @@ std::vector<DataSample> DerivedFieldEngine::consumeBatch(
                             return changed.contains(dependency);
                         });
         if (!dependencyChanged) continue;
-        const auto value = evaluate(*definition.expression, impl_->latestValues);
-        if (!value) {
+        EvaluationContext context{
+            impl_->latestValues, definition.states, {}, trigger.timestamp};
+        const auto value = evaluate(*definition.expression, context);
+        if (value.status == EvaluationStatus::Warmup) {
+            commitStateUpdates(definition.states, context.updates);
             impl_->latestValues.erase(definition.definition.name);
             changed.insert(definition.definition.name);
             continue;
         }
-        impl_->latestValues[definition.definition.name] = *value;
+        if (value.status != EvaluationStatus::Value) {
+            impl_->latestValues.erase(definition.definition.name);
+            changed.insert(definition.definition.name);
+            continue;
+        }
+        commitStateUpdates(definition.states, context.updates);
+        impl_->latestValues[definition.definition.name] = value.value;
         changed.insert(definition.definition.name);
         output.push_back({trigger.timestamp,
                           "derived",
                           definition.definition.name,
-                          *value,
+                          value.value,
                           definition.definition.unit,
                           impl_->nextSequence++});
     }

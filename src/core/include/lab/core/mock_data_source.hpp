@@ -21,6 +21,7 @@ public:
     [[nodiscard]] SourceStatistics statistics() const noexcept override;
 
     void feed(std::span<const std::uint8_t> data, Timestamp sourceTimestamp = 0);
+    void feedSamples(std::span<const DataSample> samples);
     [[nodiscard]] std::vector<std::vector<std::uint8_t>> writes() const;
 
 private:
@@ -36,4 +37,3 @@ private:
 };
 
 }  // namespace lab::core
-

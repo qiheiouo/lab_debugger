@@ -19,9 +19,9 @@ DerivedFieldsWidget::DerivedFieldsWidget(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("derivedFieldsWidget"));
 
     auto* explanation = new QLabel(
-        tr("用已有数值字段生成新曲线。支持 +、-、*、/、括号和 "
-           "abs / sqrt / min / max / pow / clamp。复杂字段名请放在反引号中，"
-           "例如 `serial:COM5.voltage`。"),
+        tr("用已有数值字段生成新曲线。除四则运算外，还支持低通、高通、移动平均、"
+           "微分、积分和角度展开。复杂字段名请放在反引号中，例如 "
+           "lowpass(`serial:COM5.voltage`, 0.2)。"),
         this);
     explanation->setObjectName(QStringLiteral("secondaryText"));
     explanation->setWordWrap(true);

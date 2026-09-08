@@ -773,6 +773,8 @@ void RemoteAgentSource::handleSample(
                      lab::core::Direction::Rx,
                      batch.serializedData});
     }
+    std::vector<lab::core::DataSample> samples;
+    samples.reserve(batch.fields.size());
     for (const auto& field : batch.fields) {
         double value = 0.0;
         if (const auto* numeric = std::get_if<double>(&field.value)) {
@@ -782,13 +784,14 @@ void RemoteAgentSource::handleSample(
         } else {
             continue;
         }
-        publishSample({timestamp,
-                       id,
-                       batch.topic + "." + field.path,
-                       value,
-                       field.unit,
-                       frame.sequence});
+        samples.push_back({timestamp,
+                           id,
+                           batch.topic + "." + field.path,
+                           value,
+                           field.unit,
+                           frame.sequence});
     }
+    publishSamples(samples);
     const auto callbacks = agentCallbacks();
     if (callbacks.onSampleBatch) callbacks.onSampleBatch(batch);
 }

@@ -135,7 +135,7 @@ void runTest() {
         session.connectRemoteAgent({"127.0.0.1",
                                     agentServer.serverPort(),
                                     "Multi-source test",
-                                    "0.16.0",
+                                    "0.17.0",
                                     false});
         require(waitFor([&] { return agentServer.hasPendingConnections(); }),
                 "Remote Agent fixture accepts client");
@@ -203,7 +203,7 @@ void runTest() {
         session.connectRemoteAgent({"127.0.0.1",
                                     agentServer.serverPort(),
                                     "Multi-source test",
-                                    "0.16.0",
+                                    "0.17.0",
                                     false});
         require(waitFor([&] { return agentServer.hasPendingConnections(); }),
                 "late Agent fixture accepts client");
@@ -251,7 +251,7 @@ void runTest() {
 
     const auto metadata = readJsonObject(root / "metadata.json");
     require(metadata.value(QStringLiteral("software_version")).toString() ==
-                QStringLiteral("0.16.0"),
+                QStringLiteral("0.17.0"),
             "metadata records current application version");
     require(metadata.value(QStringLiteral("status")).toString() ==
                 QStringLiteral("completed"),

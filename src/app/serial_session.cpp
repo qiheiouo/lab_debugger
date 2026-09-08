@@ -126,21 +126,28 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
             if (key != remoteAgentSourceKey) {
                 return;
             }
-            std::vector<lab::core::DataSample> derived;
             {
                 std::scoped_lock routeLock(routingMutex_);
-                const auto recording = recorder_.isRecording();
                 const auto declared = isDeclaredRecordingSource(key);
                 timeSeries_.append(sample);
                 if (declared) {
                     recorder_.enqueueSample(sample);
                 }
-                if (!recording || declared) {
-                    derived = appendDerivedSamples(
-                        std::span<const lab::core::DataSample>(&sample, 1), declared);
-                }
             }
             discoverLiveField(sample.field);
+        },
+        [this](const std::string& key,
+               std::span<const lab::core::DataSample> samples) {
+            if (key != remoteAgentSourceKey || samples.empty()) return;
+            std::vector<lab::core::DataSample> derived;
+            {
+                std::scoped_lock routeLock(routingMutex_);
+                const auto recording = recorder_.isRecording();
+                const auto declared = isDeclaredRecordingSource(key);
+                if (!recording || declared) {
+                    derived = appendDerivedSamples(samples, declared);
+                }
+            }
             for (const auto& output : derived) discoverLiveField(output.field);
         }});
     static_cast<void>(sourceManager_.add(std::string(serialSourceKey), source_));
@@ -308,17 +315,20 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 },
                 Qt::QueuedConnection);
         },
+        {},
         {}});
 
     processing_.setQualifyFieldNames(true);
     processing_.setSampleHandler([this](const lab::core::DataSample& sample) {
         recorder_.enqueueSample(sample);
         discoverLiveField(sample.field);
-        for (const auto& output : appendDerivedSamples(
-                 std::span<const lab::core::DataSample>(&sample, 1), true)) {
-            discoverLiveField(output.field);
-        }
     });
+    processing_.setSampleBatchHandler(
+        [this](std::span<const lab::core::DataSample> samples) {
+            for (const auto& output : appendDerivedSamples(samples, true)) {
+                discoverLiveField(output.field);
+            }
+        });
 
     processing_.setFrameHandler([this](const lab::core::FrameEvent& event) {
         {
@@ -704,7 +714,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.16.0";
+    options.softwareVersion = "0.17.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -1123,7 +1133,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.16.0";
+            options.softwareVersion = "0.17.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {

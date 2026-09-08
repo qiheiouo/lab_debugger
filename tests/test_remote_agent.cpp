@@ -44,6 +44,7 @@ struct Events {
     std::mutex mutex;
     std::vector<DataChunk> chunks;
     std::vector<DataSample> samples;
+    std::vector<std::vector<DataSample>> sampleBatches;
     std::vector<SourceState> states;
     std::vector<std::string> errors;
     std::vector<Hello> hellos;
@@ -70,6 +71,10 @@ struct Events {
             [this](const DataSample& sample) {
                 std::scoped_lock lock(mutex);
                 samples.push_back(sample);
+            },
+            [this](std::span<const DataSample> batch) {
+                std::scoped_lock lock(mutex);
+                sampleBatches.emplace_back(batch.begin(), batch.end());
             }};
     }
 
@@ -103,7 +108,9 @@ struct Events {
 
     bool receivedApplicationData() {
         std::scoped_lock lock(mutex);
-        return chunks.size() == 1 && samples.size() == 2 && batches.size() == 1;
+        return chunks.size() == 1 && samples.size() == 2 &&
+               sampleBatches.size() == 1 && sampleBatches.front().size() == 2 &&
+               batches.size() == 1;
     }
 
     bool receivedCatalogAndIssue() {

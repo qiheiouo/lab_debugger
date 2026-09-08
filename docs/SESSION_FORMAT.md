@@ -1,6 +1,6 @@
 # Session 记录与回放格式
 
-Lab Debugger 0.3 引入目录式 Session，0.4 将 TCP/UDP 配置纳入同一格式，0.8 为 Remote Agent 增加时钟质量事件，0.11 允许 rosbag2 SQLite 安全转换到同一容器，0.15 允许串口、网络和 Remote Agent 同时进入一个 Session，0.16 保存安全派生变量并在回放时恢复。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
+Lab Debugger 0.3 引入目录式 Session，0.4 将 TCP/UDP 配置纳入同一格式，0.8 为 Remote Agent 增加时钟质量事件，0.11 允许 rosbag2 SQLite 安全转换到同一容器，0.15 允许串口、网络和 Remote Agent 同时进入一个 Session，0.16 保存安全派生变量并在回放时恢复，0.17 为派生表达式增加确定性的滤波与时域状态。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
 
 ```text
 session_YYYYMMDD_HHMMSS/
@@ -31,7 +31,7 @@ session_YYYYMMDD_HHMMSS/
 
 串口配置记录端口、波特率、数据位、停止位、校验和流控；网络配置记录 `tcp_client` / `tcp_server` / `udp` 模式、绑定地址、本地端口、远端地址和远端端口。Remote Agent 配置还记录自动重连开关、`ping_pong_min_rtt` 时钟估计方法和 2 秒采样间隔。开始记录时，当前所有已连接实时源都会写入 `sources` 和逐源配置文件；记录期间只允许这些来源按原配置重连，防止出现未声明来源。
 
-`configuration/derived_fields.json` 保存名称、受限表达式与单位。开始记录时派生配置和最近值状态同时冻结：最近值清空后只由本 Session 已声明来源重新建立，记录期间拒绝改变表达式，迟到的未声明来源不能污染派生结果。
+`configuration/derived_fields.json` 保存名称、受限表达式与单位。开始记录时派生配置、最近值和滤波/时域状态同时冻结：历史清空后只由本 Session 已声明来源重新建立，记录期间拒绝改变表达式，迟到的未声明来源不能污染派生结果。滤波历史无需另存为不透明状态；回放以原始流和保存的表达式确定性重算。
 
 ## 原始流格式
 
@@ -62,7 +62,7 @@ repeat:
 - 支持 `0.1× / 0.5× / 1× / 2× / 5× / 10×`、暂停、继续和跳转；
 - 跳转时先建立处理屏障，再清理半帧/半行缓存和旧曲线，避免把跳转前后的字节拼成伪帧；
 - Session 的初始协议或 CSV 字段配置会自动恢复。
-- 派生变量配置会自动恢复并从原始数据重新计算；跳转同时清空派生最近值，避免使用跳转前的输入。
+- 派生变量配置会自动恢复并从原始数据重新计算；跳转同时清空派生最近值、滤波窗口、积分累计和微分基线，避免使用跳转前的输入。
 - 普通 CSV/二进制回放按记录中的 `sourceId` 分别恢复半行/半帧状态；曲线字段使用“`sourceId.字段`”，同名字段不会跨来源合并。
 
 rosbag2 导入 Session 在没有结构化采样时标记 `replay_mode: raw-only`，存在可信内置映射时标记 `replay_mode: rosbag2-structured`，并在 `configuration/rosbag2.json` 保存本次选中的 Topic/类型及 `field_mapping`。两种模式都保留选中数据的完整时间轴和原始 CDR，并明确跳过普通 CSV 与自定义二进制协议解析；结构化模式由专用 CDR 映射器按原始记录序号把数值直接送入曲线。`values.csv` 保存同一批结构化结果用于离线分析，`counts.samples`、`mapped_message_count` 和 `mapping_failure_count` 提供可核验计数。若来源带 `metadata.yaml`，其原始字节保存到 `configuration/rosbag2_metadata.yaml`，摘要、SHA-256 和 SQLite 交叉校验结果同时写入 `configuration/rosbag2.json` 与 `metadata.json.import.metadata_yaml`。单文件、分卷归并、Topic 筛选和限制见 [rosbag2 导入说明](ROSBAG2.md)。
