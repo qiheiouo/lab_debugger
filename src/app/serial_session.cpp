@@ -25,6 +25,8 @@ namespace {
 constexpr std::string_view serialSourceKey = "serial";
 constexpr std::string_view networkSourceKey = "network";
 constexpr std::string_view remoteAgentSourceKey = "remote_agent";
+constexpr qint64 maximumDerivedConfigurationBytes = 1024 * 1024;
+constexpr qsizetype maximumDerivedDefinitions = 128;
 
 bool sameSettings(const lab::adapters::serial::SerialSettings& left,
                   const lab::adapters::serial::SerialSettings& right) {
@@ -305,7 +307,8 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                     emit sourceError(tr("回放：%1").arg(QString::fromStdString(message)));
                 },
                 Qt::QueuedConnection);
-        }});
+        },
+        {}});
 
     processing_.setQualifyFieldNames(true);
     processing_.setSampleHandler([this](const lab::core::DataSample& sample) {
@@ -929,26 +932,52 @@ bool SerialSession::openReplaySession(const QString& directory) {
             emit replayOpenFailed(tr("无法读取 Session 派生变量配置"));
             return false;
         }
-        const auto document = QJsonDocument::fromJson(derivedFile.readAll());
-        if (!document.isObject() ||
-            !document.object().value(QStringLiteral("fields")).isArray()) {
+        const auto declaredSize = derivedFile.size();
+        if (declaredSize < 0 || declaredSize > maximumDerivedConfigurationBytes) {
+            emit replayOpenFailed(tr("Session 派生变量配置超过 1 MiB 安全限制"));
+            return false;
+        }
+        const auto contents = derivedFile.readAll();
+        if (derivedFile.error() != QFileDevice::NoError ||
+            contents.size() != declaredSize) {
+            emit replayOpenFailed(tr("Session 派生变量配置读取不完整"));
+            return false;
+        }
+        const auto document = QJsonDocument::fromJson(contents);
+        if (!document.isObject()) {
             emit replayOpenFailed(tr("Session 派生变量配置已损坏"));
             return false;
         }
-        for (const auto& value :
-             document.object().value(QStringLiteral("fields")).toArray()) {
+        const auto object = document.object();
+        const auto formatVersion = object.value(QStringLiteral("format_version"));
+        const auto fieldsValue = object.value(QStringLiteral("fields"));
+        if (!formatVersion.isDouble() || formatVersion.toDouble() != 1.0 ||
+            !fieldsValue.isArray()) {
+            emit replayOpenFailed(tr("Session 派生变量配置格式版本不受支持或字段缺失"));
+            return false;
+        }
+        const auto fields = fieldsValue.toArray();
+        if (fields.size() > maximumDerivedDefinitions) {
+            emit replayOpenFailed(tr("Session 派生变量配置超过 128 项安全限制"));
+            return false;
+        }
+        for (const auto& value : fields) {
             if (!value.isObject()) {
                 emit replayOpenFailed(tr("Session 派生变量配置包含无效条目"));
                 return false;
             }
             const auto field = value.toObject();
+            const auto name = field.value(QStringLiteral("name"));
+            const auto expression = field.value(QStringLiteral("expression"));
+            const auto unit = field.value(QStringLiteral("unit"));
+            if (!name.isString() || !expression.isString() || !unit.isString()) {
+                emit replayOpenFailed(tr("Session 派生变量配置条目类型无效"));
+                return false;
+            }
             QVariantMap restored;
-            restored.insert(QStringLiteral("name"),
-                            field.value(QStringLiteral("name")).toString());
-            restored.insert(QStringLiteral("expression"),
-                            field.value(QStringLiteral("expression")).toString());
-            restored.insert(QStringLiteral("unit"),
-                            field.value(QStringLiteral("unit")).toString());
+            restored.insert(QStringLiteral("name"), name.toString());
+            restored.insert(QStringLiteral("expression"), expression.toString());
+            restored.insert(QStringLiteral("unit"), unit.toString());
             restoredDerivedFields.push_back(restored);
         }
     }

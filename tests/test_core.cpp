@@ -100,6 +100,12 @@ void testTimeSeriesAndStatistics() {
 
 void testDerivedFieldEngine() {
     lab::core::DerivedFieldEngine engine;
+    const auto findOutput = [](const std::vector<lab::core::DataSample>& output,
+                               const std::string& name) {
+        return std::find_if(output.begin(), output.end(), [&name](const auto& sample) {
+            return sample.field == name;
+        });
+    };
     const auto configured = engine.setDefinitions({
         {"power", "voltage * current", "W"},
         {"limited_power", "clamp(abs(power), 0, 1000)", "W"},
@@ -163,6 +169,64 @@ void testDerivedFieldEngine() {
                             4}).empty(),
             "non-finite input invalidates dependent derived values");
 
+    const auto math = engine.setDefinitions({
+        {"arithmetic", "-(a + 2) * 3 / 2 - +b", {}},
+        {"functions",
+         "abs(c) + sqrt(d) + min(low, high) + max(low, high) + pow(base, 2) + "
+         "clamp(limit, 0, 10)",
+         {}},
+        {"constants", "pi + e", {}}});
+    require(math.success(), "operators, parentheses, functions, and constants compile");
+    const std::array<lab::core::DataSample, 8> mathInputs{{
+        {40, "mock", "a", 4.0, {}, 1},
+        {40, "mock", "b", 1.0, {}, 1},
+        {40, "mock", "c", -3.0, {}, 1},
+        {40, "mock", "d", 16.0, {}, 1},
+        {40, "mock", "low", 2.0, {}, 1},
+        {40, "mock", "high", 5.0, {}, 1},
+        {40, "mock", "base", 3.0, {}, 1},
+        {40, "mock", "limit", 20.0, {}, 1}}};
+    const auto mathOutput = engine.consumeBatch(mathInputs);
+    const auto arithmetic = findOutput(mathOutput, "arithmetic");
+    const auto functions = findOutput(mathOutput, "functions");
+    const auto constants = findOutput(mathOutput, "constants");
+    require(arithmetic != mathOutput.end() && arithmetic->value == -10.0,
+            "four arithmetic operators, parentheses, and unary signs evaluate safely");
+    require(functions != mathOutput.end() && functions->value == 33.0,
+            "all whitelisted functions evaluate with the expected result");
+    require(constants != mathOutput.end() &&
+                std::abs(constants->value -
+                         (3.14159265358979323846 + 2.71828182845904523536)) < 1e-12,
+            "pi and e constants evaluate precisely");
+
+    const auto runtimeErrors = engine.setDefinitions({
+        {"negative_root", "sqrt(x)", {}},
+        {"overflow", "huge * huge", {}},
+        {"invalid_power", "pow(base_value, exponent)", {}}});
+    require(runtimeErrors.success(), "runtime-domain test expressions compile");
+    require(engine.consume({50, "mock", "x", -1.0, {}, 1}).empty(),
+            "negative square root produces no sample");
+    require(engine.consume({51,
+                            "mock",
+                            "huge",
+                            std::numeric_limits<double>::max(),
+                            {},
+                            2}).empty(),
+            "floating-point overflow produces no sample");
+    static_cast<void>(engine.consume({52, "mock", "base_value", -1.0, {}, 3}));
+    require(engine.consume({53, "mock", "exponent", 0.5, {}, 4}).empty(),
+            "pow domain errors produce no sample");
+    require(engine.consume({54,
+                            "mock",
+                            "x",
+                            std::numeric_limits<double>::infinity(),
+                            {},
+                            5}).empty(),
+            "infinite input produces no sample");
+    const auto recoveredRoot = engine.consume({55, "mock", "x", 9.0, {}, 6});
+    require(recoveredRoot.size() == 1 && recoveredRoot.front().value == 3.0,
+            "valid input recovers after square-root and non-finite failures");
+
     const auto previous = engine.definitions();
     const auto cycle = engine.setDefinitions({{"a", "b + 1", {}}, {"b", "a + 1", {}}});
     require(!cycle.success() && cycle.issues.front().code == "dependency_cycle" &&
@@ -171,6 +235,22 @@ void testDerivedFieldEngine() {
     const auto unsafe = engine.setDefinitions({{"bad", "system(1)", {}}});
     require(!unsafe.success() && unsafe.issues.front().code == "invalid_expression",
             "non-whitelisted functions are rejected");
+    const auto duplicate =
+        engine.setDefinitions({{"duplicate", "1", {}}, {"duplicate", "2", {}}});
+    require(!duplicate.success() && duplicate.issues.front().code == "duplicate_name" &&
+                engine.definitions() == previous,
+            "duplicate names are rejected without replacing valid definitions");
+    const auto tooLong =
+        engine.setDefinitions({{"long", std::string(4097, '1'), {}}});
+    require(!tooLong.success() &&
+                tooLong.issues.front().code == "expression_too_long" &&
+                engine.definitions() == previous,
+            "overlong expressions are rejected transactionally");
+    const auto nestedExpression = std::string(70, '(') + "1" + std::string(70, ')');
+    const auto tooDeep = engine.setDefinitions({{"deep", nestedExpression, {}}});
+    require(!tooDeep.success() && tooDeep.issues.front().code == "invalid_expression" &&
+                engine.definitions() == previous,
+            "overly deep expressions are rejected transactionally");
 }
 
 void testCsvSplitChunksAndInvalidLine() {
@@ -195,7 +275,8 @@ void testCsvSplitChunksAndInvalidLine() {
 void testMockDataSource() {
     lab::core::MockDataSource source;
     std::vector<lab::core::DataChunk> events;
-    source.setCallbacks({[&events](const auto& chunk) { events.push_back(chunk); }, {}, {}});
+    source.setCallbacks(
+        {[&events](const auto& chunk) { events.push_back(chunk); }, {}, {}, {}});
     require(source.open(), "mock opens");
     const std::vector<std::uint8_t> rx{1, 2, 3};
     source.feed(rx, 42);
@@ -453,6 +534,7 @@ void testReplaySourceControls() {
             }
             eventsReady.notify_all();
         },
+        {},
         {},
         {}});
     require(replay.open(), "replay source opens raw log");

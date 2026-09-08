@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QHostAddress>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QThread>
@@ -61,6 +62,13 @@ quint16 reserveUdpPort() {
 std::string readText(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+void writeText(const std::filesystem::path& path, const std::string& text) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    require(static_cast<bool>(output), "opens derived configuration for writing");
+    output.write(text.data(), static_cast<std::streamsize>(text.size()));
+    require(static_cast<bool>(output), "writes complete derived configuration");
 }
 
 QVariantList powerDefinition(quint16 port) {
@@ -129,16 +137,41 @@ int main(int argc, char* argv[]) {
                 "derived sample is recorded as a normal session value");
         const auto configuration = readText(
             root / "configuration" / "derived_fields.json");
-        require(configuration.find("udp:127.0.0.1:") != std::string::npos &&
-                    configuration.find("\"name\": \"power\"") != std::string::npos,
-                "session preserves the exact derived expression");
+        const auto configurationDocument =
+            QJsonDocument::fromJson(QByteArray::fromStdString(configuration));
+        const auto configuredFields =
+            configurationDocument.object().value(QStringLiteral("fields")).toArray();
+        require(configurationDocument.isObject() && configuredFields.size() == 1,
+                "session writes one derived definition in a JSON object");
+        const auto configuredPower = configuredFields.at(0).toObject();
+        const auto expectedPower = powerDefinition(sessionPort).front().toMap();
+        require(configurationDocument.object()
+                        .value(QStringLiteral("format_version"))
+                        .toInt() == 1 &&
+                    configuredPower.value(QStringLiteral("name")).toString() ==
+                        QStringLiteral("power") &&
+                    configuredPower.value(QStringLiteral("expression")).toString() ==
+                        expectedPower.value(QStringLiteral("expression")).toString() &&
+                    configuredPower.value(QStringLiteral("unit")).toString() ==
+                        QStringLiteral("W"),
+                "session preserves the exact derived name, expression, and unit");
 
         QVariantList restored;
+        int restoreSignals = 0;
         QObject::connect(
             &session,
             &lab::app::SerialSession::derivedFieldsRestored,
             &session,
-            [&restored](const QVariantList& definitions) { restored = definitions; });
+            [&restored, &restoreSignals](const QVariantList& definitions) {
+                restored = definitions;
+                ++restoreSignals;
+            });
+        QString replayFailure;
+        QObject::connect(
+            &session,
+            &lab::app::SerialSession::replayOpenFailed,
+            &session,
+            [&replayFailure](const QString& message) { replayFailure = message; });
         bool atEnd = false;
         QObject::connect(
             &session,
@@ -159,7 +192,61 @@ int main(int argc, char* argv[]) {
                     return points.size() == 1 && points.front().value == 48.0;
                 }),
                 "replay deterministically recreates the derived curve");
+        session.seekReplay(0.0);
+        require(session.timeSeries().snapshot("power").empty(),
+                "replay seek clears derived curves and their previous input state");
         session.closeReplay();
+
+        const auto derivedPath = root / "configuration" / "derived_fields.json";
+        const auto derivedBackup = root / "configuration" / "derived_fields.backup";
+        std::filesystem::rename(derivedPath, derivedBackup);
+        restored = powerDefinition(sessionPort);
+        const auto signalsBeforeLegacyOpen = restoreSignals;
+        require(session.openReplaySession(fromPath(root)),
+                "legacy Session without derived configuration opens normally");
+        require(restoreSignals == signalsBeforeLegacyOpen + 1 && restored.empty(),
+                "legacy Session restores an explicit empty derived definition set");
+        session.closeReplay();
+        std::filesystem::rename(derivedBackup, derivedPath);
+
+        require(session.setDerivedFields(powerDefinition(sessionPort)),
+                "valid derived configuration is active before unsafe replay attempts");
+        writeText(derivedPath, "{\"format_version\":999,\"fields\":[]}");
+        replayFailure.clear();
+        require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
+                "unsupported derived configuration version is rejected explicitly");
+        writeText(derivedPath, "{not-json");
+        replayFailure.clear();
+        require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
+                "damaged derived configuration is rejected explicitly");
+        writeText(
+            derivedPath,
+            "{\"format_version\":1,\"fields\":[{\"name\":\"unsafe\","
+            "\"expression\":\"system(1)\",\"unit\":\"\"}]}");
+        replayFailure.clear();
+        require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
+                "unsafe derived expression is rejected explicitly");
+        writeText(derivedPath, std::string(1024 * 1024 + 1, ' '));
+        replayFailure.clear();
+        require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
+                "oversized derived configuration is rejected before parsing");
+        writeText(derivedPath, configuration);
+
+        networkOpen = false;
+        session.connectNetwork({lab::adapters::network::NetworkMode::Udp,
+                                "127.0.0.1",
+                                peer.localPort(),
+                                "127.0.0.1",
+                                sessionPort});
+        require(waitFor([&] { return networkOpen; }),
+                "UDP source reopens after unsafe replay attempts");
+        require(peer.writeDatagram(row, QHostAddress::LocalHost, sessionPort) == row.size(),
+                "UDP row is resent after unsafe replay attempts");
+        require(waitFor([&] {
+                    const auto points = session.timeSeries().snapshot("power");
+                    return points.size() == 1 && points.front().value == 48.0;
+                }),
+                "rejected Session configurations do not replace the valid definition");
         session.disconnectNetwork();
 
         std::filesystem::remove_all(root, cleanupError);

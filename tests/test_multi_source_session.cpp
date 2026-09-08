@@ -16,6 +16,7 @@
 #include <QThread>
 #include <QUdpSocket>
 #include <QUuid>
+#include <QVariantMap>
 
 #include <filesystem>
 #include <functional>
@@ -190,6 +191,14 @@ void runTest() {
         require(waitFor([&] { return !remoteOpen; }),
                 "first Agent connection closes");
 
+        QVariantMap lateDerived;
+        lateDerived.insert(QStringLiteral("name"),
+                           QStringLiteral("late_temperature_double"));
+        lateDerived.insert(QStringLiteral("expression"),
+                           QStringLiteral("`/temperature.data` * 2"));
+        lateDerived.insert(QStringLiteral("unit"), QStringLiteral("degC"));
+        require(session.setDerivedFields({lateDerived}),
+                "configures a derived value driven only by the late Agent");
         session.setCsvFields({QStringLiteral("value")});
         session.connectRemoteAgent({"127.0.0.1",
                                     agentServer.serverPort(),
@@ -230,6 +239,10 @@ void runTest() {
                            remote.size() == 1;
                 }),
                 "late source remains visible without entering the frozen recording set");
+        require(session.timeSeries()
+                    .snapshot("late_temperature_double")
+                    .empty(),
+                "late undeclared source cannot produce a frozen Session derived value");
         session.stopSession();
         session.disconnectRemoteAgent();
         session.disconnectNetwork();
@@ -314,8 +327,9 @@ void runTest() {
     const auto lateValueText = lateValues.readAll();
     require(lateValueText.contains(QByteArray::fromStdString(
                 "udp:127.0.0.1:" + std::to_string(sessionUdpPort) + ".value")) &&
-                !lateValueText.contains("/temperature.data"),
-            "late Agent curve is not written to the frozen Session");
+                !lateValueText.contains("/temperature.data") &&
+                !lateValueText.contains("late_temperature_double"),
+            "late Agent and its derived curve are not written to the frozen Session");
     lateValues.close();
 
     std::error_code cleanupError;

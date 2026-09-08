@@ -54,7 +54,8 @@ struct Events {
             [this](const std::string& error) {
                 std::scoped_lock lock(mutex);
                 errors.push_back(error);
-            }};
+            },
+            {}};
     }
 
     bool hasChunk(lab::core::Direction direction, const std::vector<std::uint8_t>& payload) {

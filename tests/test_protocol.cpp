@@ -228,13 +228,13 @@ void testAllFieldTypesAndByteArray() {
     definition.header = {0xF0};
     definition.fixedFrameLength = 22;
     definition.fields = {
-        {"i8", lab::core::FieldType::Int8, 1},
-        {"i16", lab::core::FieldType::Int16, 2, 0, lab::core::Endian::Big},
-        {"u32", lab::core::FieldType::UInt32, 4, 0, lab::core::Endian::Big},
-        {"i32", lab::core::FieldType::Int32, 8},
-        {"f64", lab::core::FieldType::Float64, 12},
-        {"flag", lab::core::FieldType::Boolean, 20},
-        {"raw", lab::core::FieldType::ByteArray, 21, 1}};
+        {"i8", lab::core::FieldType::Int8, 1, 0, lab::core::Endian::Little, 1.0, 0.0, {}, {}},
+        {"i16", lab::core::FieldType::Int16, 2, 0, lab::core::Endian::Big, 1.0, 0.0, {}, {}},
+        {"u32", lab::core::FieldType::UInt32, 4, 0, lab::core::Endian::Big, 1.0, 0.0, {}, {}},
+        {"i32", lab::core::FieldType::Int32, 8, 0, lab::core::Endian::Little, 1.0, 0.0, {}, {}},
+        {"f64", lab::core::FieldType::Float64, 12, 0, lab::core::Endian::Little, 1.0, 0.0, {}, {}},
+        {"flag", lab::core::FieldType::Boolean, 20, 0, lab::core::Endian::Little, 1.0, 0.0, {}, {}},
+        {"raw", lab::core::FieldType::ByteArray, 21, 1, lab::core::Endian::Little, 1.0, 0.0, {}, {}}};
     require(lab::core::validateProtocol(definition).empty(), "programmatic definition valid");
 
     std::vector<std::uint8_t> frame(22, 0);
@@ -359,8 +359,8 @@ void testInvalidDefinitions() {
     overlap.header = {0xAA};
     overlap.fixedFrameLength = 5;
     overlap.fields = {
-        {"a", lab::core::FieldType::UInt32, 1},
-        {"b", lab::core::FieldType::UInt16, 2}};
+        {"a", lab::core::FieldType::UInt32, 1, 0, lab::core::Endian::Little, 1.0, 0.0, {}, {}},
+        {"b", lab::core::FieldType::UInt16, 2, 0, lab::core::Endian::Little, 1.0, 0.0, {}, {}}};
     const auto issues = lab::core::validateProtocol(overlap);
     require(!issues.empty(), "overlapping fields rejected");
 }
