@@ -22,6 +22,8 @@
 
 #include <deque>
 #include <atomic>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -50,10 +52,15 @@ public slots:
     void connectNetwork(lab::adapters::network::NetworkSettings settings);
     void disconnectNetwork();
     void reconnectNetwork();
+    void disconnectLocalSource(const QString& sourceId);
+    void reconnectLocalSource(const QString& sourceId);
+    bool removeLocalSource(const QString& sourceId);
+    void disconnectAllLocalSources();
     void connectRemoteAgent(lab::adapters::remote_agent::RemoteAgentSettings settings);
     void disconnectRemoteAgent();
     void reconnectRemoteAgent();
     void setSendTarget(int target);
+    void setSendTargetSource(const QString& sourceId);
     void requestRemoteTopics();
     void subscribeRemoteTopic(lab::core::agent::SubscriptionRequest request);
     void unsubscribeRemoteTopic(lab::core::agent::SubscriptionRequest request);
@@ -89,6 +96,8 @@ signals:
                     QString sourceId);
     void sourceStateChanged(int state);
     void networkStateChanged(int state);
+    void localSourcesChanged(QVariantList sources);
+    void localSourceStateChanged(QString sourceId, QString type, int state);
     void remoteAgentStateChanged(int state);
     void remoteAgentHello(QString agentId,
                           QString softwareVersion,
@@ -160,8 +169,6 @@ private slots:
     void drainUiQueue();
 
 private:
-    enum class SendTarget { Serial = 0, Network = 1 };
-
     struct ActiveParserConfiguration {
         std::vector<std::string> csvFields;
         std::optional<lab::core::ProtocolDefinition> protocolDefinition;
@@ -177,15 +184,21 @@ private:
     void publishTimelineEvent(lab::core::SessionEvent event, bool record);
     void clearTimelineEvents();
     void leaveReplayForLiveSource();
+    void publishLocalSources();
     void publishParserSources();
     void clearSourceParserConfigurations();
     void resetParserDependentState();
     [[nodiscard]] lab::core::SessionParserConfiguration
     resolvedParserConfiguration(const std::string& sourceId) const;
     [[nodiscard]] bool isDeclaredRecordingSource(const std::string& key) const noexcept;
+    [[nodiscard]] bool isLocalSource(const std::string& key) const noexcept;
+    [[nodiscard]] QString localSourceType(const std::string& key) const;
+    void selectFallbackSendTarget();
 
-    lab::adapters::serial::SerialSource source_;
-    lab::adapters::network::NetworkSource network_;
+    std::map<std::string, std::unique_ptr<lab::adapters::serial::SerialSource>>
+        serialSources_;
+    std::map<std::string, std::unique_ptr<lab::adapters::network::NetworkSource>>
+        networkSources_;
     lab::adapters::remote_agent::RemoteAgentSource remoteAgent_;
     lab::core::SourceManager sourceManager_;
     lab::core::ReplaySource replay_;
@@ -193,15 +206,14 @@ private:
     std::atomic_bool replayStructuredRosbag_{};
     std::atomic_bool rosbagImporting_{};
     std::jthread rosbagImportWorker_;
-    lab::adapters::serial::SerialSettings lastSettings_;
-    lab::adapters::network::NetworkSettings lastNetworkSettings_;
     lab::adapters::remote_agent::RemoteAgentSettings lastRemoteAgentSettings_;
-    bool networkConfigured_{};
     bool remoteAgentConfigured_{};
-    SendTarget sendTarget_{SendTarget::Serial};
-    std::atomic_bool recordingSerial_{};
-    std::atomic_bool recordingNetwork_{};
-    std::atomic_bool recordingRemoteAgent_{};
+    std::string selectedSerialSource_;
+    std::string selectedNetworkSource_;
+    std::string sendTargetSource_;
+    std::map<std::string, lab::core::SourceState> localSourceStates_;
+    mutable std::mutex recordingSourcesMutex_;
+    std::set<std::string> recordingSourceKeys_;
     lab::core::TimeSeriesStore timeSeries_{120'000};
     lab::core::DerivedFieldEngine derivedFields_;
     lab::core::ThresholdAlertEngine alertRules_;

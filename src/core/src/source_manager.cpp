@@ -54,6 +54,28 @@ bool SourceManager::add(std::string key, IDataSource& source) {
     return true;
 }
 
+bool SourceManager::remove(const std::string& key) {
+    IDataSource* source = nullptr;
+    {
+        std::scoped_lock lock(mutex_);
+        const auto found = sources_.find(key);
+        if (found == sources_.end()) {
+            return false;
+        }
+        source = found->second;
+    }
+
+    source->close();
+    source->setCallbacks({});
+    std::scoped_lock lock(mutex_);
+    const auto found = sources_.find(key);
+    if (found == sources_.end() || found->second != source) {
+        return false;
+    }
+    sources_.erase(found);
+    return true;
+}
+
 void SourceManager::setCallbacks(SourceManagerCallbacks callbacks) {
     std::scoped_lock lock(mutex_);
     callbacks_ = std::move(callbacks);

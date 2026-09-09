@@ -26,9 +26,12 @@
 namespace lab::app {
 namespace {
 
-constexpr std::string_view serialSourceKey = "serial";
-constexpr std::string_view networkSourceKey = "network";
 constexpr std::string_view remoteAgentSourceKey = "remote_agent";
+constexpr std::string_view serialSourcePrefix = "serial:";
+constexpr std::string_view tcpClientSourcePrefix = "tcp-client:";
+constexpr std::string_view tcpServerSourcePrefix = "tcp-server:";
+constexpr std::string_view udpSourcePrefix = "udp:";
+constexpr std::size_t maximumLocalSources = 16;
 constexpr qint64 maximumDerivedConfigurationBytes = 1024 * 1024;
 constexpr qsizetype maximumDerivedDefinitions = 128;
 constexpr qint64 maximumProtocolDefinitionBytes = 1024 * 1024;
@@ -245,6 +248,16 @@ bool sameSettings(const lab::adapters::remote_agent::RemoteAgentSettings& left,
            left.autoReconnect == right.autoReconnect;
 }
 
+bool isSerialSourceKey(std::string_view key) {
+    return key.starts_with(serialSourcePrefix);
+}
+
+bool isNetworkSourceKey(std::string_view key) {
+    return key.starts_with(tcpClientSourcePrefix) ||
+           key.starts_with(tcpServerSourcePrefix) ||
+           key.starts_with(udpSourcePrefix);
+}
+
 }  // namespace
 
 SerialSession::SerialSession(QObject* parent) : QObject(parent) {
@@ -267,9 +280,9 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
         [this](const std::string& key,
                const std::string& sourceId,
                lab::core::SourceState state) {
-            const auto label = key == serialSourceKey
+            const auto label = isSerialSourceKey(key)
                                    ? "Serial"
-                                   : key == networkSourceKey ? "Network" : "Remote Agent";
+                                   : isNetworkSourceKey(key) ? "Network" : "Remote Agent";
             if (isDeclaredRecordingSource(key)) {
                 recorder_.enqueueEvent({lab::core::nowTimestampNs(),
                                         sourceId,
@@ -281,14 +294,26 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
             }
             QMetaObject::invokeMethod(
                 this,
-                [this, key, state] {
-                    if (key == serialSourceKey) {
-                        emit sourceStateChanged(static_cast<int>(state));
-                    } else if (key == networkSourceKey) {
-                        emit networkStateChanged(static_cast<int>(state));
-                    } else {
+                [this, key, sourceId, state] {
+                    if (key == remoteAgentSourceKey) {
                         emit remoteAgentStateChanged(static_cast<int>(state));
+                        return;
                     }
+                    if (!isLocalSource(key)) {
+                        return;
+                    }
+                    localSourceStates_.insert_or_assign(key, state);
+                    const auto type = localSourceType(key);
+                    emit localSourceStateChanged(QString::fromStdString(sourceId),
+                                                 type,
+                                                 static_cast<int>(state));
+                    if (key == selectedSerialSource_) {
+                        emit sourceStateChanged(static_cast<int>(state));
+                    }
+                    if (key == selectedNetworkSource_) {
+                        emit networkStateChanged(static_cast<int>(state));
+                    }
+                    publishLocalSources();
                 },
                 Qt::QueuedConnection);
         },
@@ -306,14 +331,16 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
             }
             QMetaObject::invokeMethod(
                 this,
-                [this, key, message] {
+                [this, key, sourceId, message] {
                     const auto detail = QString::fromStdString(message);
-                    if (key == networkSourceKey) {
-                        emit sourceError(tr("网络：%1").arg(detail));
-                    } else if (key == remoteAgentSourceKey) {
+                    if (key == remoteAgentSourceKey) {
                         emit sourceError(tr("Remote Agent：%1").arg(detail));
+                    } else if (isNetworkSourceKey(key)) {
+                        emit sourceError(tr("网络 %1：%2")
+                                             .arg(QString::fromStdString(sourceId), detail));
                     } else {
-                        emit sourceError(detail);
+                        emit sourceError(tr("串口 %1：%2")
+                                             .arg(QString::fromStdString(sourceId), detail));
                     }
                 },
                 Qt::QueuedConnection);
@@ -348,8 +375,6 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
             }
             for (const auto& output : derived) discoverLiveField(output.field);
         }});
-    static_cast<void>(sourceManager_.add(std::string(serialSourceKey), source_));
-    static_cast<void>(sourceManager_.add(std::string(networkSourceKey), network_));
     static_cast<void>(sourceManager_.add(std::string(remoteAgentSourceKey), remoteAgent_));
 
     remoteAgent_.setAgentCallbacks({
@@ -387,7 +412,7 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
         {},
         {},
         [this](const lab::core::ClockSyncEstimate& estimate) {
-            if (recordingRemoteAgent_.load()) {
+            if (isDeclaredRecordingSource(std::string(remoteAgentSourceKey))) {
                 recorder_.enqueueEvent({
                     estimate.measuredAtNs,
                     remoteAgent_.sourceId(),
@@ -594,16 +619,18 @@ void SerialSession::discoverLiveField(const std::string& field) {
 }
 
 bool SerialSession::isDeclaredRecordingSource(const std::string& key) const noexcept {
-    if (key == serialSourceKey) {
-        return recordingSerial_.load();
-    }
-    if (key == networkSourceKey) {
-        return recordingNetwork_.load();
-    }
-    if (key == remoteAgentSourceKey) {
-        return recordingRemoteAgent_.load();
-    }
-    return false;
+    std::scoped_lock lock(recordingSourcesMutex_);
+    return recordingSourceKeys_.contains(key);
+}
+
+bool SerialSession::isLocalSource(const std::string& key) const noexcept {
+    return serialSources_.contains(key) || networkSources_.contains(key);
+}
+
+QString SerialSession::localSourceType(const std::string& key) const {
+    return serialSources_.contains(key) ? QStringLiteral("serial")
+         : networkSources_.contains(key) ? QStringLiteral("network")
+                                        : QString{};
 }
 
 std::vector<lab::core::DataSample> SerialSession::appendDerivedSamples(
@@ -688,10 +715,63 @@ void SerialSession::leaveReplayForLiveSource() {
     clearTimelineEvents();
 }
 
+void SerialSession::publishLocalSources() {
+    QVariantList sources;
+    sources.reserve(static_cast<qsizetype>(serialSources_.size() +
+                                           networkSources_.size()));
+    for (const auto& [sourceId, source] : serialSources_) {
+        const auto settings = source->settings();
+        QVariantMap item;
+        item.insert(QStringLiteral("id"), QString::fromStdString(sourceId));
+        item.insert(QStringLiteral("type"), QStringLiteral("serial"));
+        item.insert(QStringLiteral("selected"), sourceId == selectedSerialSource_);
+        item.insert(QStringLiteral("state"), static_cast<int>(
+            localSourceStates_.contains(sourceId)
+                ? localSourceStates_.at(sourceId)
+                : lab::core::SourceState::Closed));
+        item.insert(QStringLiteral("open"), source->isOpen());
+        item.insert(QStringLiteral("port"), QString::fromStdString(settings.portName));
+        item.insert(QStringLiteral("baud_rate"), settings.baudRate);
+        item.insert(QStringLiteral("data_bits"), settings.dataBits);
+        item.insert(QStringLiteral("stop_bits"), static_cast<int>(settings.stopBits));
+        item.insert(QStringLiteral("parity"), static_cast<int>(settings.parity));
+        item.insert(QStringLiteral("flow_control"),
+                    static_cast<int>(settings.flowControl));
+        sources.push_back(item);
+    }
+    for (const auto& [sourceId, source] : networkSources_) {
+        const auto settings = source->settings();
+        QVariantMap item;
+        item.insert(QStringLiteral("id"), QString::fromStdString(sourceId));
+        item.insert(QStringLiteral("type"), QStringLiteral("network"));
+        item.insert(QStringLiteral("selected"), sourceId == selectedNetworkSource_);
+        item.insert(QStringLiteral("state"), static_cast<int>(
+            localSourceStates_.contains(sourceId)
+                ? localSourceStates_.at(sourceId)
+                : lab::core::SourceState::Closed));
+        item.insert(QStringLiteral("open"), source->isOpen());
+        item.insert(QStringLiteral("mode"), static_cast<int>(settings.mode));
+        item.insert(QStringLiteral("remote_host"),
+                    QString::fromStdString(settings.remoteHost));
+        item.insert(QStringLiteral("remote_port"), settings.remotePort);
+        item.insert(QStringLiteral("bind_address"),
+                    QString::fromStdString(settings.bindAddress));
+        item.insert(QStringLiteral("local_port"), settings.localPort);
+        sources.push_back(item);
+    }
+    emit localSourcesChanged(sources);
+}
+
 void SerialSession::publishParserSources() {
     std::set<std::string> sourceIds;
-    if (!lastSettings_.portName.empty()) sourceIds.insert(source_.sourceId());
-    if (networkConfigured_) sourceIds.insert(network_.sourceId());
+    for (const auto& [sourceId, source] : serialSources_) {
+        static_cast<void>(source);
+        sourceIds.insert(sourceId);
+    }
+    for (const auto& [sourceId, source] : networkSources_) {
+        static_cast<void>(source);
+        sourceIds.insert(sourceId);
+    }
     for (const auto& [sourceId, configuration] : sourceParserConfigurations_) {
         static_cast<void>(configuration);
         sourceIds.insert(sourceId);
@@ -738,80 +818,203 @@ SerialSession::resolvedParserConfiguration(const std::string& sourceId) const {
 }
 
 void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings) {
-    if (recorder_.isRecording() &&
-        (!recordingSerial_.load() || !sameSettings(settings, lastSettings_))) {
-        emit sourceError(tr("当前 Session 未声明此串口配置，停止记录后才能更改"));
+    const auto key = lab::adapters::serial::serialSourceId(settings);
+    if (settings.portName.empty()) {
+        emit sourceError(tr("串口名称不能为空"));
         return;
     }
+    const auto existing = serialSources_.find(key);
+    if (recorder_.isRecording() &&
+        (existing == serialSources_.end() ||
+         !isDeclaredRecordingSource(key) ||
+         !sameSettings(settings, existing->second->settings()))) {
+        emit sourceError(tr("当前 Session 未声明此串口配置，停止记录后才能新增或更改"));
+        return;
+    }
+    if (existing == serialSources_.end() &&
+        serialSources_.size() + networkSources_.size() >= maximumLocalSources) {
+        emit sourceError(tr("本地数据源不能超过 16 个"));
+        return;
+    }
+
     leaveReplayForLiveSource();
-    sendTarget_ = SendTarget::Serial;
-    sourceManager_.close(std::string(serialSourceKey));
-    lastSettings_ = std::move(settings);
-    source_.setSettings(lastSettings_);
+    selectedSerialSource_ = key;
+    sendTargetSource_ = key;
+    if (existing == serialSources_.end()) {
+        auto source = std::make_unique<lab::adapters::serial::SerialSource>();
+        source->setSettings(settings);
+        if (!sourceManager_.add(key, *source)) {
+            emit sourceError(tr("无法登记串口数据源：%1")
+                                 .arg(QString::fromStdString(key)));
+            return;
+        }
+        serialSources_.emplace(key, std::move(source));
+        localSourceStates_.insert_or_assign(key, lab::core::SourceState::Closed);
+    } else {
+        sourceManager_.close(key);
+        existing->second->setSettings(settings);
+    }
+    publishLocalSources();
     publishParserSources();
-    sourceManager_.open(std::string(serialSourceKey));
+    if (!sourceManager_.open(key)) {
+        publishLocalSources();
+    }
 }
 
 void SerialSession::disconnectSerial() {
-    sourceManager_.close(std::string(serialSourceKey));
+    if (!selectedSerialSource_.empty()) {
+        disconnectLocalSource(QString::fromStdString(selectedSerialSource_));
+    }
 }
 
 void SerialSession::reconnectSerial() {
-    if (lastSettings_.portName.empty()) {
+    if (selectedSerialSource_.empty()) {
         emit sourceError(tr("请先选择并连接一次目标串口"));
         return;
     }
-    if (recorder_.isRecording() && !recordingSerial_.load()) {
-        emit sourceError(tr("当前 Session 未声明串口源，停止记录后才能加入"));
-        return;
-    }
-    leaveReplayForLiveSource();
-    sendTarget_ = SendTarget::Serial;
-    sourceManager_.close(std::string(serialSourceKey));
-    source_.setSettings(lastSettings_);
-    sourceManager_.open(std::string(serialSourceKey));
+    reconnectLocalSource(QString::fromStdString(selectedSerialSource_));
 }
 
 void SerialSession::connectNetwork(lab::adapters::network::NetworkSettings settings) {
+    const auto key = lab::adapters::network::networkSourceId(settings);
+    const auto existing = networkSources_.find(key);
     if (recorder_.isRecording() &&
-        (!recordingNetwork_.load() || !sameSettings(settings, lastNetworkSettings_))) {
-        emit sourceError(tr("当前 Session 未声明此网络配置，停止记录后才能更改"));
+        (existing == networkSources_.end() ||
+         !isDeclaredRecordingSource(key) ||
+         !sameSettings(settings, existing->second->settings()))) {
+        emit sourceError(tr("当前 Session 未声明此网络配置，停止记录后才能新增或更改"));
         return;
     }
+    if (existing == networkSources_.end() &&
+        serialSources_.size() + networkSources_.size() >= maximumLocalSources) {
+        emit sourceError(tr("本地数据源不能超过 16 个"));
+        return;
+    }
+
     leaveReplayForLiveSource();
-    sendTarget_ = SendTarget::Network;
-    sourceManager_.close(std::string(networkSourceKey));
-    lastNetworkSettings_ = std::move(settings);
-    networkConfigured_ = true;
-    network_.setSettings(lastNetworkSettings_);
+    selectedNetworkSource_ = key;
+    sendTargetSource_ = key;
+    if (existing == networkSources_.end()) {
+        auto source = std::make_unique<lab::adapters::network::NetworkSource>();
+        source->setSettings(settings);
+        if (!sourceManager_.add(key, *source)) {
+            emit sourceError(tr("无法登记网络数据源：%1")
+                                 .arg(QString::fromStdString(key)));
+            return;
+        }
+        networkSources_.emplace(key, std::move(source));
+        localSourceStates_.insert_or_assign(key, lab::core::SourceState::Closed);
+    } else {
+        sourceManager_.close(key);
+        existing->second->setSettings(settings);
+    }
+    publishLocalSources();
     publishParserSources();
-    sourceManager_.open(std::string(networkSourceKey));
+    if (!sourceManager_.open(key)) {
+        publishLocalSources();
+    }
 }
 
 void SerialSession::disconnectNetwork() {
-    sourceManager_.close(std::string(networkSourceKey));
+    if (!selectedNetworkSource_.empty()) {
+        disconnectLocalSource(QString::fromStdString(selectedNetworkSource_));
+    }
 }
 
 void SerialSession::reconnectNetwork() {
-    if (!networkConfigured_) {
+    if (selectedNetworkSource_.empty()) {
         emit sourceError(tr("请先配置并打开一次网络数据源"));
         return;
     }
-    if (recorder_.isRecording() && !recordingNetwork_.load()) {
-        emit sourceError(tr("当前 Session 未声明网络源，停止记录后才能加入"));
+    reconnectLocalSource(QString::fromStdString(selectedNetworkSource_));
+}
+
+void SerialSession::disconnectLocalSource(const QString& sourceId) {
+    const auto key = utf8String(sourceId.trimmed());
+    if (!isLocalSource(key)) {
+        emit sourceError(tr("找不到本地数据源：%1").arg(sourceId));
+        return;
+    }
+    sourceManager_.close(key);
+    publishLocalSources();
+}
+
+void SerialSession::reconnectLocalSource(const QString& sourceId) {
+    const auto key = utf8String(sourceId.trimmed());
+    if (!isLocalSource(key)) {
+        emit sourceError(tr("找不到本地数据源：%1").arg(sourceId));
+        return;
+    }
+    if (recorder_.isRecording() && !isDeclaredRecordingSource(key)) {
+        emit sourceError(tr("当前 Session 未声明此数据源，停止记录后才能加入"));
         return;
     }
     leaveReplayForLiveSource();
-    sendTarget_ = SendTarget::Network;
-    sourceManager_.close(std::string(networkSourceKey));
-    network_.setSettings(lastNetworkSettings_);
-    sourceManager_.open(std::string(networkSourceKey));
+    sourceManager_.close(key);
+    sendTargetSource_ = key;
+    if (serialSources_.contains(key)) {
+        selectedSerialSource_ = key;
+    } else {
+        selectedNetworkSource_ = key;
+    }
+    if (!sourceManager_.open(key)) {
+        publishLocalSources();
+    }
+}
+
+bool SerialSession::removeLocalSource(const QString& sourceId) {
+    if (recorder_.isRecording()) {
+        emit sourceError(tr("Session 记录期间不能移除数据源；可先断开，停止记录后再移除"));
+        return false;
+    }
+    const auto key = utf8String(sourceId.trimmed());
+    if (!isLocalSource(key)) {
+        emit sourceError(tr("找不到本地数据源：%1").arg(sourceId));
+        return false;
+    }
+    if (!sourceManager_.remove(key)) {
+        emit sourceError(tr("无法移除本地数据源：%1").arg(sourceId));
+        return false;
+    }
+    serialSources_.erase(key);
+    networkSources_.erase(key);
+    localSourceStates_.erase(key);
+    processing_.clearSourceConfiguration(key);
+    sourceParserConfigurations_.erase(key);
+    if (selectedSerialSource_ == key) {
+        selectedSerialSource_ = serialSources_.empty()
+                                    ? std::string{}
+                                    : serialSources_.begin()->first;
+    }
+    if (selectedNetworkSource_ == key) {
+        selectedNetworkSource_ = networkSources_.empty()
+                                     ? std::string{}
+                                     : networkSources_.begin()->first;
+    }
+    if (sendTargetSource_ == key) {
+        selectFallbackSendTarget();
+    }
+    publishLocalSources();
+    publishParserSources();
+    return true;
+}
+
+void SerialSession::disconnectAllLocalSources() {
+    for (const auto& [sourceId, source] : serialSources_) {
+        static_cast<void>(source);
+        sourceManager_.close(sourceId);
+    }
+    for (const auto& [sourceId, source] : networkSources_) {
+        static_cast<void>(source);
+        sourceManager_.close(sourceId);
+    }
+    publishLocalSources();
 }
 
 void SerialSession::connectRemoteAgent(
     lab::adapters::remote_agent::RemoteAgentSettings settings) {
     if (recorder_.isRecording() &&
-        (!recordingRemoteAgent_.load() ||
+        (!isDeclaredRecordingSource(std::string(remoteAgentSourceKey)) ||
          !sameSettings(settings, lastRemoteAgentSettings_))) {
         emit sourceError(tr("当前 Session 未声明此 Remote Agent 配置，停止记录后才能更改"));
         return;
@@ -833,7 +1036,8 @@ void SerialSession::reconnectRemoteAgent() {
         emit sourceError(tr("请先配置并连接一次 Remote Agent"));
         return;
     }
-    if (recorder_.isRecording() && !recordingRemoteAgent_.load()) {
+    if (recorder_.isRecording() &&
+        !isDeclaredRecordingSource(std::string(remoteAgentSourceKey))) {
         emit sourceError(tr("当前 Session 未声明 Remote Agent，停止记录后才能加入"));
         return;
     }
@@ -844,10 +1048,47 @@ void SerialSession::reconnectRemoteAgent() {
 }
 
 void SerialSession::setSendTarget(int target) {
-    if (target == static_cast<int>(SendTarget::Serial)) {
-        sendTarget_ = SendTarget::Serial;
-    } else if (target == static_cast<int>(SendTarget::Network)) {
-        sendTarget_ = SendTarget::Network;
+    if (target == 0) {
+        if (!selectedSerialSource_.empty()) {
+            sendTargetSource_ = selectedSerialSource_;
+        } else if (!serialSources_.empty()) {
+            sendTargetSource_ = serialSources_.begin()->first;
+        }
+    } else if (target == 1) {
+        if (!selectedNetworkSource_.empty()) {
+            sendTargetSource_ = selectedNetworkSource_;
+        } else if (!networkSources_.empty()) {
+            sendTargetSource_ = networkSources_.begin()->first;
+        }
+    }
+}
+
+void SerialSession::setSendTargetSource(const QString& sourceId) {
+    const auto key = utf8String(sourceId.trimmed());
+    if (key.empty()) {
+        sendTargetSource_.clear();
+        return;
+    }
+    if (!isLocalSource(key)) {
+        emit sourceError(tr("发送目标不存在：%1").arg(sourceId));
+        return;
+    }
+    sendTargetSource_ = key;
+}
+
+void SerialSession::selectFallbackSendTarget() {
+    sendTargetSource_.clear();
+    for (const auto& [key, source] : serialSources_) {
+        if (source->isOpen()) {
+            sendTargetSource_ = key;
+            return;
+        }
+    }
+    for (const auto& [key, source] : networkSources_) {
+        if (source->isOpen()) {
+            sendTargetSource_ = key;
+            return;
+        }
     }
 }
 
@@ -874,10 +1115,8 @@ void SerialSession::unsubscribeRemoteTopic(
 void SerialSession::sendBytes(const QByteArray& bytes) {
     const auto first = reinterpret_cast<const std::uint8_t*>(bytes.constData());
     const auto data = std::span(first, static_cast<std::size_t>(bytes.size()));
-    const auto key = sendTarget_ == SendTarget::Network
-                         ? std::string(networkSourceKey)
-                         : std::string(serialSourceKey);
-    const auto accepted = sourceManager_.write(key, data);
+    const auto accepted = !sendTargetSource_.empty() &&
+                          sourceManager_.write(sendTargetSource_, data);
     if (!accepted) {
         emit sourceError(tr("发送失败：当前数据源未连接或写入未被接受"));
     }
@@ -1260,15 +1499,23 @@ bool SerialSession::startSession(const QString& directory) {
         emit recordingChanged(false, tr("回放模式下不能开始新的实时 Session 记录"));
         return false;
     }
-    const auto serialOpen = sourceManager_.isOpen(std::string(serialSourceKey));
-    const auto networkOpen = sourceManager_.isOpen(std::string(networkSourceKey));
     const auto remoteAgentOpen = sourceManager_.isOpen(std::string(remoteAgentSourceKey));
-    if (!serialOpen && !networkOpen && !remoteAgentOpen) {
+    std::set<std::string> openSourceKeys;
+    for (const auto& [sourceId, source] : serialSources_) {
+        if (source->isOpen()) openSourceKeys.insert(sourceId);
+    }
+    for (const auto& [sourceId, source] : networkSources_) {
+        if (source->isOpen()) openSourceKeys.insert(sourceId);
+    }
+    if (remoteAgentOpen) {
+        openSourceKeys.insert(std::string(remoteAgentSourceKey));
+    }
+    if (openSourceKeys.empty()) {
         emit recordingChanged(false, tr("请先连接至少一个实时数据源"));
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.19.0";
+    options.softwareVersion = "0.20.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -1277,30 +1524,32 @@ bool SerialSession::startSession(const QString& directory) {
     options.csvFields = activeCsvFields_;
     options.derivedFields = derivedFields_.definitions();
     options.alertRules = alertRules_.definitions();
-    if (serialOpen) {
-        const auto sourceId = source_.sourceId();
+    for (const auto& [sourceId, source] : serialSources_) {
+        if (!source->isOpen()) continue;
+        const auto settings = source->settings();
         options.sources.push_back({
             sourceId,
             "serial",
-            lastSettings_.portName,
-            {{"port", lastSettings_.portName},
-             {"baud_rate", std::to_string(lastSettings_.baudRate)},
-             {"data_bits", std::to_string(lastSettings_.dataBits)},
-             {"stop_bits", std::to_string(static_cast<int>(lastSettings_.stopBits))},
-             {"parity", std::to_string(static_cast<int>(lastSettings_.parity))},
-             {"flow_control", std::to_string(static_cast<int>(lastSettings_.flowControl))}},
+            settings.portName,
+            {{"port", settings.portName},
+             {"baud_rate", std::to_string(settings.baudRate)},
+             {"data_bits", std::to_string(settings.dataBits)},
+             {"stop_bits", std::to_string(static_cast<int>(settings.stopBits))},
+             {"parity", std::to_string(static_cast<int>(settings.parity))},
+             {"flow_control", std::to_string(static_cast<int>(settings.flowControl))}},
             resolvedParserConfiguration(sourceId)});
     }
-    if (networkOpen) {
-        const auto sourceId = network_.sourceId();
+    for (const auto& [sourceId, source] : networkSources_) {
+        if (!source->isOpen()) continue;
+        const auto settings = source->settings();
         options.sources.push_back({
             sourceId,
-            lab::adapters::network::toString(lastNetworkSettings_.mode),
+            lab::adapters::network::toString(settings.mode),
             sourceId,
-            {{"remote_host", lastNetworkSettings_.remoteHost},
-             {"remote_port", std::to_string(lastNetworkSettings_.remotePort)},
-             {"bind_address", lastNetworkSettings_.bindAddress},
-             {"local_port", std::to_string(lastNetworkSettings_.localPort)}},
+            {{"remote_host", settings.remoteHost},
+             {"remote_port", std::to_string(settings.remotePort)},
+             {"bind_address", settings.bindAddress},
+             {"local_port", std::to_string(settings.localPort)}},
             resolvedParserConfiguration(sourceId)});
     }
     if (remoteAgentOpen) {
@@ -1330,15 +1579,15 @@ bool SerialSession::startSession(const QString& directory) {
         latestLiveTimestamp_.store(0);
         nextTimelineSequence_.store(0);
         clearTimelineEvents();
-        recordingSerial_.store(serialOpen);
-        recordingNetwork_.store(networkOpen);
-        recordingRemoteAgent_.store(remoteAgentOpen);
+        {
+            std::scoped_lock lock(recordingSourcesMutex_);
+            recordingSourceKeys_ = openSourceKeys;
+        }
         result = recorder_.start(
             std::filesystem::path(directory.toStdWString()), std::move(options));
         if (!result) {
-            recordingSerial_.store(false);
-            recordingNetwork_.store(false);
-            recordingRemoteAgent_.store(false);
+            std::scoped_lock lock(recordingSourcesMutex_);
+            recordingSourceKeys_.clear();
         }
     }
     const auto message = result
@@ -1372,9 +1621,8 @@ void SerialSession::stopSession() {
                                 "Session recording stopped",
                                 0});
         recorder_.stop();
-        recordingSerial_.store(false);
-        recordingNetwork_.store(false);
-        recordingRemoteAgent_.store(false);
+        std::scoped_lock lock(recordingSourcesMutex_);
+        recordingSourceKeys_.clear();
     }
     emit recordingChanged(false, tr("Session 记录已安全结束"));
 }
@@ -2098,7 +2346,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.19.0";
+            options.softwareVersion = "0.20.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {

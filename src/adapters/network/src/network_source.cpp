@@ -354,7 +354,10 @@ bool NetworkSource::write(std::span<const std::uint8_t> data) {
 }
 
 std::string NetworkSource::sourceId() const {
-    const auto configuration = settings();
+    return networkSourceId(settings());
+}
+
+std::string networkSourceId(const NetworkSettings& configuration) {
     switch (configuration.mode) {
     case NetworkMode::TcpClient:
         return "tcp-client:" + configuration.remoteHost + ':' +

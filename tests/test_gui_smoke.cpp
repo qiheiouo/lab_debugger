@@ -4,6 +4,8 @@
 #include "ui/plot_widget.hpp"
 #include "ui/protocol_widget.hpp"
 #include "ui/send_panel.hpp"
+#include "ui/serial_panel.hpp"
+#include "ui/network_panel.hpp"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -26,6 +28,82 @@ int main(int argc, char* argv[]) {
         sendPanel.setTarget(1);
         if (sendPanel.target() != 1) {
             std::cerr << "GUI smoke test failed: network send target was not selected\n";
+            return 1;
+        }
+        QVariantMap serialSource;
+        serialSource.insert(QStringLiteral("id"), QStringLiteral("serial:COM5"));
+        serialSource.insert(QStringLiteral("type"), QStringLiteral("serial"));
+        serialSource.insert(QStringLiteral("selected"), true);
+        serialSource.insert(QStringLiteral("state"),
+                            static_cast<int>(lab::core::SourceState::Open));
+        serialSource.insert(QStringLiteral("open"), true);
+        serialSource.insert(QStringLiteral("port"), QStringLiteral("COM5"));
+        serialSource.insert(QStringLiteral("baud_rate"), 115200);
+        serialSource.insert(QStringLiteral("data_bits"), 8);
+        serialSource.insert(QStringLiteral("stop_bits"), 0);
+        serialSource.insert(QStringLiteral("parity"), 0);
+        serialSource.insert(QStringLiteral("flow_control"), 0);
+        QVariantMap networkSource;
+        networkSource.insert(QStringLiteral("id"),
+                             QStringLiteral("udp:127.0.0.1:9000"));
+        networkSource.insert(QStringLiteral("type"), QStringLiteral("network"));
+        networkSource.insert(QStringLiteral("state"),
+                             static_cast<int>(lab::core::SourceState::Open));
+        networkSource.insert(QStringLiteral("open"), true);
+        networkSource.insert(QStringLiteral("mode"),
+                             static_cast<int>(lab::adapters::network::NetworkMode::Udp));
+        networkSource.insert(QStringLiteral("remote_host"),
+                             QStringLiteral("127.0.0.1"));
+        networkSource.insert(QStringLiteral("remote_port"), 9001);
+        networkSource.insert(QStringLiteral("bind_address"),
+                             QStringLiteral("127.0.0.1"));
+        networkSource.insert(QStringLiteral("local_port"), 9000);
+        const QVariantList localSources{serialSource, networkSource};
+        sendPanel.setSources(localSources);
+        sendPanel.setTargetSource(QStringLiteral("udp:127.0.0.1:9000"));
+        if (sendPanel.targetSourceId() != QStringLiteral("udp:127.0.0.1:9000") ||
+            sendPanel.target() != 1) {
+            std::cerr << "GUI smoke test failed: exact dynamic send target was not selected\n";
+            return 1;
+        }
+        networkSource.insert(QStringLiteral("state"),
+                             static_cast<int>(lab::core::SourceState::Closed));
+        networkSource.insert(QStringLiteral("open"), false);
+        sendPanel.setSources({serialSource, networkSource});
+        if (sendPanel.targetSourceId() != QStringLiteral("udp:127.0.0.1:9000")) {
+            std::cerr << "GUI smoke test failed: closed exact send target was lost\n";
+            return 1;
+        }
+        networkSource.insert(QStringLiteral("state"),
+                             static_cast<int>(lab::core::SourceState::Open));
+        networkSource.insert(QStringLiteral("open"), true);
+
+        lab::ui::SerialPanel serialPanel;
+        serialPanel.setSources(localSources);
+        lab::ui::NetworkPanel networkPanel;
+        networkPanel.setSources(localSources);
+        auto* serialList = serialPanel.findChild<QListWidget*>(
+            QStringLiteral("serialSourceList"));
+        auto* networkList = networkPanel.findChild<QListWidget*>(
+            QStringLiteral("networkSourceList"));
+        if (!serialList || serialList->count() != 1 ||
+            serialPanel.selectedSourceId() != QStringLiteral("serial:COM5") ||
+            !networkList || networkList->count() != 1 ||
+            networkPanel.selectedSourceId() !=
+                QStringLiteral("udp:127.0.0.1:9000")) {
+            std::cerr << "GUI smoke test failed: dynamic source lists are not usable\n";
+            return 1;
+        }
+        auto secondSerial = serialSource;
+        secondSerial.insert(QStringLiteral("id"), QStringLiteral("serial:COM6"));
+        secondSerial.insert(QStringLiteral("selected"), false);
+        secondSerial.insert(QStringLiteral("port"), QStringLiteral("COM6"));
+        const QVariantList expandedSources{serialSource, secondSerial, networkSource};
+        serialPanel.setSources(expandedSources);
+        serialList->setCurrentRow(1);
+        serialPanel.setSources(expandedSources);
+        if (serialPanel.selectedSourceId() != QStringLiteral("serial:COM6")) {
+            std::cerr << "GUI smoke test failed: user-selected dynamic source was reset\n";
             return 1;
         }
 

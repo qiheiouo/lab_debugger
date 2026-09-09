@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QByteArray>
+#include <QString>
+#include <QVariantList>
 #include <QWidget>
 
 #include <optional>
@@ -19,13 +21,16 @@ class SendPanel final : public QWidget {
 public:
     explicit SendPanel(QWidget* parent = nullptr);
     [[nodiscard]] int target() const;
+    [[nodiscard]] QString targetSourceId() const;
 
 public slots:
     void setTarget(int target);
+    void setTargetSource(const QString& sourceId);
+    void setSources(const QVariantList& sources);
 
 signals:
     void sendRequested(QByteArray bytes);
-    void targetChanged(int target);
+    void targetChanged(QString sourceId);
 
 private slots:
     void sendNow();
@@ -46,6 +51,8 @@ private:
     QSpinBox* periodMs_{};
     QLabel* validation_{};
     QTimer* timer_{};
+    int preferredTargetType_{};
+    QString preferredSourceId_;
 };
 
 }  // namespace lab::ui

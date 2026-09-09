@@ -7,9 +7,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QVBoxLayout>
+#include <QVariantMap>
 
 namespace lab::ui {
 
@@ -19,6 +21,10 @@ NetworkPanel::NetworkPanel(QWidget* parent) : QWidget(parent) {
     titleFont.setBold(true);
     titleFont.setPointSize(titleFont.pointSize() + 2);
     title->setFont(titleFont);
+
+    sources_ = new QListWidget(this);
+    sources_->setObjectName(QStringLiteral("networkSourceList"));
+    sources_->setMaximumHeight(130);
 
     mode_ = new QComboBox(this);
     mode_->addItem(tr("TCP 客户端"),
@@ -45,15 +51,18 @@ NetworkPanel::NetworkPanel(QWidget* parent) : QWidget(parent) {
 
     state_ = new QLabel(tr("● 未连接"), this);
     state_->setStyleSheet(QStringLiteral("color: #9aa4b2;"));
-    connectButton_ = new QPushButton(tr("打开"), this);
+    connectButton_ = new QPushButton(tr("添加 / 打开"), this);
     disconnectButton_ = new QPushButton(tr("关闭"), this);
     reconnectButton_ = new QPushButton(tr("重开"), this);
+    removeButton_ = new QPushButton(tr("移除"), this);
     disconnectButton_->setEnabled(false);
     reconnectButton_->setEnabled(false);
+    removeButton_->setEnabled(false);
     auto* buttons = new QHBoxLayout;
     buttons->addWidget(connectButton_);
     buttons->addWidget(disconnectButton_);
     buttons->addWidget(reconnectButton_);
+    buttons->addWidget(removeButton_);
 
     auto* hint = new QLabel(
         tr("TCP/UDP I/O 在独立线程运行。UDP 保留数据报边界；UDP 远端地址当前需填写 IPv4/IPv6 数字地址。"),
@@ -63,6 +72,8 @@ NetworkPanel::NetworkPanel(QWidget* parent) : QWidget(parent) {
 
     auto* layout = new QVBoxLayout(this);
     layout->addWidget(title);
+    layout->addWidget(new QLabel(tr("已配置网络端点（可同时打开）"), this));
+    layout->addWidget(sources_);
     layout->addSpacing(8);
     layout->addLayout(form);
     layout->addWidget(state_);
@@ -73,8 +84,82 @@ NetworkPanel::NetworkPanel(QWidget* parent) : QWidget(parent) {
     connect(mode_, &QComboBox::currentIndexChanged,
             this, &NetworkPanel::updateModeControls);
     connect(connectButton_, &QPushButton::clicked, this, &NetworkPanel::connectRequested);
-    connect(disconnectButton_, &QPushButton::clicked, this, &NetworkPanel::disconnectRequested);
-    connect(reconnectButton_, &QPushButton::clicked, this, &NetworkPanel::reconnectRequested);
+    connect(disconnectButton_, &QPushButton::clicked, this, [this] {
+        const auto sourceId = selectedSourceId();
+        if (!sourceId.isEmpty()) emit disconnectSourceRequested(sourceId);
+    });
+    connect(reconnectButton_, &QPushButton::clicked, this, [this] {
+        const auto sourceId = selectedSourceId();
+        if (!sourceId.isEmpty()) emit reconnectSourceRequested(sourceId);
+    });
+    connect(removeButton_, &QPushButton::clicked, this, [this] {
+        const auto sourceId = selectedSourceId();
+        if (!sourceId.isEmpty()) emit removeSourceRequested(sourceId);
+    });
+    connect(sources_, &QListWidget::currentItemChanged,
+            this, [this] { loadSelectedSource(); });
+    updateModeControls();
+}
+
+QString NetworkPanel::selectedSourceId() const {
+    const auto* item = sources_->currentItem();
+    return item == nullptr
+               ? QString{}
+               : item->data(Qt::UserRole).toMap().value(QStringLiteral("id")).toString();
+}
+
+void NetworkPanel::setSources(const QVariantList& sources) {
+    const auto previous = selectedSourceId();
+    sources_->blockSignals(true);
+    sources_->clear();
+    int selectedIndex = -1;
+    for (const auto& value : sources) {
+        const auto source = value.toMap();
+        if (source.value(QStringLiteral("type")).toString() !=
+            QStringLiteral("network")) {
+            continue;
+        }
+        const auto id = source.value(QStringLiteral("id")).toString();
+        const auto state = static_cast<lab::core::SourceState>(
+            source.value(QStringLiteral("state")).toInt());
+        const auto suffix = state == lab::core::SourceState::Open
+                                ? tr("  [已打开]")
+                            : state == lab::core::SourceState::Error
+                                ? tr("  [错误]")
+                                : tr("  [已关闭]");
+        auto* item = new QListWidgetItem(id + suffix, sources_);
+        item->setData(Qt::UserRole, source);
+        const auto row = sources_->row(item);
+        if (id == previous ||
+            (selectedIndex < 0 &&
+             source.value(QStringLiteral("selected")).toBool())) {
+            selectedIndex = row;
+        }
+    }
+    if (selectedIndex < 0 && sources_->count() > 0) selectedIndex = 0;
+    sources_->setCurrentRow(selectedIndex);
+    sources_->blockSignals(false);
+    loadSelectedSource();
+}
+
+void NetworkPanel::loadSelectedSource() {
+    const auto* item = sources_->currentItem();
+    if (item == nullptr) {
+        disconnectButton_->setEnabled(false);
+        reconnectButton_->setEnabled(false);
+        removeButton_->setEnabled(false);
+        setSourceState(static_cast<int>(lab::core::SourceState::Closed));
+        return;
+    }
+    const auto source = item->data(Qt::UserRole).toMap();
+    auto modeIndex = mode_->findData(source.value(QStringLiteral("mode")));
+    if (modeIndex >= 0) mode_->setCurrentIndex(modeIndex);
+    remoteHost_->setText(source.value(QStringLiteral("remote_host")).toString());
+    remotePort_->setValue(source.value(QStringLiteral("remote_port")).toInt());
+    bindAddress_->setText(source.value(QStringLiteral("bind_address")).toString());
+    localPort_->setValue(source.value(QStringLiteral("local_port")).toInt());
+    removeButton_->setEnabled(true);
+    setSourceState(source.value(QStringLiteral("state")).toInt());
     updateModeControls();
 }
 
@@ -90,10 +175,11 @@ lab::adapters::network::NetworkSettings NetworkPanel::settings() const {
 void NetworkPanel::setSourceState(int rawState) {
     const auto sourceState = static_cast<lab::core::SourceState>(rawState);
     const bool open = sourceState == lab::core::SourceState::Open;
-    connectButton_->setEnabled(!open);
+    connectButton_->setEnabled(true);
     disconnectButton_->setEnabled(open || sourceState == lab::core::SourceState::Opening);
     reconnectButton_->setEnabled(open || sourceState == lab::core::SourceState::Error ||
                                  sourceState == lab::core::SourceState::Closed);
+    removeButton_->setEnabled(sources_->currentItem() != nullptr);
     switch (sourceState) {
     case lab::core::SourceState::Opening:
         state_->setText(tr("● 正在打开"));

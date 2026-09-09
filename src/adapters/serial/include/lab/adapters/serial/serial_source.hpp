@@ -32,6 +32,8 @@ struct PortInfo {
     std::string serialNumber;
 };
 
+[[nodiscard]] std::string serialSourceId(const SerialSettings& settings);
+
 class SerialWorker;
 
 class SerialSource final : public lab::core::IDataSource {
@@ -70,4 +72,3 @@ private:
 };
 
 }  // namespace lab::adapters::serial
-

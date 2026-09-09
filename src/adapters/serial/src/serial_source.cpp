@@ -71,6 +71,10 @@ QSerialPort::DataBits toQtDataBits(std::int32_t value) {
 
 }  // namespace
 
+std::string serialSourceId(const SerialSettings& settings) {
+    return "serial:" + settings.portName;
+}
+
 class SerialWorker final : public QObject {
 public:
     using DataHandler = std::function<void(std::vector<std::uint8_t>, lab::core::Direction)>;
@@ -265,8 +269,7 @@ bool SerialSource::write(std::span<const std::uint8_t> data) {
 }
 
 std::string SerialSource::sourceId() const {
-    const auto configuration = settings();
-    return "serial:" + configuration.portName;
+    return serialSourceId(settings());
 }
 
 lab::core::SourceStatistics SerialSource::statistics() const noexcept {

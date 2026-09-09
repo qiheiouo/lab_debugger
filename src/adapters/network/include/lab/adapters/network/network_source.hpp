@@ -21,6 +21,8 @@ struct NetworkSettings {
     std::uint16_t localPort{9000};
 };
 
+[[nodiscard]] std::string networkSourceId(const NetworkSettings& settings);
+
 class NetworkWorker;
 
 class NetworkSource final : public lab::core::IDataSource {

@@ -90,25 +90,30 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             statusBar()->showMessage(tr("请先选择串口"), 3000);
             return;
         }
-        sendPanel_->setTarget(0);
+        const auto sourceId = QString::fromStdString(
+            lab::adapters::serial::serialSourceId(configuration));
+        sendPanel_->setTargetSource(sourceId);
         session_.connectSerial(configuration);
     });
-    connect(serialPanel_, &SerialPanel::disconnectRequested,
-            &session_, &lab::app::SerialSession::disconnectSerial);
-    connect(serialPanel_, &SerialPanel::reconnectRequested, this, [this] {
-        sendPanel_->setTarget(0);
-        session_.reconnectSerial();
-    });
+    connect(serialPanel_, &SerialPanel::disconnectSourceRequested,
+            &session_, &lab::app::SerialSession::disconnectLocalSource);
+    connect(serialPanel_, &SerialPanel::reconnectSourceRequested,
+            &session_, &lab::app::SerialSession::reconnectLocalSource);
+    connect(serialPanel_, &SerialPanel::removeSourceRequested,
+            &session_, &lab::app::SerialSession::removeLocalSource);
     connect(networkPanel_, &NetworkPanel::connectRequested, this, [this] {
-        sendPanel_->setTarget(1);
-        session_.connectNetwork(networkPanel_->settings());
+        const auto configuration = networkPanel_->settings();
+        const auto sourceId = QString::fromStdString(
+            lab::adapters::network::networkSourceId(configuration));
+        sendPanel_->setTargetSource(sourceId);
+        session_.connectNetwork(configuration);
     });
-    connect(networkPanel_, &NetworkPanel::disconnectRequested,
-            &session_, &lab::app::SerialSession::disconnectNetwork);
-    connect(networkPanel_, &NetworkPanel::reconnectRequested, this, [this] {
-        sendPanel_->setTarget(1);
-        session_.reconnectNetwork();
-    });
+    connect(networkPanel_, &NetworkPanel::disconnectSourceRequested,
+            &session_, &lab::app::SerialSession::disconnectLocalSource);
+    connect(networkPanel_, &NetworkPanel::reconnectSourceRequested,
+            &session_, &lab::app::SerialSession::reconnectLocalSource);
+    connect(networkPanel_, &NetworkPanel::removeSourceRequested,
+            &session_, &lab::app::SerialSession::removeLocalSource);
     connect(remoteAgentPanel_, &RemoteAgentPanel::connectRequested, this, [this] {
         session_.connectRemoteAgent(remoteAgentPanel_->settings());
     });
@@ -125,7 +130,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(sendPanel_, &SendPanel::sendRequested,
             &session_, &lab::app::SerialSession::sendBytes);
     connect(sendPanel_, &SendPanel::targetChanged,
-            &session_, &lab::app::SerialSession::setSendTarget);
+            &session_, &lab::app::SerialSession::setSendTargetSource);
     connect(plot_, &PlotWidget::fieldsChanged,
             &session_, &lab::app::SerialSession::setCsvFields);
     connect(derivedFields_, &DerivedFieldsWidget::applyRequested,
@@ -180,10 +185,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::seekReplay);
     connect(&session_, &lab::app::SerialSession::chunkReady,
             terminal_, &TerminalWidget::appendChunk);
-    connect(&session_, &lab::app::SerialSession::sourceStateChanged,
-            serialPanel_, &SerialPanel::setSourceState);
-    connect(&session_, &lab::app::SerialSession::networkStateChanged,
-            networkPanel_, &NetworkPanel::setSourceState);
+    connect(&session_, &lab::app::SerialSession::localSourcesChanged,
+            serialPanel_, &SerialPanel::setSources);
+    connect(&session_, &lab::app::SerialSession::localSourcesChanged,
+            networkPanel_, &NetworkPanel::setSources);
+    connect(&session_, &lab::app::SerialSession::localSourcesChanged,
+            sendPanel_, &SendPanel::setSources);
     connect(&session_, &lab::app::SerialSession::remoteAgentStateChanged,
             remoteAgentPanel_, &RemoteAgentPanel::setSourceState);
     connect(&session_, &lab::app::SerialSession::remoteAgentHello,
@@ -290,13 +297,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                "所有数据均携带 sourceId、源时间、接收时间和序号。"));
     });
     session_.setCsvFields(plot_->fieldNames());
-    session_.setSendTarget(sendPanel_->target());
+    session_.setSendTargetSource(sendPanel_->targetSourceId());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     session_.stopSession();
-    session_.disconnectSerial();
-    session_.disconnectNetwork();
+    session_.disconnectAllLocalSources();
     session_.disconnectRemoteAgent();
     session_.closeReplay();
     event->accept();

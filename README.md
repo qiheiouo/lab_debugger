@@ -3,7 +3,7 @@
 Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路、Phase 5 网络数据源、Phase 6 Remote ROS Agent 主链路、Phase 7 rosbag2 离线分析，并已进入 Phase 8 多源同步基础建设：
 
 - 与 Qt UI 解耦的 C++20 数据核心；
-- `IDataSource` 与正式 `SourceManager`，串口、网络和 ROS Agent 可同时连接、统计和记录；
+- `IDataSource` 与正式 `SourceManager`，最多 16 个本地串口/网络实例可动态增删，并可与 ROS Agent 同时连接、统计和记录；
 - CSV/二进制流解析状态按 `sourceId` 隔离，同名字段以“来源.字段”形成独立曲线；
 - 串口和网络可分别选择 CSV 字段或 JSON 二进制协议，并将逐来源配置冻结到 Session；
 - 安全派生变量：受限表达式、依赖排序、跨来源显式引用，以及低通、高通、移动平均、微分、积分和角度展开；
@@ -30,7 +30,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 后台 rosbag2 SQLite 预检/导入、`metadata.yaml` 无损保存与交叉校验、可搜索 Topic 筛选、分卷时间归并、原始 CDR 安全回放和常见 ROS 消息离线曲线；
 - 可测试的 `MockDataSource` 与核心测试。
 
-详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，逐来源配置见 [解析配置说明](docs/SOURCE_PARSERS.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，Marker 与告警见 [时间线说明](docs/MARKERS_ALERTS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
+详细设计见 [架构文档](docs/ARCHITECTURE.md)，多设备操作见 [多数据源使用说明](docs/MULTI_SOURCE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，逐来源配置见 [解析配置说明](docs/SOURCE_PARSERS.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，Marker 与告警见 [时间线说明](docs/MARKERS_ALERTS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
 
 ## Windows 构建
 
@@ -57,7 +57,7 @@ cmake --install build --config Release --prefix dist/LabDebugger
 ## STM32 快速验证
 
 1. 用 USB-UART 连接 STM32，选择对应 COM 口与波特率。
-2. 点击“连接”，在“终端”页选择 ASCII 或 HEX 观察收发。
+2. 点击“添加 / 连接”，串口会加入上方来源列表；可换一个 COM 口继续添加，多个串口保持同时采集。
 3. STM32 以换行结尾发送 `1.24,3.56,23.80\n`。
 4. 在“实时曲线”页把字段设为 `speed,current,voltage` 并点击“应用”。
 5. 收到数据后，显示列表会出现类似 `serial:COM5.speed` 的来源限定字段；勾选需要观察的字段。曲线以 30 FPS 刷新，采集和解析仍按原始速率进行。
@@ -86,7 +86,7 @@ cmake --install build --config Release --prefix dist/LabDebugger
 - TCP 服务端填写监听地址和本地端口；当前保留一个活动客户端，新连接会替换旧连接；
 - UDP 同时填写本地绑定地址/端口和远端数字 IP/端口；每个收到的数据报形成一个独立数据块。
 
-网络 RX/TX 会进入和串口相同的终端、CSV/二进制协议、曲线及 Session。串口、网络和 ROS Agent 可以同时保持连接；发送区的“发送到”明确选择原始字节发往串口或网络。开始 Session 时会一次性记录当前所有已连接实时源，记录期间可以断开并按原配置重连，但不能悄悄加入未声明的新配置。更完整的模式语义和限制见 [TCP/UDP 使用说明](docs/NETWORK.md)。
+网络 RX/TX 会进入和串口相同的终端、CSV/二进制协议、曲线及 Session。串口页和网络页都可维护多个实例；发送区的“发送到”显示完整 `sourceId`，必须明确选择字节发往哪一个设备。开始 Session 时会一次性冻结当前所有已连接实时源，记录期间可以断开并按原配置重连，但不能新增、移除或改变已冻结来源。更完整的模式语义和限制见 [多数据源使用说明](docs/MULTI_SOURCE.md) 与 [TCP/UDP 使用说明](docs/NETWORK.md)。
 
 ## Remote ROS Agent 客户端
 

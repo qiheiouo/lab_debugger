@@ -9,13 +9,14 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QTimer>
+#include <QVariantMap>
 
 namespace lab::ui {
 
 SendPanel::SendPanel(QWidget* parent) : QWidget(parent) {
     target_ = new QComboBox(this);
-    target_->addItem(tr("串口"), 0);
-    target_->addItem(tr("网络"), 1);
+    target_->setObjectName(QStringLiteral("sendTargetSource"));
+    target_->addItem(tr("没有已打开的本地数据源"), QString{});
 
     mode_ = new QComboBox(this);
     mode_->addItems({QStringLiteral("ASCII"), QStringLiteral("HEX")});
@@ -71,6 +72,8 @@ SendPanel::SendPanel(QWidget* parent) : QWidget(parent) {
     layout->addLayout(secondRow);
 
     QSettings settings;
+    preferredSourceId_ =
+        settings.value(QStringLiteral("send/target_source")).toString();
     setTarget(settings.value(QStringLiteral("send/target"), 0).toInt());
     input_->addItems(settings.value(QStringLiteral("send/history")).toStringList());
     for (const auto& favorite : settings.value(QStringLiteral("send/favorites")).toStringList()) {
@@ -84,9 +87,12 @@ SendPanel::SendPanel(QWidget* parent) : QWidget(parent) {
     connect(periodMs_, &QSpinBox::valueChanged, this, &SendPanel::updateTimer);
     connect(timer_, &QTimer::timeout, this, &SendPanel::sendNow);
     connect(target_, &QComboBox::currentIndexChanged, this, [this](int) {
-        const auto selected = target();
-        QSettings().setValue(QStringLiteral("send/target"), selected);
-        emit targetChanged(selected);
+        preferredSourceId_ = targetSourceId();
+        preferredTargetType_ = target();
+        QSettings settings;
+        settings.setValue(QStringLiteral("send/target"), preferredTargetType_);
+        settings.setValue(QStringLiteral("send/target_source"), preferredSourceId_);
+        emit targetChanged(preferredSourceId_);
     });
     connect(favorites_, &QComboBox::activated, this, [this](int index) {
         if (index > 0) {
@@ -96,14 +102,74 @@ SendPanel::SendPanel(QWidget* parent) : QWidget(parent) {
 }
 
 int SendPanel::target() const {
-    return target_->currentData().toInt();
+    return targetSourceId().isEmpty()
+               ? preferredTargetType_
+               : target_->currentData(Qt::UserRole + 1).toInt();
 }
 
 void SendPanel::setTarget(int target) {
-    const auto index = target_->findData(target);
+    preferredTargetType_ = target == 1 ? 1 : 0;
+    for (int index = 0; index < target_->count(); ++index) {
+        if (target_->itemData(index, Qt::UserRole + 1).toInt() ==
+            preferredTargetType_) {
+            target_->setCurrentIndex(index);
+            return;
+        }
+    }
+}
+
+QString SendPanel::targetSourceId() const {
+    return target_->currentData().toString();
+}
+
+void SendPanel::setTargetSource(const QString& sourceId) {
+    preferredSourceId_ = sourceId;
+    const auto index = target_->findData(sourceId);
     if (index >= 0) {
         target_->setCurrentIndex(index);
     }
+}
+
+void SendPanel::setSources(const QVariantList& sources) {
+    const auto previous = targetSourceId();
+    target_->blockSignals(true);
+    target_->clear();
+    for (const auto& value : sources) {
+        const auto source = value.toMap();
+        const auto id = source.value(QStringLiteral("id")).toString();
+        const auto type = source.value(QStringLiteral("type")).toString();
+        if (id.isEmpty() ||
+            (type != QStringLiteral("serial") && type != QStringLiteral("network"))) {
+            continue;
+        }
+        const auto label = source.value(QStringLiteral("open")).toBool()
+                               ? id
+                               : tr("%1  [未打开]").arg(id);
+        target_->addItem(label, id);
+        target_->setItemData(target_->count() - 1,
+                             type == QStringLiteral("network") ? 1 : 0,
+                             Qt::UserRole + 1);
+    }
+    if (target_->count() == 0) {
+        target_->addItem(tr("没有已打开的本地数据源"), QString{});
+        target_->setItemData(0, preferredTargetType_, Qt::UserRole + 1);
+    }
+    auto selected = target_->findData(preferredSourceId_);
+    if (selected < 0) selected = target_->findData(previous);
+    if (selected < 0) {
+        for (int index = 0; index < target_->count(); ++index) {
+            if (target_->itemData(index, Qt::UserRole + 1).toInt() ==
+                preferredTargetType_) {
+                selected = index;
+                break;
+            }
+        }
+    }
+    target_->setCurrentIndex(selected < 0 ? 0 : selected);
+    preferredSourceId_ = targetSourceId();
+    preferredTargetType_ = target();
+    target_->blockSignals(false);
+    emit targetChanged(preferredSourceId_);
 }
 
 void SendPanel::sendNow() {

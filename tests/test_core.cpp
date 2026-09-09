@@ -496,6 +496,18 @@ void testSourceManager() {
     require(sources.size() == 2 && sources[0].key == "network" && sources[0].open &&
                 sources[1].key == "serial" && sources[1].open,
             "source manager reports deterministic source snapshots");
+    require(manager.remove("network") && !network.isOpen() &&
+                manager.sources().size() == 1 &&
+                !manager.write("network", std::vector<std::uint8_t>{7}),
+            "source manager safely closes and detaches a dynamic source");
+    const auto receivedBeforeDetachedFeed = receivedKeys.size();
+    require(network.open(), "detached mock source can be independently reopened");
+    network.feed(std::vector<std::uint8_t>{8});
+    network.close();
+    require(receivedKeys.size() == receivedBeforeDetachedFeed,
+            "removed source no longer reaches manager callbacks");
+    require(!manager.remove("network"),
+            "source manager rejects removing an unknown source");
     manager.closeAll();
     require(!serial.isOpen() && !network.isOpen() && stateKeys.size() == 8,
             "source manager closes every managed source and forwards state transitions");

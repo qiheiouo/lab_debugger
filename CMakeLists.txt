@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.19.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.20.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -170,7 +170,11 @@ if(LAB_DEBUGGER_BUILD_GUI)
             RUNTIME DESTINATION bin
             BUNDLE DESTINATION .
         )
-        install(FILES docs/RUN_WINDOWS.txt DESTINATION .)
+        install(FILES
+            docs/RUN_WINDOWS.txt
+            docs/MULTI_SOURCE.md
+            DESTINATION .
+        )
         qt_generate_deploy_app_script(
             TARGET lab_debugger
             OUTPUT_SCRIPT deploy_script
@@ -336,6 +340,20 @@ if(LAB_DEBUGGER_BUILD_TESTS)
             COMMAND lab_source_parser_session_tests
         )
         set_tests_properties(lab_source_parser_session_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 20
+        )
+        add_executable(lab_dynamic_local_source_tests
+            tests/test_dynamic_local_sources.cpp
+        )
+        target_link_libraries(lab_dynamic_local_source_tests
+            PRIVATE lab_app_ui Qt6::Core Qt6::Network
+        )
+        add_test(NAME lab_dynamic_local_source_tests
+            COMMAND lab_dynamic_local_source_tests
+        )
+        set_tests_properties(lab_dynamic_local_source_tests PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
             TIMEOUT 20

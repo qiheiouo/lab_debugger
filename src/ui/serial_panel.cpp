@@ -8,7 +8,9 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListWidget>
 #include <QPushButton>
+#include <QVariantMap>
 #include <QVBoxLayout>
 
 namespace lab::ui {
@@ -20,6 +22,10 @@ SerialPanel::SerialPanel(QWidget* parent) : QWidget(parent) {
     titleFont.setBold(true);
     titleFont.setPointSize(titleFont.pointSize() + 2);
     title->setFont(titleFont);
+
+    sources_ = new QListWidget(this);
+    sources_->setObjectName(QStringLiteral("serialSourceList"));
+    sources_->setMaximumHeight(130);
 
     port_ = new QComboBox(this);
     auto* refreshButton = new QPushButton(tr("刷新"), this);
@@ -70,16 +76,19 @@ SerialPanel::SerialPanel(QWidget* parent) : QWidget(parent) {
     state_ = new QLabel(tr("● 未连接"), this);
     state_->setStyleSheet(QStringLiteral("color: #9aa4b2;"));
 
-    connectButton_ = new QPushButton(tr("连接"), this);
+    connectButton_ = new QPushButton(tr("添加 / 连接"), this);
     disconnectButton_ = new QPushButton(tr("断开"), this);
     reconnectButton_ = new QPushButton(tr("重连"), this);
+    removeButton_ = new QPushButton(tr("移除"), this);
     disconnectButton_->setEnabled(false);
     reconnectButton_->setEnabled(false);
+    removeButton_->setEnabled(false);
 
     auto* buttons = new QHBoxLayout;
     buttons->addWidget(connectButton_);
     buttons->addWidget(disconnectButton_);
     buttons->addWidget(reconnectButton_);
+    buttons->addWidget(removeButton_);
 
     auto* hint = new QLabel(
         tr("串口 I/O 在独立线程运行。暂停终端或曲线不会停止采集与记录。"),
@@ -89,6 +98,8 @@ SerialPanel::SerialPanel(QWidget* parent) : QWidget(parent) {
 
     auto* layout = new QVBoxLayout(this);
     layout->addWidget(title);
+    layout->addWidget(new QLabel(tr("已配置串口（可同时打开）"), this));
+    layout->addWidget(sources_);
     layout->addSpacing(8);
     layout->addLayout(form);
     layout->addWidget(state_);
@@ -98,9 +109,93 @@ SerialPanel::SerialPanel(QWidget* parent) : QWidget(parent) {
 
     connect(refreshButton, &QPushButton::clicked, this, &SerialPanel::refreshPorts);
     connect(connectButton_, &QPushButton::clicked, this, &SerialPanel::connectRequested);
-    connect(disconnectButton_, &QPushButton::clicked, this, &SerialPanel::disconnectRequested);
-    connect(reconnectButton_, &QPushButton::clicked, this, &SerialPanel::reconnectRequested);
+    connect(disconnectButton_, &QPushButton::clicked, this, [this] {
+        const auto sourceId = selectedSourceId();
+        if (!sourceId.isEmpty()) emit disconnectSourceRequested(sourceId);
+    });
+    connect(reconnectButton_, &QPushButton::clicked, this, [this] {
+        const auto sourceId = selectedSourceId();
+        if (!sourceId.isEmpty()) emit reconnectSourceRequested(sourceId);
+    });
+    connect(removeButton_, &QPushButton::clicked, this, [this] {
+        const auto sourceId = selectedSourceId();
+        if (!sourceId.isEmpty()) emit removeSourceRequested(sourceId);
+    });
+    connect(sources_, &QListWidget::currentItemChanged,
+            this, [this] { loadSelectedSource(); });
     refreshPorts();
+}
+
+QString SerialPanel::selectedSourceId() const {
+    const auto* item = sources_->currentItem();
+    return item == nullptr
+               ? QString{}
+               : item->data(Qt::UserRole).toMap().value(QStringLiteral("id")).toString();
+}
+
+void SerialPanel::setSources(const QVariantList& sources) {
+    const auto previous = selectedSourceId();
+    sources_->blockSignals(true);
+    sources_->clear();
+    int selectedIndex = -1;
+    for (const auto& value : sources) {
+        const auto source = value.toMap();
+        if (source.value(QStringLiteral("type")).toString() !=
+            QStringLiteral("serial")) {
+            continue;
+        }
+        const auto id = source.value(QStringLiteral("id")).toString();
+        const auto state = static_cast<lab::core::SourceState>(
+            source.value(QStringLiteral("state")).toInt());
+        const auto suffix = state == lab::core::SourceState::Open
+                                ? tr("  [已连接]")
+                            : state == lab::core::SourceState::Error
+                                ? tr("  [错误]")
+                                : tr("  [已断开]");
+        auto* item = new QListWidgetItem(id + suffix, sources_);
+        item->setData(Qt::UserRole, source);
+        const auto row = sources_->row(item);
+        if (id == previous ||
+            (selectedIndex < 0 &&
+             source.value(QStringLiteral("selected")).toBool())) {
+            selectedIndex = row;
+        }
+    }
+    if (selectedIndex < 0 && sources_->count() > 0) selectedIndex = 0;
+    sources_->setCurrentRow(selectedIndex);
+    sources_->blockSignals(false);
+    loadSelectedSource();
+}
+
+void SerialPanel::loadSelectedSource() {
+    const auto* item = sources_->currentItem();
+    if (item == nullptr) {
+        disconnectButton_->setEnabled(false);
+        reconnectButton_->setEnabled(false);
+        removeButton_->setEnabled(false);
+        setSourceState(static_cast<int>(lab::core::SourceState::Closed));
+        return;
+    }
+    const auto source = item->data(Qt::UserRole).toMap();
+    const auto portName = source.value(QStringLiteral("port")).toString();
+    auto portIndex = port_->findData(portName);
+    if (portIndex < 0) {
+        port_->addItem(portName, portName);
+        portIndex = port_->count() - 1;
+    }
+    port_->setCurrentIndex(portIndex);
+    baud_->setCurrentText(QString::number(
+        source.value(QStringLiteral("baud_rate")).toInt()));
+    for (auto [combo, key] : {
+             std::pair<QComboBox*, QString>{dataBits_, QStringLiteral("data_bits")},
+             {stopBits_, QStringLiteral("stop_bits")},
+             {parity_, QStringLiteral("parity")},
+             {flowControl_, QStringLiteral("flow_control")}}) {
+        const auto index = combo->findData(source.value(key));
+        if (index >= 0) combo->setCurrentIndex(index);
+    }
+    removeButton_->setEnabled(true);
+    setSourceState(source.value(QStringLiteral("state")).toInt());
 }
 
 lab::adapters::serial::SerialSettings SerialPanel::settings() const {
@@ -135,9 +230,13 @@ void SerialPanel::refreshPorts() {
 void SerialPanel::setSourceState(int rawState) {
     const auto sourceState = static_cast<lab::core::SourceState>(rawState);
     const bool open = sourceState == lab::core::SourceState::Open;
-    connectButton_->setEnabled(!open && !port_->currentData().toString().isEmpty());
+    connectButton_->setEnabled(!port_->currentData().toString().isEmpty());
     disconnectButton_->setEnabled(open);
-    reconnectButton_->setEnabled(open || sourceState == lab::core::SourceState::Error);
+    reconnectButton_->setEnabled(
+        sources_->currentItem() != nullptr &&
+        sourceState != lab::core::SourceState::Opening &&
+        sourceState != lab::core::SourceState::Closing);
+    removeButton_->setEnabled(sources_->currentItem() != nullptr);
 
     switch (sourceState) {
     case lab::core::SourceState::Opening:
@@ -165,4 +264,3 @@ void SerialPanel::setSourceState(int rawState) {
 }
 
 }  // namespace lab::ui
-

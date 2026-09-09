@@ -1,6 +1,6 @@
 # Session 记录与回放格式
 
-Lab Debugger 0.3 引入目录式 Session，0.4 将 TCP/UDP 配置纳入同一格式，0.8 为 Remote Agent 增加时钟质量事件，0.11 允许 rosbag2 SQLite 安全转换到同一容器，0.15 允许串口、网络和 Remote Agent 同时进入一个 Session，0.16 保存安全派生变量并在回放时恢复，0.17 为派生表达式增加确定性的滤波与时域状态，0.18 增加可回放的 Marker 与阈值告警，0.19 冻结每个本地来源的独立解析配置。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
+Lab Debugger 0.3 引入目录式 Session，0.4 将 TCP/UDP 配置纳入同一格式，0.8 为 Remote Agent 增加时钟质量事件，0.11 允许 rosbag2 SQLite 安全转换到同一容器，0.15 允许串口、网络和 Remote Agent 同时进入一个 Session，0.16 保存安全派生变量并在回放时恢复，0.17 为派生表达式增加确定性的滤波与时域状态，0.18 增加可回放的 Marker 与阈值告警，0.19 冻结每个本地来源的独立解析配置，0.20 支持冻结任意多个已打开的本地实例。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
 
 ```text
 session_YYYYMMDD_HHMMSS/
@@ -30,7 +30,7 @@ session_YYYYMMDD_HHMMSS/
 - `events.jsonl`：连接状态、协议错误、Session 生命周期、Remote Agent 的 `clock_sync`，以及 `marker` / `alert` 时间线事件。时钟事件消息保存 `offset_ns`、`round_trip_ns`、`uncertainty_ns` 和滚动窗口 `samples` 数量。
 - `protocol/`、`configuration/`：记录开始时的协议、字段、派生表达式与数据源配置快照。
 
-串口配置记录端口、波特率、数据位、停止位、校验和流控；网络配置记录 `tcp_client` / `tcp_server` / `udp` 模式、绑定地址、本地端口、远端地址和远端端口。Remote Agent 配置还记录自动重连开关、`ping_pong_min_rtt` 时钟估计方法和 2 秒采样间隔。开始记录时，当前所有已连接实时源都会写入 `sources` 和逐源配置文件；记录期间只允许这些来源按原配置重连，防止出现未声明来源。
+串口配置记录端口、波特率、数据位、停止位、校验和流控；网络配置记录 `tcp_client` / `tcp_server` / `udp` 模式、绑定地址、本地端口、远端地址和远端端口。Remote Agent 配置还记录自动重连开关、`ping_pong_min_rtt` 时钟估计方法和 2 秒采样间隔。0.20 开始，当前所有已打开的本地实例都会逐项写入 `sources` 和逐源配置文件；记录期间只允许这些已声明来源按原配置断开和重连，新增、移除或修改端点必须等记录停止，防止出现未声明来源。
 
 `configuration/derived_fields.json` 保存名称、受限表达式与单位。开始记录时派生配置、最近值和滤波/时域状态同时冻结：历史清空后只由本 Session 已声明来源重新建立，记录期间拒绝改变表达式，迟到的未声明来源不能污染派生结果。滤波历史无需另存为不透明状态；回放以原始流和保存的表达式确定性重算。
 

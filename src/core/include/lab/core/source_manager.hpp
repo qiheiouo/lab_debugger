@@ -35,6 +35,7 @@ public:
     SourceManager& operator=(const SourceManager&) = delete;
 
     bool add(std::string key, IDataSource& source);
+    bool remove(const std::string& key);
     void setCallbacks(SourceManagerCallbacks callbacks);
 
     bool open(const std::string& key);
