@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QHostAddress>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QThread>
@@ -152,7 +153,9 @@ int main(int argc, char* argv[]) {
         session.disconnectNetwork();
 
         const auto sourceConfigurationPath = root / "configuration" / "source_0.json";
+        const auto sourceProtocolPath = root / "protocol" / "source_0_initial.json";
         const auto originalSourceConfiguration = readFile(sourceConfigurationPath);
+        const auto originalSourceProtocol = readFile(sourceProtocolPath);
         const auto sourceConfiguration = QJsonDocument::fromJson(originalSourceConfiguration);
         require(sourceConfiguration.isObject(), "recorded source configuration is valid JSON");
         const auto parser = sourceConfiguration.object()
@@ -194,12 +197,64 @@ int main(int argc, char* argv[]) {
         replayFailure.clear();
         require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
                 "future source parser configuration is rejected explicitly");
+        networkOpen = false;
+        session.connectNetwork({lab::adapters::network::NetworkMode::Udp,
+                                "127.0.0.1",
+                                peer.localPort(),
+                                "127.0.0.1",
+                                sessionPort});
+        require(waitFor([&] { return networkOpen; }),
+                "live UDP source reopens after rejected replay");
+        require(peer.writeDatagram(frame, QHostAddress::LocalHost, sessionPort) ==
+                    frame.size(),
+                "binary UDP frame is resent after rejected replay");
+        require(waitFor([&] {
+                    const auto points = session.timeSeries().snapshot(field);
+                    return points.size() == 1 && points.front().value == 42.0;
+                }),
+                "rejected replay preserves the active source-specific protocol");
+        require(session.timeSeries()
+                    .snapshot(sourceId.toStdString() + ".default_value")
+                    .empty(),
+                "rejected replay cannot replace the active source parser with CSV");
+        session.disconnectNetwork();
         writeFile(sourceConfigurationPath, originalSourceConfiguration);
         require(QFile::remove(fromPath(sourceConfigurationPath)),
                 "source parser configuration is temporarily removed");
         replayFailure.clear();
         require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
                 "declared source parser snapshot cannot silently go missing");
+        writeFile(sourceConfigurationPath, originalSourceConfiguration);
+
+        require(QFile::remove(fromPath(sourceProtocolPath)),
+                "source protocol snapshot is temporarily removed");
+        replayFailure.clear();
+        require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
+                "declared source protocol snapshot cannot silently go missing");
+        writeFile(sourceProtocolPath, originalSourceProtocol);
+
+        auto mismatched = sourceConfiguration.object();
+        mismatched.insert(QStringLiteral("id"), QStringLiteral("udp:other:1"));
+        writeFile(sourceConfigurationPath, QJsonDocument(mismatched).toJson());
+        replayFailure.clear();
+        require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
+                "source parser identity mismatch is rejected explicitly");
+
+        auto duplicateFields = sourceConfiguration.object();
+        auto duplicateParser = duplicateFields.value(QStringLiteral("parser")).toObject();
+        duplicateParser.insert(
+            QStringLiteral("csv_fields"),
+            QJsonArray{QStringLiteral("duplicate"), QStringLiteral("duplicate")});
+        duplicateFields.insert(QStringLiteral("parser"), duplicateParser);
+        writeFile(sourceConfigurationPath, QJsonDocument(duplicateFields).toJson());
+        replayFailure.clear();
+        require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
+                "duplicate per-source CSV fields are rejected explicitly");
+
+        writeFile(sourceConfigurationPath, QByteArrayLiteral("{not-json"));
+        replayFailure.clear();
+        require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),
+                "damaged source parser configuration is rejected explicitly");
         writeFile(sourceConfigurationPath, originalSourceConfiguration);
 
         std::filesystem::remove(protocolPath, cleanupError);

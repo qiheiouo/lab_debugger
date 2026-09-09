@@ -225,6 +225,30 @@ int main(int argc, char* argv[]) {
         require(!session.openReplaySession(fromPath(structuredRosbag)),
                 "invalid replay route cannot send CDR into the default parser");
 
+        invalidObject.insert(QStringLiteral("replay_mode"),
+                             QStringLiteral("unknown-cdr-route"));
+        require(invalidMetadata.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+                    invalidMetadata.write(QJsonDocument(invalidObject).toJson()) > 0,
+                "unknown replay route fixture is written");
+        invalidMetadata.close();
+        require(!session.openReplaySession(fromPath(structuredRosbag)),
+                "unknown replay route cannot send CDR into the default parser");
+
+        require(invalidMetadata.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+                    invalidMetadata.write("{not-json") == 9,
+                "damaged metadata fixture is written");
+        invalidMetadata.close();
+        require(!session.openReplaySession(fromPath(structuredRosbag)),
+                "damaged metadata cannot send CDR into the default parser");
+
+        const QByteArray oversizedMetadata(4 * 1024 * 1024 + 1, 'x');
+        require(invalidMetadata.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+                    invalidMetadata.write(oversizedMetadata) == oversizedMetadata.size(),
+                "oversized metadata fixture is written");
+        invalidMetadata.close();
+        require(!session.openReplaySession(fromPath(structuredRosbag)),
+                "oversized metadata cannot send CDR into the default parser");
+
         std::error_code cleanupError;
         std::filesystem::remove_all(root, cleanupError);
         require(!cleanupError, "routing fixture is removed");

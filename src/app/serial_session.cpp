@@ -1316,7 +1316,8 @@ bool SerialSession::startSession(const QString& directory) {
               {"auto_reconnect",
                lastRemoteAgentSettings_.autoReconnect ? "true" : "false"},
               {"clock_sync_method", "ping_pong_min_rtt"},
-              {"clock_sync_interval_ms", "2000"}}});
+              {"clock_sync_interval_ms", "2000"}},
+            std::nullopt});
     }
 
     const auto sourceCount = options.sources.size();
@@ -1525,28 +1526,6 @@ bool SerialSession::openReplaySession(const QString& directory) {
     const auto safeCdrRouting = rawOnly || structuredRosbag;
     replayRawOnly_.store(safeCdrRouting);
     replayStructuredRosbag_.store(structuredRosbag);
-    clearSourceParserConfigurations();
-    clearProtocol();
-    if (!safeCdrRouting && QFileInfo::exists(protocolPath)) {
-        loadProtocolFile(protocolPath);
-    }
-    if (!safeCdrRouting && activeProtocolName_.empty()) {
-        QFile fieldsFile(QDir(sessionDirectory).filePath(
-            QStringLiteral("configuration/csv_fields.txt")));
-        if (fieldsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QStringList restoredFields;
-            while (!fieldsFile.atEnd()) {
-                const auto field = QString::fromUtf8(fieldsFile.readLine()).trimmed();
-                if (!field.isEmpty()) {
-                    restoredFields.push_back(field);
-                }
-            }
-            if (!restoredFields.isEmpty()) {
-                setCsvFields(restoredFields);
-                emit csvFieldsRestored(restoredFields);
-            }
-        }
-    }
     std::vector<RestoredParserConfiguration> restoredParserConfigurations;
     if (!safeCdrRouting && metadataDocument.isObject()) {
         const auto sourcesValue =
@@ -1713,6 +1692,28 @@ bool SerialSession::openReplaySession(const QString& directory) {
                     return false;
                 }
                 restoredParserConfigurations.push_back(std::move(restored));
+            }
+        }
+    }
+    clearSourceParserConfigurations();
+    clearProtocol();
+    if (!safeCdrRouting && QFileInfo::exists(protocolPath)) {
+        loadProtocolFile(protocolPath);
+    }
+    if (!safeCdrRouting && activeProtocolName_.empty()) {
+        QFile fieldsFile(QDir(sessionDirectory).filePath(
+            QStringLiteral("configuration/csv_fields.txt")));
+        if (fieldsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QStringList restoredFields;
+            while (!fieldsFile.atEnd()) {
+                const auto field = QString::fromUtf8(fieldsFile.readLine()).trimmed();
+                if (!field.isEmpty()) {
+                    restoredFields.push_back(field);
+                }
+            }
+            if (!restoredFields.isEmpty()) {
+                setCsvFields(restoredFields);
+                emit csvFieldsRestored(restoredFields);
             }
         }
     }

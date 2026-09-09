@@ -258,9 +258,31 @@ void runTest() {
             "recording completes cleanly");
     const auto sources = metadata.value(QStringLiteral("sources")).toArray();
     require(sources.size() == 2, "metadata declares both live sources");
+    require(metadata.value(QStringLiteral("source_parser_format")).toInt() == 1,
+            "metadata declares versioned per-source parser snapshots");
     std::set<QString> sourceTypes;
-    for (const auto& source : sources) {
-        sourceTypes.insert(source.toObject().value(QStringLiteral("type")).toString());
+    for (qsizetype index = 0; index < sources.size(); ++index) {
+        const auto source = sources.at(index).toObject();
+        const auto sourceType = source.value(QStringLiteral("type")).toString();
+        sourceTypes.insert(sourceType);
+        const auto configuration = readJsonObject(
+            root / "configuration" /
+            ("source_" + std::to_string(index) + ".json"));
+        require(configuration.value(QStringLiteral("id")) ==
+                    source.value(QStringLiteral("id")) &&
+                    configuration.value(QStringLiteral("type")) ==
+                        source.value(QStringLiteral("type")),
+                "per-source parser snapshot matches metadata identity");
+        if (sourceType == QStringLiteral("udp")) {
+            require(configuration.value(QStringLiteral("parser")).isObject(),
+                    "local UDP source freezes its effective parser");
+        } else if (sourceType == QStringLiteral("ros_remote_agent")) {
+            require(configuration.value(QStringLiteral("parser")).isUndefined() &&
+                        !std::filesystem::exists(
+                            root / "protocol" /
+                            ("source_" + std::to_string(index) + "_initial.json")),
+                    "Remote Agent CDR source never receives a local byte parser");
+        }
     }
     require(sourceTypes == std::set<QString>{QStringLiteral("ros_remote_agent"),
                                              QStringLiteral("udp")},
