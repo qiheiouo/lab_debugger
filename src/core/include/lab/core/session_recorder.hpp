@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -21,11 +22,18 @@
 
 namespace lab::core {
 
+struct SessionParserConfiguration {
+    std::vector<std::string> csvFields;
+    std::string protocolName;
+    std::string protocolJson;
+};
+
 struct SessionSourceMetadata {
     std::string sourceId;
     std::string type;
     std::string displayName;
     std::vector<std::pair<std::string, std::string>> configuration;
+    std::optional<SessionParserConfiguration> parser;
 };
 
 struct SessionStartOptions {

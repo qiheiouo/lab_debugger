@@ -23,6 +23,7 @@
 #include <deque>
 #include <atomic>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <span>
 #include <thread>
@@ -58,6 +59,10 @@ public slots:
     void unsubscribeRemoteTopic(lab::core::agent::SubscriptionRequest request);
     void sendBytes(const QByteArray& bytes);
     void setCsvFields(const QStringList& fields);
+    bool setSourceCsvFields(const QString& sourceId, const QStringList& fields);
+    bool loadSourceProtocolFile(const QString& sourceId, const QString& path);
+    bool clearSourceProtocol(const QString& sourceId);
+    bool resetSourceParserConfiguration(const QString& sourceId);
     bool setDerivedFields(const QVariantList& definitions);
     bool setAlertRules(const QVariantList& definitions);
     bool addManualMarker(const QString& message);
@@ -109,6 +114,12 @@ signals:
                                    quint64 checksumErrors,
                                    quint64 lengthErrors,
                                    quint64 decodeErrors);
+    void parserSourcesChanged(QVariantList sources);
+    void sourceParserConfigured(QString sourceId,
+                                QString mode,
+                                QString name,
+                                QStringList fields);
+    void sourceParserConfigurationFailed(QString sourceId, QStringList issues);
     void replayOpened(QString directory,
                       bool recoveredTruncatedTail,
                       bool rawOnly,
@@ -151,6 +162,13 @@ private slots:
 private:
     enum class SendTarget { Serial = 0, Network = 1 };
 
+    struct ActiveParserConfiguration {
+        std::vector<std::string> csvFields;
+        std::optional<lab::core::ProtocolDefinition> protocolDefinition;
+        std::string protocolName;
+        std::string protocolJson;
+    };
+
     void discoverLiveField(const std::string& field);
     [[nodiscard]] std::vector<lab::core::DataSample> appendDerivedSamples(
         std::span<const lab::core::DataSample> inputs,
@@ -159,6 +177,11 @@ private:
     void publishTimelineEvent(lab::core::SessionEvent event, bool record);
     void clearTimelineEvents();
     void leaveReplayForLiveSource();
+    void publishParserSources();
+    void clearSourceParserConfigurations();
+    void resetParserDependentState();
+    [[nodiscard]] lab::core::SessionParserConfiguration
+    resolvedParserConfiguration(const std::string& sourceId) const;
     [[nodiscard]] bool isDeclaredRecordingSource(const std::string& key) const noexcept;
 
     lab::adapters::serial::SerialSource source_;
@@ -202,7 +225,9 @@ private:
     lab::core::ProcessingPipeline processing_{timeSeries_};
     std::string activeProtocolName_;
     std::string activeProtocolJson_;
-    std::vector<std::string> activeCsvFields_;
+    std::vector<std::string> activeCsvFields_{"field0", "field1", "field2"};
+    std::unordered_map<std::string, ActiveParserConfiguration>
+        sourceParserConfigurations_;
     QTimer refreshTimer_;
 };
 

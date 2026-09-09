@@ -14,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <stop_token>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -22,6 +23,11 @@ namespace lab::core {
 
 class ProcessingPipeline {
 public:
+    struct ParserConfiguration {
+        std::vector<std::string> fieldNames{"field0", "field1", "field2"};
+        std::optional<ProtocolDefinition> protocolDefinition;
+    };
+
     using SampleHandler = std::function<void(const DataSample&)>;
     using SampleBatchHandler = std::function<void(std::span<const DataSample>)>;
     using FrameHandler = std::function<void(const FrameEvent&)>;
@@ -39,6 +45,11 @@ public:
     void setSampleBatchHandler(SampleBatchHandler handler);
     void setProtocolDefinition(ProtocolDefinition definition);
     void clearProtocolDefinition();
+    bool setSourceConfiguration(std::string sourceId,
+                                ParserConfiguration configuration);
+    bool clearSourceConfiguration(std::string_view sourceId);
+    [[nodiscard]] std::optional<ParserConfiguration>
+    sourceConfiguration(std::string_view sourceId) const;
     void resetParsers();
     void setFrameHandler(FrameHandler handler);
     [[nodiscard]] bool protocolEnabled() const;
@@ -67,6 +78,7 @@ private:
     mutable std::mutex parserMutex_;
     std::vector<std::string> fieldNames_{"field0", "field1", "field2"};
     std::optional<ProtocolDefinition> protocolDefinition_;
+    std::unordered_map<std::string, ParserConfiguration> sourceConfigurations_;
     std::unordered_map<std::string, SourceParsers> sourceParsers_;
     bool qualifyFieldNames_{};
 

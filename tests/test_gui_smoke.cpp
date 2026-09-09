@@ -2,10 +2,13 @@
 #include "ui/derived_fields_widget.hpp"
 #include "ui/alerts_widget.hpp"
 #include "ui/plot_widget.hpp"
+#include "ui/protocol_widget.hpp"
 #include "ui/send_panel.hpp"
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QComboBox>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QTimer>
 
@@ -68,6 +71,33 @@ int main(int argc, char* argv[]) {
             alerts.definitions().front().toMap()
                     .value(QStringLiteral("hysteresis")).toDouble() != 5.0) {
             std::cerr << "GUI smoke test failed: alert rule table does not preserve input\n";
+            return 1;
+        }
+
+        lab::ui::ProtocolWidget protocol;
+        QVariantMap parserSource;
+        parserSource.insert(QStringLiteral("id"),
+                            QStringLiteral("udp:127.0.0.1:9000"));
+        parserSource.insert(QStringLiteral("label"),
+                            QStringLiteral("udp:127.0.0.1:9000"));
+        parserSource.insert(QStringLiteral("overridden"), true);
+        parserSource.insert(QStringLiteral("mode"), QStringLiteral("csv"));
+        protocol.setParserSources({parserSource});
+        auto* sourceSelector = protocol.findChild<QComboBox*>(
+            QStringLiteral("parserSourceSelector"));
+        auto* sourceFields = protocol.findChild<QLineEdit*>(
+            QStringLiteral("sourceCsvFields"));
+        if (!sourceSelector || sourceSelector->count() != 2 || !sourceFields) {
+            std::cerr << "GUI smoke test failed: source parser controls are missing\n";
+            return 1;
+        }
+        sourceSelector->setCurrentIndex(1);
+        protocol.showParserConfigured(QStringLiteral("udp:127.0.0.1:9000"),
+                                      QStringLiteral("csv"), {},
+                                      {QStringLiteral("temperature"),
+                                       QStringLiteral("voltage")});
+        if (sourceFields->text() != QStringLiteral("temperature,voltage")) {
+            std::cerr << "GUI smoke test failed: source parser fields are not restored\n";
             return 1;
         }
 

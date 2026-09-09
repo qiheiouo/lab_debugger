@@ -393,6 +393,7 @@ bool SessionRecorder::writeMetadata(const std::string& status, Timestamp endTime
              << (options.protocolJson.empty() ? "null" : "\"protocol/initial.json\"") << "},\n"
              << "  \"derived_fields\": \"configuration/derived_fields.json\",\n"
              << "  \"alert_rules\": \"configuration/alert_rules.json\",\n"
+             << "  \"source_parser_format\": 1,\n"
              << "  \"sources\": [";
     for (std::size_t index = 0; index < options.sources.size(); ++index) {
         const auto& source = options.sources[index];
@@ -500,6 +501,23 @@ bool SessionRecorder::writeConfigurationFiles() {
 
     for (std::size_t index = 0; index < options.sources.size(); ++index) {
         const auto& source = options.sources[index];
+        const auto parserProtocolPath =
+            root / "protocol" /
+            ("source_" + std::to_string(index) + "_initial.json");
+        if (source.parser && !source.parser->protocolJson.empty()) {
+            std::ofstream protocol(parserProtocolPath, std::ios::trunc);
+            if (!protocol) {
+                std::scoped_lock lock(mutex_);
+                error_ = "cannot write source protocol snapshot";
+                return false;
+            }
+            protocol << source.parser->protocolJson;
+            if (!protocol) {
+                std::scoped_lock lock(mutex_);
+                error_ = "cannot finish source protocol snapshot";
+                return false;
+            }
+        }
         std::ofstream configuration(
             root / "configuration" / ("source_" + std::to_string(index) + ".json"),
             std::ios::trunc);
@@ -520,7 +538,36 @@ bool SessionRecorder::writeConfigurationFiles() {
         if (!source.configuration.empty()) {
             configuration << '\n';
         }
-        configuration << "  }\n}\n";
+        configuration << "  }";
+        if (source.parser) {
+            configuration << ",\n  \"parser\": {\n"
+                          << "    \"format_version\": 1,\n"
+                          << "    \"mode\": \""
+                          << (source.parser->protocolJson.empty() ? "csv" : "protocol")
+                          << "\",\n"
+                          << "    \"csv_fields\": [";
+            for (std::size_t field = 0; field < source.parser->csvFields.size(); ++field) {
+                configuration << (field == 0 ? "" : ", ") << '"'
+                              << jsonEscape(source.parser->csvFields[field]) << '"';
+            }
+            configuration << "],\n"
+                          << "    \"protocol\": {\"name\": \""
+                          << jsonEscape(source.parser->protocolName)
+                          << "\", \"snapshot\": ";
+            if (source.parser->protocolJson.empty()) {
+                configuration << "null";
+            } else {
+                configuration << "\"protocol/source_" << index
+                              << "_initial.json\"";
+            }
+            configuration << "}\n  }";
+        }
+        configuration << "\n}\n";
+        if (!configuration) {
+            std::scoped_lock lock(mutex_);
+            error_ = "cannot finish source configuration";
+            return false;
+        }
     }
     return true;
 }

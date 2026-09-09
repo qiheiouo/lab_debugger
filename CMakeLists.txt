@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.18.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.19.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -322,6 +322,20 @@ if(LAB_DEBUGGER_BUILD_TESTS)
         )
         add_test(NAME lab_marker_alert_tests COMMAND lab_marker_alert_tests)
         set_tests_properties(lab_marker_alert_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 20
+        )
+        add_executable(lab_source_parser_session_tests
+            tests/test_source_parser_session.cpp
+        )
+        target_link_libraries(lab_source_parser_session_tests
+            PRIVATE lab_app_ui Qt6::Core Qt6::Network
+        )
+        add_test(NAME lab_source_parser_session_tests
+            COMMAND lab_source_parser_session_tests
+        )
+        set_tests_properties(lab_source_parser_session_tests PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
             TIMEOUT 20

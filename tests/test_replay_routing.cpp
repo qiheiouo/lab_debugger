@@ -211,6 +211,20 @@ int main(int argc, char* argv[]) {
                 "structured replay publishes discovered curve fields to the UI");
         session.closeReplay();
 
+        QFile invalidMetadata(fromPath(structuredRosbag / "metadata.json"));
+        require(invalidMetadata.open(QIODevice::ReadOnly),
+                "structured metadata reopens for validation");
+        auto invalidDocument = QJsonDocument::fromJson(invalidMetadata.readAll());
+        invalidMetadata.close();
+        auto invalidObject = invalidDocument.object();
+        invalidObject.insert(QStringLiteral("replay_mode"), 7);
+        require(invalidMetadata.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+                    invalidMetadata.write(QJsonDocument(invalidObject).toJson()) > 0,
+                "invalid replay route fixture is written");
+        invalidMetadata.close();
+        require(!session.openReplaySession(fromPath(structuredRosbag)),
+                "invalid replay route cannot send CDR into the default parser");
+
         std::error_code cleanupError;
         std::filesystem::remove_all(root, cleanupError);
         require(!cleanupError, "routing fixture is removed");

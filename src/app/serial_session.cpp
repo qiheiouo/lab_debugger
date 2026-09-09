@@ -31,11 +31,116 @@ constexpr std::string_view networkSourceKey = "network";
 constexpr std::string_view remoteAgentSourceKey = "remote_agent";
 constexpr qint64 maximumDerivedConfigurationBytes = 1024 * 1024;
 constexpr qsizetype maximumDerivedDefinitions = 128;
+constexpr qint64 maximumProtocolDefinitionBytes = 1024 * 1024;
+constexpr qint64 maximumSessionMetadataBytes = 4 * 1024 * 1024;
+constexpr qsizetype maximumParserSources = 64;
+constexpr qsizetype maximumCsvFields = 256;
+constexpr qsizetype maximumCsvFieldBytes = 1024;
 constexpr qint64 maximumAlertConfigurationBytes = 1024 * 1024;
 constexpr qsizetype maximumAlertDefinitions = 128;
 constexpr qint64 maximumEventLogBytes = 64 * 1024 * 1024;
 constexpr qint64 maximumEventLineBytes = 64 * 1024;
 constexpr qsizetype maximumTimelineEvents = 10'000;
+
+std::string utf8String(const QString& value) {
+    const auto bytes = value.toUtf8();
+    return {bytes.constData(), static_cast<std::size_t>(bytes.size())};
+}
+
+bool containsControlCharacter(const QString& value) {
+    return std::any_of(value.cbegin(), value.cend(), [](QChar character) {
+        const auto code = character.unicode();
+        return code < 0x20 || code == 0x7f;
+    });
+}
+
+std::optional<std::vector<std::string>> validatedCsvFields(
+    const QStringList& fields,
+    QStringList& issues) {
+    if (fields.size() > maximumCsvFields) {
+        issues.push_back(QObject::tr("CSV 字段不能超过 256 项"));
+        return std::nullopt;
+    }
+    std::set<std::string> unique;
+    std::vector<std::string> result;
+    result.reserve(static_cast<std::size_t>(fields.size()));
+    for (qsizetype index = 0; index < fields.size(); ++index) {
+        const auto cleaned = fields[index].trimmed();
+        const auto bytes = cleaned.toUtf8();
+        if (bytes.isEmpty() || bytes.size() > maximumCsvFieldBytes ||
+            containsControlCharacter(cleaned)) {
+            issues.push_back(QObject::tr("第 %1 个 CSV 字段为空、过长或包含控制字符")
+                                 .arg(index + 1));
+            continue;
+        }
+        std::string name(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+        if (!unique.insert(name).second) {
+            issues.push_back(QObject::tr("CSV 字段名重复：%1").arg(cleaned));
+            continue;
+        }
+        result.push_back(std::move(name));
+    }
+    if (result.empty() && issues.empty()) {
+        issues.push_back(QObject::tr("至少需要一个 CSV 字段"));
+    }
+    return issues.empty() ? std::optional(std::move(result)) : std::nullopt;
+}
+
+struct LoadedProtocolDefinition {
+    lab::core::ProtocolDefinition definition;
+    std::string json;
+    QStringList numericFields;
+};
+
+struct RestoredParserConfiguration {
+    QString sourceId;
+    std::vector<std::string> csvFields;
+    std::optional<lab::core::ProtocolDefinition> protocolDefinition;
+    std::string protocolName;
+    std::string protocolJson;
+    QStringList visibleFields;
+};
+
+std::optional<LoadedProtocolDefinition> readProtocolDefinition(
+    const QString& path,
+    QStringList& issues) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        issues.push_back(QObject::tr("无法打开协议文件：%1").arg(file.errorString()));
+        return std::nullopt;
+    }
+    const auto declaredSize = file.size();
+    if (declaredSize <= 0 || declaredSize > maximumProtocolDefinitionBytes) {
+        issues.push_back(QObject::tr("协议文件为空或超过 1 MiB 安全限制"));
+        return std::nullopt;
+    }
+    const auto data = file.readAll();
+    if (file.error() != QFileDevice::NoError || data.size() != declaredSize) {
+        issues.push_back(QObject::tr("协议文件读取不完整"));
+        return std::nullopt;
+    }
+    const auto loaded = lab::core::loadProtocolJson(
+        std::string_view(data.constData(), static_cast<std::size_t>(data.size())));
+    if (!loaded.success()) {
+        issues.reserve(static_cast<qsizetype>(loaded.issues.size()));
+        for (const auto& issue : loaded.issues) {
+            issues.push_back(QStringLiteral("[%1] %2")
+                                 .arg(QString::fromStdString(issue.code),
+                                      QString::fromStdString(issue.message)));
+        }
+        return std::nullopt;
+    }
+    QStringList numericFields;
+    for (const auto& field : loaded.definition->fields) {
+        if (field.type != lab::core::FieldType::ByteArray) {
+            numericFields.push_back(QString::fromStdString(field.name));
+        }
+    }
+    return LoadedProtocolDefinition{
+        std::move(*loaded.definition),
+        std::string(data.constData(), static_cast<std::size_t>(data.size())),
+        std::move(numericFields)};
+}
 
 void updateLatestTimestamp(std::atomic<lab::core::Timestamp>& target,
                            lab::core::Timestamp value) {
@@ -583,6 +688,55 @@ void SerialSession::leaveReplayForLiveSource() {
     clearTimelineEvents();
 }
 
+void SerialSession::publishParserSources() {
+    std::set<std::string> sourceIds;
+    if (!lastSettings_.portName.empty()) sourceIds.insert(source_.sourceId());
+    if (networkConfigured_) sourceIds.insert(network_.sourceId());
+    for (const auto& [sourceId, configuration] : sourceParserConfigurations_) {
+        static_cast<void>(configuration);
+        sourceIds.insert(sourceId);
+    }
+    QVariantList sources;
+    sources.reserve(static_cast<qsizetype>(sourceIds.size()));
+    for (const auto& sourceId : sourceIds) {
+        QVariantMap source;
+        source.insert(QStringLiteral("id"), QString::fromStdString(sourceId));
+        source.insert(QStringLiteral("label"), QString::fromStdString(sourceId));
+        const auto configured = sourceParserConfigurations_.find(sourceId);
+        source.insert(QStringLiteral("overridden"),
+                      configured != sourceParserConfigurations_.end());
+        source.insert(
+            QStringLiteral("mode"),
+            configured == sourceParserConfigurations_.end()
+                ? QStringLiteral("default")
+                : configured->second.protocolDefinition
+                      ? QStringLiteral("protocol")
+                      : QStringLiteral("csv"));
+        sources.push_back(source);
+    }
+    emit parserSourcesChanged(sources);
+}
+
+void SerialSession::clearSourceParserConfigurations() {
+    for (const auto& [sourceId, configuration] : sourceParserConfigurations_) {
+        static_cast<void>(configuration);
+        processing_.clearSourceConfiguration(sourceId);
+    }
+    sourceParserConfigurations_.clear();
+    publishParserSources();
+}
+
+lab::core::SessionParserConfiguration
+SerialSession::resolvedParserConfiguration(const std::string& sourceId) const {
+    const auto configured = sourceParserConfigurations_.find(sourceId);
+    if (configured != sourceParserConfigurations_.end()) {
+        return {configured->second.csvFields,
+                configured->second.protocolName,
+                configured->second.protocolJson};
+    }
+    return {activeCsvFields_, activeProtocolName_, activeProtocolJson_};
+}
+
 void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings) {
     if (recorder_.isRecording() &&
         (!recordingSerial_.load() || !sameSettings(settings, lastSettings_))) {
@@ -594,6 +748,7 @@ void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings
     sourceManager_.close(std::string(serialSourceKey));
     lastSettings_ = std::move(settings);
     source_.setSettings(lastSettings_);
+    publishParserSources();
     sourceManager_.open(std::string(serialSourceKey));
 }
 
@@ -629,6 +784,7 @@ void SerialSession::connectNetwork(lab::adapters::network::NetworkSettings setti
     lastNetworkSettings_ = std::move(settings);
     networkConfigured_ = true;
     network_.setSettings(lastNetworkSettings_);
+    publishParserSources();
     sourceManager_.open(std::string(networkSourceKey));
 }
 
@@ -728,13 +884,173 @@ void SerialSession::sendBytes(const QByteArray& bytes) {
 }
 
 void SerialSession::setCsvFields(const QStringList& fields) {
-    std::vector<std::string> names;
-    names.reserve(fields.size());
-    for (const auto& field : fields) {
-        names.push_back(field.trimmed().toStdString());
+    if (recorder_.isRecording()) {
+        emit sourceError(tr("Session 记录期间解析配置已冻结，请停止记录后再修改"));
+        return;
     }
-    activeCsvFields_ = names;
-    processing_.setFieldNames(std::move(names));
+    QStringList issues;
+    auto names = validatedCsvFields(fields, issues);
+    if (!names) {
+        emit sourceParserConfigurationFailed({}, issues);
+        return;
+    }
+    activeCsvFields_ = *names;
+    processing_.setFieldNames(std::move(*names));
+    resetParserDependentState();
+    if (activeProtocolName_.empty()) {
+        emit sourceParserConfigured({}, QStringLiteral("csv"), {}, fields);
+    }
+}
+
+bool SerialSession::setSourceCsvFields(const QString& sourceId,
+                                       const QStringList& fields) {
+    if (recorder_.isRecording()) {
+        emit sourceParserConfigurationFailed(
+            sourceId,
+            {tr("Session 记录期间逐来源解析配置已冻结，请停止记录后再修改")});
+        return false;
+    }
+    const auto cleanedSource = sourceId.trimmed();
+    const auto sourceBytes = cleanedSource.toUtf8();
+    QStringList issues;
+    if (sourceBytes.isEmpty() || sourceBytes.size() > 1024 ||
+        containsControlCharacter(cleanedSource)) {
+        issues.push_back(tr("数据源标识为空、过长或包含控制字符"));
+    }
+    auto names = validatedCsvFields(fields, issues);
+    if (!names) {
+        emit sourceParserConfigurationFailed(sourceId, issues);
+        return false;
+    }
+    const auto key = utf8String(cleanedSource);
+    if (!sourceParserConfigurations_.contains(key) &&
+        sourceParserConfigurations_.size() >=
+            static_cast<std::size_t>(maximumParserSources)) {
+        emit sourceParserConfigurationFailed(
+            sourceId, {tr("逐来源解析配置不能超过 64 项")});
+        return false;
+    }
+    lab::core::ProcessingPipeline::ParserConfiguration pipelineConfiguration;
+    pipelineConfiguration.fieldNames = *names;
+    if (!processing_.setSourceConfiguration(key,
+                                            std::move(pipelineConfiguration))) {
+        emit sourceParserConfigurationFailed(sourceId, {tr("数据源标识无效")});
+        return false;
+    }
+    sourceParserConfigurations_.insert_or_assign(
+        key, ActiveParserConfiguration{*names, std::nullopt, {}, {}});
+    resetParserDependentState();
+    publishParserSources();
+    emit sourceParserConfigured(cleanedSource,
+                                QStringLiteral("csv"),
+                                {},
+                                fields);
+    return true;
+}
+
+bool SerialSession::loadSourceProtocolFile(const QString& sourceId,
+                                           const QString& path) {
+    if (recorder_.isRecording()) {
+        emit sourceParserConfigurationFailed(
+            sourceId,
+            {tr("Session 记录期间逐来源解析配置已冻结，请停止记录后再修改")});
+        return false;
+    }
+    const auto cleanedSource = sourceId.trimmed();
+    const auto sourceBytes = cleanedSource.toUtf8();
+    if (sourceBytes.isEmpty() || sourceBytes.size() > 1024 ||
+        containsControlCharacter(cleanedSource)) {
+        emit sourceParserConfigurationFailed(
+            sourceId, {tr("数据源标识为空、过长或包含控制字符")});
+        return false;
+    }
+    QStringList issues;
+    auto loaded = readProtocolDefinition(path, issues);
+    if (!loaded) {
+        emit sourceParserConfigurationFailed(sourceId, issues);
+        return false;
+    }
+    const auto key = utf8String(cleanedSource);
+    if (!sourceParserConfigurations_.contains(key) &&
+        sourceParserConfigurations_.size() >=
+            static_cast<std::size_t>(maximumParserSources)) {
+        emit sourceParserConfigurationFailed(
+            sourceId, {tr("逐来源解析配置不能超过 64 项")});
+        return false;
+    }
+    auto fieldNames = activeCsvFields_;
+    if (const auto previous = sourceParserConfigurations_.find(key);
+        previous != sourceParserConfigurations_.end()) {
+        fieldNames = previous->second.csvFields;
+    }
+    lab::core::ProcessingPipeline::ParserConfiguration pipelineConfiguration;
+    pipelineConfiguration.fieldNames = fieldNames;
+    pipelineConfiguration.protocolDefinition = loaded->definition;
+    if (!processing_.setSourceConfiguration(key,
+                                            std::move(pipelineConfiguration))) {
+        emit sourceParserConfigurationFailed(sourceId, {tr("数据源标识无效")});
+        return false;
+    }
+    const auto protocolName = loaded->definition.name;
+    sourceParserConfigurations_.insert_or_assign(
+        key,
+        ActiveParserConfiguration{fieldNames,
+                                  std::move(loaded->definition),
+                                  protocolName,
+                                  std::move(loaded->json)});
+    resetParserDependentState();
+    publishParserSources();
+    emit sourceParserConfigured(cleanedSource,
+                                QStringLiteral("protocol"),
+                                QString::fromStdString(protocolName),
+                                loaded->numericFields);
+    return true;
+}
+
+bool SerialSession::clearSourceProtocol(const QString& sourceId) {
+    const auto cleanedSource = sourceId.trimmed();
+    const auto key = utf8String(cleanedSource);
+    const auto found = sourceParserConfigurations_.find(key);
+    const auto fields = found == sourceParserConfigurations_.end()
+                            ? activeCsvFields_
+                            : found->second.csvFields;
+    QStringList qtFields;
+    qtFields.reserve(static_cast<qsizetype>(fields.size()));
+    for (const auto& field : fields) {
+        qtFields.push_back(QString::fromStdString(field));
+    }
+    return setSourceCsvFields(cleanedSource, qtFields);
+}
+
+bool SerialSession::resetSourceParserConfiguration(const QString& sourceId) {
+    if (recorder_.isRecording()) {
+        emit sourceParserConfigurationFailed(
+            sourceId,
+            {tr("Session 记录期间逐来源解析配置已冻结，请停止记录后再修改")});
+        return false;
+    }
+    const auto cleanedSource = sourceId.trimmed();
+    const auto key = utf8String(cleanedSource);
+    if (key.empty()) {
+        emit sourceParserConfigurationFailed(sourceId, {tr("数据源标识不能为空")});
+        return false;
+    }
+    processing_.clearSourceConfiguration(key);
+    sourceParserConfigurations_.erase(key);
+    resetParserDependentState();
+    publishParserSources();
+    QStringList fields;
+    for (const auto& field : activeCsvFields_) {
+        fields.push_back(QString::fromStdString(field));
+    }
+    emit sourceParserConfigured(cleanedSource,
+                                QStringLiteral("default"),
+                                QString::fromStdString(activeProtocolName_),
+                                fields);
+    return true;
+}
+
+void SerialSession::resetParserDependentState() {
     derivedFields_.resetValues();
     alertRules_.resetValues();
     latestLiveTimestamp_.store(0);
@@ -742,6 +1058,10 @@ void SerialSession::setCsvFields(const QStringList& fields) {
     {
         std::scoped_lock lock(liveFieldsMutex_);
         liveFieldNames_.clear();
+    }
+    {
+        std::scoped_lock lock(protocolQueueMutex_);
+        protocolQueue_.clear();
     }
 }
 
@@ -880,50 +1200,22 @@ bool SerialSession::addManualMarker(const QString& message) {
 }
 
 void SerialSession::loadProtocolFile(const QString& path) {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        emit protocolLoadFailed({tr("无法打开协议文件：%1").arg(file.errorString())});
+    if (recorder_.isRecording()) {
+        emit protocolLoadFailed(
+            {tr("Session 记录期间解析配置已冻结，请停止记录后再修改")});
         return;
     }
-
-    const auto data = file.readAll();
-    const auto result = lab::core::loadProtocolJson(
-        std::string_view(data.constData(), static_cast<std::size_t>(data.size())));
-    if (!result.success()) {
-        QStringList issues;
-        issues.reserve(static_cast<qsizetype>(result.issues.size()));
-        for (const auto& issue : result.issues) {
-            issues.push_back(QStringLiteral("[%1] %2")
-                                 .arg(QString::fromStdString(issue.code),
-                                      QString::fromStdString(issue.message)));
-        }
+    QStringList issues;
+    auto loaded = readProtocolDefinition(path, issues);
+    if (!loaded) {
         emit protocolLoadFailed(issues);
         return;
     }
-
-    QStringList numericFields;
-    for (const auto& field : result.definition->fields) {
-        if (field.type != lab::core::FieldType::ByteArray) {
-            numericFields.push_back(QString::fromStdString(field.name));
-        }
-    }
-
-    const auto protocolName = QString::fromStdString(result.definition->name);
-    processing_.setProtocolDefinition(*result.definition);
-    derivedFields_.resetValues();
-    alertRules_.resetValues();
-    latestLiveTimestamp_.store(0);
-    timeSeries_.clear();
-    {
-        std::scoped_lock lock(liveFieldsMutex_);
-        liveFieldNames_.clear();
-    }
-    {
-        std::scoped_lock lock(protocolQueueMutex_);
-        protocolQueue_.clear();
-    }
-    activeProtocolName_ = result.definition->name;
-    activeProtocolJson_.assign(data.constData(), static_cast<std::size_t>(data.size()));
+    const auto protocolName = QString::fromStdString(loaded->definition.name);
+    processing_.setProtocolDefinition(loaded->definition);
+    activeProtocolName_ = loaded->definition.name;
+    activeProtocolJson_ = std::move(loaded->json);
+    resetParserDependentState();
     recorder_.updateProtocolSnapshot(
         activeProtocolName_, activeProtocolJson_, lab::core::nowTimestampNs());
     recorder_.enqueueEvent({lab::core::nowTimestampNs(),
@@ -932,20 +1224,23 @@ void SerialSession::loadProtocolFile(const QString& path) {
                             "protocol",
                             "Protocol loaded: " + activeProtocolName_,
                             0});
-    emit protocolLoaded(protocolName, numericFields);
+    emit protocolLoaded(protocolName, loaded->numericFields);
+    emit sourceParserConfigured({},
+                                QStringLiteral("protocol"),
+                                protocolName,
+                                loaded->numericFields);
 }
 
 void SerialSession::clearProtocol() {
-    processing_.clearProtocolDefinition();
-    derivedFields_.resetValues();
-    alertRules_.resetValues();
-    latestLiveTimestamp_.store(0);
-    {
-        std::scoped_lock lock(protocolQueueMutex_);
-        protocolQueue_.clear();
+    if (recorder_.isRecording()) {
+        emit protocolLoadFailed(
+            {tr("Session 记录期间解析配置已冻结，请停止记录后再修改")});
+        return;
     }
+    processing_.clearProtocolDefinition();
     activeProtocolName_.clear();
     activeProtocolJson_.clear();
+    resetParserDependentState();
     recorder_.enqueueEvent({lab::core::nowTimestampNs(),
                             "lab_debugger",
                             "info",
@@ -953,6 +1248,11 @@ void SerialSession::clearProtocol() {
                             "Protocol disabled",
                             0});
     emit protocolCleared();
+    QStringList fields;
+    for (const auto& field : activeCsvFields_) {
+        fields.push_back(QString::fromStdString(field));
+    }
+    emit sourceParserConfigured({}, QStringLiteral("csv"), {}, fields);
 }
 
 bool SerialSession::startSession(const QString& directory) {
@@ -968,7 +1268,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.18.0";
+    options.softwareVersion = "0.19.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -978,8 +1278,9 @@ bool SerialSession::startSession(const QString& directory) {
     options.derivedFields = derivedFields_.definitions();
     options.alertRules = alertRules_.definitions();
     if (serialOpen) {
+        const auto sourceId = source_.sourceId();
         options.sources.push_back({
-            source_.sourceId(),
+            sourceId,
             "serial",
             lastSettings_.portName,
             {{"port", lastSettings_.portName},
@@ -987,17 +1288,20 @@ bool SerialSession::startSession(const QString& directory) {
              {"data_bits", std::to_string(lastSettings_.dataBits)},
              {"stop_bits", std::to_string(static_cast<int>(lastSettings_.stopBits))},
              {"parity", std::to_string(static_cast<int>(lastSettings_.parity))},
-             {"flow_control", std::to_string(static_cast<int>(lastSettings_.flowControl))}}});
+             {"flow_control", std::to_string(static_cast<int>(lastSettings_.flowControl))}},
+            resolvedParserConfiguration(sourceId)});
     }
     if (networkOpen) {
+        const auto sourceId = network_.sourceId();
         options.sources.push_back({
-            network_.sourceId(),
+            sourceId,
             lab::adapters::network::toString(lastNetworkSettings_.mode),
-            network_.sourceId(),
+            sourceId,
             {{"remote_host", lastNetworkSettings_.remoteHost},
              {"remote_port", std::to_string(lastNetworkSettings_.remotePort)},
              {"bind_address", lastNetworkSettings_.bindAddress},
-             {"local_port", std::to_string(lastNetworkSettings_.localPort)}}});
+             {"local_port", std::to_string(lastNetworkSettings_.localPort)}},
+            resolvedParserConfiguration(sourceId)});
     }
     if (remoteAgentOpen) {
         options.sources.push_back({
@@ -1118,16 +1422,59 @@ bool SerialSession::openReplaySession(const QString& directory) {
     const auto protocolPath = QDir(sessionDirectory).filePath(QStringLiteral("protocol/initial.json"));
     bool rawOnly = false;
     bool structuredRosbag = false;
-    QFile metadataFile(QDir(sessionDirectory).filePath(QStringLiteral("metadata.json")));
-    if (metadataFile.open(QIODevice::ReadOnly)) {
-        const auto document = QJsonDocument::fromJson(metadataFile.readAll());
-        const auto replayMode = document.isObject()
-                                    ? document.object()
-                                          .value(QStringLiteral("replay_mode"))
-                                          .toString()
-                                    : QString{};
+    QJsonDocument metadataDocument;
+    const auto metadataPath =
+        QDir(sessionDirectory).filePath(QStringLiteral("metadata.json"));
+    QFile metadataFile(metadataPath);
+    if (QFileInfo::exists(metadataPath)) {
+        if (!metadataFile.open(QIODevice::ReadOnly)) {
+            emit replayOpenFailed(tr("无法读取 Session metadata"));
+            return false;
+        }
+        const auto metadataSize = metadataFile.size();
+        if (metadataSize <= 0 || metadataSize > maximumSessionMetadataBytes) {
+            emit replayOpenFailed(tr("Session metadata 为空或超过 4 MiB 安全限制"));
+            return false;
+        }
+        const auto metadataBytes = metadataFile.readAll();
+        if (metadataFile.error() != QFileDevice::NoError ||
+            metadataBytes.size() != metadataSize) {
+            emit replayOpenFailed(tr("Session metadata 读取不完整"));
+            return false;
+        }
+        QJsonParseError metadataError;
+        metadataDocument = QJsonDocument::fromJson(metadataBytes, &metadataError);
+        if (metadataError.error != QJsonParseError::NoError ||
+            !metadataDocument.isObject()) {
+            emit replayOpenFailed(tr("Session metadata 已损坏"));
+            return false;
+        }
+        const auto replayModeValue =
+            metadataDocument.object().value(QStringLiteral("replay_mode"));
+        if (!replayModeValue.isUndefined() && !replayModeValue.isString()) {
+            emit replayOpenFailed(tr("Session 回放路由类型无效"));
+            return false;
+        }
+        const auto replayMode = replayModeValue.toString();
+        if (!replayMode.isEmpty() && replayMode != QStringLiteral("raw-only") &&
+            replayMode != QStringLiteral("rosbag2-structured")) {
+            emit replayOpenFailed(tr("Session 回放路由模式不受支持"));
+            return false;
+        }
         rawOnly = replayMode == QStringLiteral("raw-only");
         structuredRosbag = replayMode == QStringLiteral("rosbag2-structured");
+    }
+    bool sourceParserFormatDeclared = false;
+    if (metadataDocument.isObject()) {
+        const auto format =
+            metadataDocument.object().value(QStringLiteral("source_parser_format"));
+        if (!format.isUndefined()) {
+            if (!format.isDouble() || format.toDouble() != 1.0) {
+                emit replayOpenFailed(tr("Session 逐来源解析格式版本不受支持"));
+                return false;
+            }
+            sourceParserFormatDeclared = true;
+        }
     }
 
     decltype(rosbagReplayTopics_) rosbagTopics;
@@ -1178,6 +1525,7 @@ bool SerialSession::openReplaySession(const QString& directory) {
     const auto safeCdrRouting = rawOnly || structuredRosbag;
     replayRawOnly_.store(safeCdrRouting);
     replayStructuredRosbag_.store(structuredRosbag);
+    clearSourceParserConfigurations();
     clearProtocol();
     if (!safeCdrRouting && QFileInfo::exists(protocolPath)) {
         loadProtocolFile(protocolPath);
@@ -1199,6 +1547,199 @@ bool SerialSession::openReplaySession(const QString& directory) {
             }
         }
     }
+    std::vector<RestoredParserConfiguration> restoredParserConfigurations;
+    if (!safeCdrRouting && metadataDocument.isObject()) {
+        const auto sourcesValue =
+            metadataDocument.object().value(QStringLiteral("sources"));
+        if (sourceParserFormatDeclared && !sourcesValue.isArray()) {
+            emit replayOpenFailed(tr("Session 缺少逐来源数据源目录"));
+            return false;
+        }
+        if (sourcesValue.isArray()) {
+            const auto sources = sourcesValue.toArray();
+            if (sources.size() > maximumParserSources) {
+                emit replayOpenFailed(tr("Session 数据源超过 64 项安全限制"));
+                return false;
+            }
+            std::set<std::string> sourceIds;
+            for (qsizetype index = 0; index < sources.size(); ++index) {
+                if (!sources[index].isObject()) {
+                    emit replayOpenFailed(tr("Session 数据源目录包含无效条目"));
+                    return false;
+                }
+                const auto metadataSource = sources[index].toObject();
+                const auto metadataId = metadataSource.value(QStringLiteral("id"));
+                const auto metadataType = metadataSource.value(QStringLiteral("type"));
+                if (!metadataId.isString() || !metadataType.isString()) {
+                    emit replayOpenFailed(tr("Session 数据源缺少有效标识"));
+                    return false;
+                }
+                const auto type = metadataType.toString();
+                const auto localByteSource =
+                    type == QStringLiteral("serial") ||
+                    type == QStringLiteral("tcp_client") ||
+                    type == QStringLiteral("tcp_server") ||
+                    type == QStringLiteral("udp");
+                const auto sourceId = metadataId.toString();
+                const auto sourceBytes = sourceId.toUtf8();
+                if (sourceBytes.isEmpty() || sourceBytes.size() > 1024 ||
+                    containsControlCharacter(sourceId) ||
+                    !sourceIds.insert(utf8String(sourceId)).second) {
+                    emit replayOpenFailed(tr("Session 数据源标识无效或重复"));
+                    return false;
+                }
+
+                const auto configurationPath = QDir(sessionDirectory).filePath(
+                    QStringLiteral("configuration/source_%1.json").arg(index));
+                QFile configurationFile(configurationPath);
+                if (!configurationFile.open(QIODevice::ReadOnly)) {
+                    if (sourceParserFormatDeclared && localByteSource) {
+                        emit replayOpenFailed(tr("Session 缺少逐来源解析配置"));
+                        return false;
+                    }
+                    continue;
+                }
+                const auto configurationSize = configurationFile.size();
+                if (configurationSize < 0 ||
+                    configurationSize > maximumProtocolDefinitionBytes) {
+                    emit replayOpenFailed(tr("Session 数据源配置超过 1 MiB 安全限制"));
+                    return false;
+                }
+                const auto configurationBytes = configurationFile.readAll();
+                if (configurationFile.error() != QFileDevice::NoError ||
+                    configurationBytes.size() != configurationSize) {
+                    emit replayOpenFailed(tr("Session 数据源配置读取不完整"));
+                    return false;
+                }
+                QJsonParseError configurationError;
+                const auto configurationDocument = QJsonDocument::fromJson(
+                    configurationBytes, &configurationError);
+                if (configurationError.error != QJsonParseError::NoError ||
+                    !configurationDocument.isObject()) {
+                    emit replayOpenFailed(tr("Session 数据源配置已损坏"));
+                    return false;
+                }
+                const auto sourceObject = configurationDocument.object();
+                if (!sourceObject.value(QStringLiteral("id")).isString() ||
+                    sourceObject.value(QStringLiteral("id")).toString() != sourceId ||
+                    !sourceObject.value(QStringLiteral("type")).isString() ||
+                    sourceObject.value(QStringLiteral("type")).toString() != type) {
+                    emit replayOpenFailed(tr("Session 数据源配置与目录标识不一致"));
+                    return false;
+                }
+                const auto parserValue = sourceObject.value(QStringLiteral("parser"));
+                if (parserValue.isUndefined()) {
+                    if (sourceParserFormatDeclared && localByteSource) {
+                        emit replayOpenFailed(tr("Session 数据源缺少解析器快照"));
+                        return false;
+                    }
+                    continue;
+                }
+                if (!parserValue.isObject()) {
+                    emit replayOpenFailed(tr("Session 逐来源解析配置类型无效"));
+                    return false;
+                }
+                const auto parser = parserValue.toObject();
+                const auto formatVersion = parser.value(QStringLiteral("format_version"));
+                const auto mode = parser.value(QStringLiteral("mode"));
+                const auto csvFields = parser.value(QStringLiteral("csv_fields"));
+                const auto protocol = parser.value(QStringLiteral("protocol"));
+                if (!formatVersion.isDouble() || formatVersion.toDouble() != 1.0 ||
+                    !mode.isString() || !csvFields.isArray() || !protocol.isObject()) {
+                    emit replayOpenFailed(
+                        tr("Session 逐来源解析配置版本不受支持或字段缺失"));
+                    return false;
+                }
+                QStringList fields;
+                for (const auto& field : csvFields.toArray()) {
+                    if (!field.isString()) {
+                        emit replayOpenFailed(tr("Session CSV 字段配置类型无效"));
+                        return false;
+                    }
+                    fields.push_back(field.toString());
+                }
+                QStringList fieldIssues;
+                auto validatedFields = validatedCsvFields(fields, fieldIssues);
+                if (!validatedFields) {
+                    emit replayOpenFailed(
+                        tr("Session CSV 字段配置未通过安全校验：%1")
+                            .arg(fieldIssues.join(QLatin1Char(';'))));
+                    return false;
+                }
+
+                RestoredParserConfiguration restored;
+                restored.sourceId = sourceId;
+                restored.csvFields = std::move(*validatedFields);
+                const auto protocolObject = protocol.toObject();
+                const auto protocolName = protocolObject.value(QStringLiteral("name"));
+                const auto protocolSnapshot =
+                    protocolObject.value(QStringLiteral("snapshot"));
+                if (!protocolName.isString()) {
+                    emit replayOpenFailed(tr("Session 逐来源协议名称类型无效"));
+                    return false;
+                }
+                if (mode.toString() == QStringLiteral("csv")) {
+                    if (!protocolSnapshot.isNull() || !protocolName.toString().isEmpty()) {
+                        emit replayOpenFailed(tr("Session CSV 解析配置包含意外协议快照"));
+                        return false;
+                    }
+                    restored.visibleFields = fields;
+                } else if (mode.toString() == QStringLiteral("protocol")) {
+                    const auto expectedSnapshot =
+                        QStringLiteral("protocol/source_%1_initial.json").arg(index);
+                    if (!protocolSnapshot.isString() ||
+                        protocolSnapshot.toString() != expectedSnapshot ||
+                        protocolName.toString().isEmpty()) {
+                        emit replayOpenFailed(tr("Session 逐来源协议快照引用无效"));
+                        return false;
+                    }
+                    QStringList protocolIssues;
+                    auto loaded = readProtocolDefinition(
+                        QDir(sessionDirectory).filePath(expectedSnapshot), protocolIssues);
+                    if (!loaded ||
+                        QString::fromStdString(loaded->definition.name) !=
+                            protocolName.toString()) {
+                        emit replayOpenFailed(
+                            tr("Session 逐来源协议快照无效：%1")
+                                .arg(protocolIssues.join(QLatin1Char(';'))));
+                        return false;
+                    }
+                    restored.protocolName = loaded->definition.name;
+                    restored.protocolJson = std::move(loaded->json);
+                    restored.protocolDefinition = std::move(loaded->definition);
+                    restored.visibleFields = std::move(loaded->numericFields);
+                } else {
+                    emit replayOpenFailed(tr("Session 逐来源解析模式不受支持"));
+                    return false;
+                }
+                restoredParserConfigurations.push_back(std::move(restored));
+            }
+        }
+    }
+    for (auto& restored : restoredParserConfigurations) {
+        lab::core::ProcessingPipeline::ParserConfiguration configuration;
+        configuration.fieldNames = restored.csvFields;
+        configuration.protocolDefinition = restored.protocolDefinition;
+        const auto sourceId = utf8String(restored.sourceId);
+        if (!processing_.setSourceConfiguration(sourceId, std::move(configuration))) {
+            emit replayOpenFailed(tr("Session 逐来源解析配置无法应用"));
+            return false;
+        }
+        sourceParserConfigurations_.insert_or_assign(
+            sourceId,
+            ActiveParserConfiguration{std::move(restored.csvFields),
+                                      std::move(restored.protocolDefinition),
+                                      std::move(restored.protocolName),
+                                      std::move(restored.protocolJson)});
+        const auto& active = sourceParserConfigurations_.at(sourceId);
+        emit sourceParserConfigured(
+            restored.sourceId,
+            active.protocolDefinition ? QStringLiteral("protocol")
+                                      : QStringLiteral("csv"),
+            QString::fromStdString(active.protocolName),
+            restored.visibleFields);
+    }
+    publishParserSources();
     QVariantList restoredDerivedFields;
     const auto derivedPath = QDir(sessionDirectory).filePath(
         QStringLiteral("configuration/derived_fields.json"));
@@ -1556,7 +2097,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.18.0";
+            options.softwareVersion = "0.19.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {

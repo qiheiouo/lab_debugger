@@ -1,5 +1,6 @@
 #include "lab/core/processing_pipeline.hpp"
 
+#include <algorithm>
 #include <limits>
 
 namespace lab::core {
@@ -74,6 +75,33 @@ void ProcessingPipeline::clearProtocolDefinition() {
     sourceParsers_.clear();
 }
 
+bool ProcessingPipeline::setSourceConfiguration(
+    std::string sourceId,
+    ParserConfiguration configuration) {
+    if (sourceId.empty()) return false;
+    std::scoped_lock lock(parserMutex_, queueMutex_);
+    queue_.clear();
+    sourceParsers_.erase(sourceId);
+    sourceConfigurations_.insert_or_assign(std::move(sourceId),
+                                           std::move(configuration));
+    return true;
+}
+
+bool ProcessingPipeline::clearSourceConfiguration(std::string_view sourceId) {
+    std::scoped_lock lock(parserMutex_, queueMutex_);
+    queue_.clear();
+    sourceParsers_.erase(std::string(sourceId));
+    return sourceConfigurations_.erase(std::string(sourceId)) != 0;
+}
+
+std::optional<ProcessingPipeline::ParserConfiguration>
+ProcessingPipeline::sourceConfiguration(std::string_view sourceId) const {
+    std::scoped_lock lock(parserMutex_);
+    const auto found = sourceConfigurations_.find(std::string(sourceId));
+    if (found == sourceConfigurations_.end()) return std::nullopt;
+    return found->second;
+}
+
 void ProcessingPipeline::resetParsers() {
     std::scoped_lock lock(parserMutex_);
     sourceParsers_.clear();
@@ -86,12 +114,23 @@ void ProcessingPipeline::setFrameHandler(FrameHandler handler) {
 
 bool ProcessingPipeline::protocolEnabled() const {
     std::scoped_lock lock(parserMutex_);
-    return protocolDefinition_.has_value();
+    if (protocolDefinition_) return true;
+    return std::any_of(sourceConfigurations_.begin(),
+                       sourceConfigurations_.end(),
+                       [](const auto& item) {
+                           return item.second.protocolDefinition.has_value();
+                       });
 }
 
 std::optional<FrameParserStatistics> ProcessingPipeline::protocolStatistics() const {
     std::scoped_lock lock(parserMutex_);
-    if (!protocolDefinition_) {
+    const auto hasSourceProtocol = std::any_of(
+        sourceConfigurations_.begin(),
+        sourceConfigurations_.end(),
+        [](const auto& item) {
+            return item.second.protocolDefinition.has_value();
+        });
+    if (!protocolDefinition_ && !hasSourceProtocol) {
         return std::nullopt;
     }
     FrameParserStatistics result;
@@ -152,10 +191,18 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
         {
             std::scoped_lock lock(parserMutex_);
             qualifyFieldNames = qualifyFieldNames_;
+            const auto configured = sourceConfigurations_.find(chunk.sourceId);
+            const auto& fieldNames = configured == sourceConfigurations_.end()
+                                         ? fieldNames_
+                                         : configured->second.fieldNames;
+            const auto& protocolDefinition =
+                configured == sourceConfigurations_.end()
+                    ? protocolDefinition_
+                    : configured->second.protocolDefinition;
             auto [parsers, inserted] = sourceParsers_.try_emplace(
-                chunk.sourceId, fieldNames_, protocolDefinition_);
+                chunk.sourceId, fieldNames, protocolDefinition);
             static_cast<void>(inserted);
-            if (!protocolDefinition_) {
+            if (!protocolDefinition) {
                 sampleBatches = parsers->second.csv.consumeBatches(
                     chunk.payload,
                     chunk.sourceTimestamp,

@@ -134,10 +134,32 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::addManualMarker);
     connect(alerts_, &AlertsWidget::applyRequested,
             &session_, &lab::app::SerialSession::setAlertRules);
-    connect(protocol_, &ProtocolWidget::loadProtocolRequested,
-            &session_, &lab::app::SerialSession::loadProtocolFile);
-    connect(protocol_, &ProtocolWidget::disableProtocolRequested,
-            &session_, &lab::app::SerialSession::clearProtocol);
+    connect(protocol_, &ProtocolWidget::csvConfigurationRequested,
+            this, [this](const QString& sourceId, const QStringList& fields) {
+                if (sourceId.isEmpty()) {
+                    session_.setCsvFields(fields);
+                } else {
+                    session_.setSourceCsvFields(sourceId, fields);
+                }
+            });
+    connect(protocol_, &ProtocolWidget::protocolConfigurationRequested,
+            this, [this](const QString& sourceId, const QString& path) {
+                if (sourceId.isEmpty()) {
+                    session_.loadProtocolFile(path);
+                } else {
+                    session_.loadSourceProtocolFile(sourceId, path);
+                }
+            });
+    connect(protocol_, &ProtocolWidget::disableProtocolConfigurationRequested,
+            this, [this](const QString& sourceId) {
+                if (sourceId.isEmpty()) {
+                    session_.clearProtocol();
+                } else {
+                    session_.clearSourceProtocol(sourceId);
+                }
+            });
+    connect(protocol_, &ProtocolWidget::resetSourceConfigurationRequested,
+            &session_, &lab::app::SerialSession::resetSourceParserConfiguration);
     connect(replay_, &ReplayWidget::openSessionRequested,
             &session_, &lab::app::SerialSession::openReplaySession);
     connect(replay_, &ReplayWidget::inspectRosbagRequested,
@@ -191,6 +213,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             protocol_, &ProtocolWidget::appendEvents);
     connect(&session_, &lab::app::SerialSession::protocolStatisticsChanged,
             protocol_, &ProtocolWidget::setStatistics);
+    connect(&session_, &lab::app::SerialSession::parserSourcesChanged,
+            protocol_, &ProtocolWidget::setParserSources);
+    connect(&session_, &lab::app::SerialSession::sourceParserConfigured,
+            protocol_, &ProtocolWidget::showParserConfigured);
+    connect(&session_, &lab::app::SerialSession::sourceParserConfigurationFailed,
+            protocol_, &ProtocolWidget::showParserErrors);
     connect(&session_, &lab::app::SerialSession::replayOpened,
             replay_, &ReplayWidget::setOpened);
     connect(&session_, &lab::app::SerialSession::replayOpenFailed,

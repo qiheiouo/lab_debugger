@@ -2,12 +2,14 @@
 
 #include <QAbstractItemView>
 #include <QColor>
+#include <QComboBox>
 #include <QDateTime>
 #include <QFileDialog>
 #include <QFontDatabase>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -39,11 +41,31 @@ QString eventLabel(const QString& kind) {
 
 ProtocolWidget::ProtocolWidget(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
+    auto* targetRow = new QHBoxLayout;
+    sourceSelector_ = new QComboBox(this);
+    sourceSelector_->setObjectName(QStringLiteral("parserSourceSelector"));
+    sourceSelector_->addItem(tr("全部本地字节流（默认）"), QString{});
+    resetSourceButton_ = new QPushButton(tr("恢复默认"), this);
+    resetSourceButton_->setObjectName(QStringLiteral("resetSourceParserButton"));
+    resetSourceButton_->setEnabled(false);
+    targetRow->addWidget(new QLabel(tr("配置目标"), this));
+    targetRow->addWidget(sourceSelector_, 1);
+    targetRow->addWidget(resetSourceButton_);
+    root->addLayout(targetRow);
+
     auto* toolbar = new QHBoxLayout;
+    csvFields_ = new QLineEdit(QStringLiteral("speed,current,voltage"), this);
+    csvFields_->setObjectName(QStringLiteral("sourceCsvFields"));
+    csvFields_->setPlaceholderText(tr("例如：speed,current,voltage"));
+    auto* applyCsvButton = new QPushButton(tr("应用 CSV 字段"), this);
+    applyCsvButton->setObjectName(QStringLiteral("applySourceCsvButton"));
     auto* loadButton = new QPushButton(tr("加载 JSON 协议"), this);
     auto* disableButton = new QPushButton(tr("停用协议"), this);
     statusLabel_ = new QLabel(tr("尚未加载协议"), this);
     statusLabel_->setStyleSheet(QStringLiteral("color: #7c8799;"));
+    toolbar->addWidget(new QLabel(tr("CSV 字段"), this));
+    toolbar->addWidget(csvFields_, 1);
+    toolbar->addWidget(applyCsvButton);
     toolbar->addWidget(loadButton);
     toolbar->addWidget(disableButton);
     toolbar->addSpacing(12);
@@ -106,35 +128,114 @@ ProtocolWidget::ProtocolWidget(QWidget* parent) : QWidget(parent) {
         const auto path = QFileDialog::getOpenFileName(
             this, tr("选择协议定义"), {}, tr("JSON 协议 (*.json);;所有文件 (*.*)"));
         if (!path.isEmpty()) {
-            emit loadProtocolRequested(path);
+            emit protocolConfigurationRequested(currentSourceId(), path);
         }
     });
-    connect(disableButton, &QPushButton::clicked,
-            this, &ProtocolWidget::disableProtocolRequested);
+    const auto applyCsv = [this] {
+        const auto fields = csvFields_->text().split(
+            QLatin1Char(','), Qt::SkipEmptyParts);
+        emit csvConfigurationRequested(currentSourceId(), fields);
+    };
+    connect(applyCsvButton, &QPushButton::clicked, this, applyCsv);
+    connect(csvFields_, &QLineEdit::returnPressed, this, applyCsv);
+    connect(disableButton, &QPushButton::clicked, this, [this] {
+        emit disableProtocolConfigurationRequested(currentSourceId());
+    });
+    connect(resetSourceButton_, &QPushButton::clicked, this, [this] {
+        const auto sourceId = currentSourceId();
+        if (!sourceId.isEmpty()) emit resetSourceConfigurationRequested(sourceId);
+    });
+    connect(sourceSelector_, &QComboBox::currentIndexChanged,
+            this, [this] { showSelectedConfiguration(); });
+    configurationFields_.insert(QString{}, {QStringLiteral("speed"),
+                                            QStringLiteral("current"),
+                                            QStringLiteral("voltage")});
+    configurationSummaries_.insert(QString{}, tr("默认：CSV 解析"));
 }
 
 void ProtocolWidget::setProtocolLoaded(const QString& name, const QStringList& numericFields) {
-    statusLabel_->setText(tr("已启用：%1").arg(name));
-    statusLabel_->setStyleSheet(QStringLiteral("color: #5fd19a;"));
-    fieldsLabel_->setText(tr("曲线字段：%1").arg(
-        numericFields.isEmpty() ? tr("无数值字段")
-                                : numericFields.join(QStringLiteral(", "))));
+    showParserConfigured({}, QStringLiteral("protocol"), name, numericFields);
     packets_->setRowCount(0);
     fields_->setRowCount(0);
     rawHex_->clear();
 }
 
 void ProtocolWidget::setProtocolCleared() {
-    statusLabel_->setText(tr("协议已停用（CSV 解析仍可使用）"));
-    statusLabel_->setStyleSheet(QStringLiteral("color: #7c8799;"));
-    fieldsLabel_->setText(tr("曲线字段：—"));
+    showParserConfigured({}, QStringLiteral("csv"), {},
+                         configurationFields_.value(QString{}));
     setStatistics(0, 0, 0, 0, 0);
 }
 
 void ProtocolWidget::showLoadErrors(const QStringList& issues) {
-    statusLabel_->setText(tr("协议加载失败：%1").arg(issues.value(0)));
-    statusLabel_->setStyleSheet(QStringLiteral("color: #ff7875;"));
-    QMessageBox::warning(this, tr("协议定义无效"), issues.join(QLatin1Char('\n')));
+    showParserErrors({}, issues);
+}
+
+QString ProtocolWidget::currentSourceId() const {
+    return sourceSelector_->currentData().toString();
+}
+
+void ProtocolWidget::setParserSources(const QVariantList& sources) {
+    const auto previous = currentSourceId();
+    sourceSelector_->blockSignals(true);
+    sourceSelector_->clear();
+    sourceSelector_->addItem(tr("全部本地字节流（默认）"), QString{});
+    for (const auto& value : sources) {
+        const auto source = value.toMap();
+        const auto id = source.value(QStringLiteral("id")).toString();
+        if (id.isEmpty()) continue;
+        auto label = source.value(QStringLiteral("label"), id).toString();
+        if (source.value(QStringLiteral("overridden")).toBool()) {
+            label += source.value(QStringLiteral("mode")).toString() ==
+                             QStringLiteral("protocol")
+                         ? tr("  [独立协议]")
+                         : tr("  [独立 CSV]");
+        }
+        sourceSelector_->addItem(label, id);
+    }
+    const auto restoredIndex = sourceSelector_->findData(previous);
+    sourceSelector_->setCurrentIndex(restoredIndex < 0 ? 0 : restoredIndex);
+    sourceSelector_->blockSignals(false);
+    showSelectedConfiguration();
+}
+
+void ProtocolWidget::showParserConfigured(QString sourceId,
+                                           QString mode,
+                                           QString name,
+                                           QStringList fields) {
+    configurationFields_.insert(sourceId, fields);
+    const auto target = sourceId.isEmpty() ? tr("默认") : sourceId;
+    const auto summary = mode == QStringLiteral("protocol")
+                             ? tr("%1：协议 %2").arg(target, name)
+                             : mode == QStringLiteral("default")
+                                   ? tr("%1：继承默认解析配置").arg(target)
+                                   : tr("%1：CSV 解析").arg(target);
+    configurationSummaries_.insert(sourceId, summary);
+    if (sourceId == currentSourceId()) showSelectedConfiguration();
+}
+
+void ProtocolWidget::showParserErrors(QString sourceId,
+                                      const QStringList& issues) {
+    if (sourceId == currentSourceId()) {
+        statusLabel_->setText(tr("解析配置失败：%1").arg(issues.value(0)));
+        statusLabel_->setStyleSheet(QStringLiteral("color: #ff7875;"));
+    }
+    QMessageBox::warning(this, tr("解析配置无效"), issues.join(QLatin1Char('\n')));
+}
+
+void ProtocolWidget::showSelectedConfiguration() {
+    const auto sourceId = currentSourceId();
+    resetSourceButton_->setEnabled(!sourceId.isEmpty());
+    const auto fields = configurationFields_.value(
+        sourceId, configurationFields_.value(QString{}));
+    csvFields_->setText(fields.join(QLatin1Char(',')));
+    statusLabel_->setText(configurationSummaries_.value(
+        sourceId,
+        sourceId.isEmpty() ? tr("默认：CSV 解析")
+                           : tr("%1：继承默认解析配置").arg(sourceId)));
+    statusLabel_->setStyleSheet(QStringLiteral("color: #5fd19a;"));
+    fieldsLabel_->setText(tr("字段：%1").arg(
+        fields.isEmpty() ? tr("无数值字段")
+                         : fields.join(QStringLiteral(", "))));
 }
 
 void ProtocolWidget::appendEvents(const QVariantList& events) {

@@ -566,6 +566,72 @@ void testProcessingPipelineSeparatesSources() {
             "partial rows never combine bytes from different sources");
 }
 
+void testProcessingPipelineSourceConfigurations() {
+    lab::core::TimeSeriesStore store(100);
+    lab::core::ProcessingPipeline pipeline(store);
+    pipeline.setFieldNames({"default_value"});
+    pipeline.setQualifyFieldNames(true);
+
+    lab::core::ProcessingPipeline::ParserConfiguration serialConfiguration;
+    serialConfiguration.fieldNames = {"left", "right"};
+    require(pipeline.setSourceConfiguration("serial:COM5", serialConfiguration),
+            "source-specific CSV configuration is accepted");
+
+    lab::core::ProtocolDefinition protocol;
+    protocol.name = "byte_value";
+    protocol.header = {0xAA};
+    protocol.fixedFrameLength = 2;
+    lab::core::FieldDefinition value;
+    value.name = "value";
+    value.type = lab::core::FieldType::UInt8;
+    value.byteOffset = 1;
+    protocol.fields.push_back(value);
+    lab::core::ProcessingPipeline::ParserConfiguration networkConfiguration;
+    networkConfiguration.protocolDefinition = protocol;
+    require(pipeline.setSourceConfiguration("udp:127.0.0.1:9000",
+                                            networkConfiguration),
+            "source-specific binary protocol configuration is accepted");
+
+    const auto push = [&pipeline](std::string source,
+                                  std::vector<std::uint8_t> bytes,
+                                  std::uint64_t sequence) {
+        pipeline.push({std::move(source),
+                       static_cast<lab::core::Timestamp>(sequence),
+                       static_cast<lab::core::Timestamp>(sequence + 1),
+                       sequence,
+                       lab::core::Direction::Rx,
+                       std::move(bytes)});
+    };
+    push("serial:COM5", {'1', ',', '2', '\n'}, 1);
+    push("udp:127.0.0.1:9000", {0xAA, 42}, 2);
+    push("tcp-client:127.0.0.1:9100", {'7', '\n'}, 3);
+    pipeline.flush();
+
+    require(store.snapshot("serial:COM5.left").size() == 1 &&
+                store.snapshot("serial:COM5.right").front().value == 2.0,
+            "one source uses its independent CSV field list");
+    require(store.snapshot("udp:127.0.0.1:9000.value").front().value == 42.0,
+            "another source uses its independent binary protocol");
+    require(store.snapshot("tcp-client:127.0.0.1:9100.default_value")
+                    .front()
+                    .value == 7.0,
+            "an unconfigured source inherits the default parser");
+    require(pipeline.protocolEnabled() &&
+                pipeline.sourceConfiguration("serial:COM5").has_value() &&
+                pipeline.sourceConfiguration("udp:127.0.0.1:9000")
+                    ->protocolDefinition.has_value(),
+            "pipeline exposes stable source configuration snapshots");
+
+    require(pipeline.clearSourceConfiguration("udp:127.0.0.1:9000"),
+            "source override can be removed");
+    push("udp:127.0.0.1:9000", {'9', '\n'}, 4);
+    pipeline.flush();
+    require(store.snapshot("udp:127.0.0.1:9000.default_value")
+                    .front()
+                    .value == 9.0,
+            "removed override immediately falls back to the default parser");
+}
+
 void testRawRecorder() {
     const auto path = uniqueTempPath("lab_debugger_test") += ".ldraw";
     lab::core::RawLogRecorder recorder;
@@ -638,7 +704,12 @@ void testSessionRecorder() {
                            20.0,
                            1.0,
                            "check supply"}};
-    options.sources.push_back({"serial:COM1", "serial", "COM1", {{"baud", "115200"}}});
+    options.sources.push_back({"serial:COM1",
+                               "serial",
+                               "COM1",
+                               {{"baud", "115200"}},
+                               lab::core::SessionParserConfiguration{
+                                   {"voltage", "current"}, {}, {}}});
     require(recorder.start(directory, options), "session recorder starts");
     recorder.enqueueRaw({"serial:COM1", 100, 101, 1, lab::core::Direction::Rx, {0xAA}});
     recorder.enqueueSample({100, "serial:COM1", "voltage", 24.5, "V", 1});
@@ -668,6 +739,13 @@ void testSessionRecorder() {
             "session derived field configuration exists");
     require(std::filesystem::exists(directory / "configuration" / "alert_rules.json"),
             "session threshold alert configuration exists");
+    std::ifstream sourceConfiguration(directory / "configuration" / "source_0.json");
+    const std::string sourceConfigurationText{
+        std::istreambuf_iterator<char>(sourceConfiguration),
+        std::istreambuf_iterator<char>()};
+    require(sourceConfigurationText.find("\"parser\"") != std::string::npos &&
+                sourceConfigurationText.find("\"voltage\"") != std::string::npos,
+            "session source configuration freezes its resolved parser profile");
 
     std::ifstream metadata(directory / "metadata.json");
     const std::string metadataText{
@@ -678,6 +756,8 @@ void testSessionRecorder() {
             "session metadata contains sample count");
     require(metadataText.find("\"frames\": 1") != std::string::npos,
             "session metadata contains frame count");
+    require(metadataText.find("\"source_parser_format\": 1") != std::string::npos,
+            "metadata declares versioned source parser snapshots");
     metadata.close();
 
     std::ifstream values(directory / "values.csv");
@@ -794,6 +874,7 @@ int main() {
         testSourceManager();
         testProcessingPipeline();
         testProcessingPipelineSeparatesSources();
+        testProcessingPipelineSourceConfigurations();
         testRawRecorder();
         testTruncatedRawLogRecovery();
         testSessionRecorder();
