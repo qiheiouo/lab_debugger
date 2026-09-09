@@ -39,6 +39,12 @@ const std::vector<QColor> kColors{
     QColor("#ffa657"), QColor("#d2a8ff"), QColor("#7ee787"),
     QColor("#ff9bce")};
 
+struct VisualTimelineEvent {
+    lab::core::Timestamp timestamp{};
+    QString category;
+    QString message;
+};
+
 }  // namespace
 
 class PlotCanvas final : public QWidget {
@@ -72,6 +78,18 @@ public:
         automaticY_ = automatic;
         manualMinimum_ = minimum;
         manualMaximum_ = maximum;
+        update();
+    }
+
+    void setTimelineEvents(const QVariantList& events) {
+        events_.clear();
+        events_.reserve(static_cast<std::size_t>(events.size()));
+        for (const auto& value : events) {
+            const auto event = value.toMap();
+            events_.push_back({event.value(QStringLiteral("timestamp_ns")).toLongLong(),
+                               event.value(QStringLiteral("category")).toString(),
+                               event.value(QStringLiteral("message")).toString()});
+        }
         update();
     }
 
@@ -175,6 +193,22 @@ protected:
             painter.setPen(QPen(kColors[fieldIndex % kColors.size()], 1.6));
             painter.drawPath(path);
         }
+        for (const auto& event : events_) {
+            if (event.timestamp < start || event.timestamp > end) continue;
+            const auto ratio = static_cast<double>(event.timestamp - start) /
+                               static_cast<double>(windowNs);
+            const auto x = plotRect.left() + ratio * plotRect.width();
+            const auto color = event.category == QStringLiteral("alert")
+                                   ? QColor(QStringLiteral("#ff9f43"))
+                                   : QColor(QStringLiteral("#f7e36d"));
+            painter.setPen(QPen(color, 1.4, Qt::DashLine));
+            painter.drawLine(QPointF(x, plotRect.top()),
+                             QPointF(x, plotRect.bottom()));
+            painter.setPen(color);
+            const auto label = painter.fontMetrics().elidedText(
+                event.message, Qt::ElideRight, 180);
+            painter.drawText(QPointF(x + 4, plotRect.top() + 14), label);
+        }
         painter.restore();
 
         qreal legendX = plotRect.left();
@@ -215,6 +249,17 @@ protected:
             const auto& point = iterator == points.end() ? points.back() : *iterator;
             lines << QStringLiteral("%1 = %2").arg(field).arg(point.value, 0, 'g', 8);
         }
+        const auto tolerance = static_cast<lab::core::Timestamp>(
+            8.0 / plotRect.width() * static_cast<double>(windowNs));
+        for (const auto& marker : events_) {
+            if (std::abs(marker.timestamp - cursorTime) <= tolerance) {
+                lines << QStringLiteral("%1: %2")
+                             .arg(marker.category == QStringLiteral("alert")
+                                      ? tr("告警")
+                                      : tr("Marker"),
+                                  marker.message);
+            }
+        }
         QToolTip::showText(event->globalPosition().toPoint(), lines.join('\n'), this);
     }
 
@@ -225,6 +270,11 @@ private:
             const auto points = store_->snapshot(field.toStdString());
             if (!points.empty()) {
                 newest = std::max(newest, points.back().timestamp);
+            }
+        }
+        if (newest == 0) {
+            for (const auto& event : events_) {
+                newest = std::max(newest, event.timestamp);
             }
         }
         return newest;
@@ -238,6 +288,7 @@ private:
     double manualMinimum_{-1.0};
     double manualMaximum_{1.0};
     lab::core::Timestamp frozenEnd_{};
+    std::vector<VisualTimelineEvent> events_;
 };
 
 PlotWidget::PlotWidget(
@@ -337,6 +388,10 @@ void PlotWidget::useExternalFields(const QStringList& fields) {
         return;
     }
     rebuildVisibleFields(fields, true);
+}
+
+void PlotWidget::setTimelineEvents(const QVariantList& events) {
+    canvas_->setTimelineEvents(events);
 }
 
 QStringList PlotWidget::fieldNames() const {

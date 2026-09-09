@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.17.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.18.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -42,6 +42,7 @@ add_library(lab_core STATIC
     src/core/src/session_recorder.cpp
     src/core/src/source_manager.cpp
     src/core/src/time_series_store.cpp
+    src/core/src/threshold_alert_engine.cpp
 )
 target_include_directories(lab_core PUBLIC src/core/include)
 target_link_libraries(lab_core PUBLIC Threads::Threads)
@@ -128,6 +129,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
         add_library(lab_app_ui STATIC
             src/app/serial_session.cpp
             src/app/serial_session.hpp
+            src/ui/alerts_widget.cpp
+            src/ui/alerts_widget.hpp
             src/ui/derived_fields_widget.cpp
             src/ui/derived_fields_widget.hpp
             src/ui/main_window.cpp
@@ -307,6 +310,18 @@ if(LAB_DEBUGGER_BUILD_TESTS)
         )
         add_test(NAME lab_derived_field_tests COMMAND lab_derived_field_tests)
         set_tests_properties(lab_derived_field_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 20
+        )
+        add_executable(lab_marker_alert_tests
+            tests/test_markers_alerts.cpp
+        )
+        target_link_libraries(lab_marker_alert_tests
+            PRIVATE lab_app_ui Qt6::Core Qt6::Network
+        )
+        add_test(NAME lab_marker_alert_tests COMMAND lab_marker_alert_tests)
+        set_tests_properties(lab_marker_alert_tests PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
             TIMEOUT 20

@@ -11,6 +11,7 @@
 #include "lab/core/session_recorder.hpp"
 #include "lab/core/source_manager.hpp"
 #include "lab/core/time_series_store.hpp"
+#include "lab/core/threshold_alert_engine.hpp"
 
 #include <QByteArray>
 #include <QObject>
@@ -58,6 +59,8 @@ public slots:
     void sendBytes(const QByteArray& bytes);
     void setCsvFields(const QStringList& fields);
     bool setDerivedFields(const QVariantList& definitions);
+    bool setAlertRules(const QVariantList& definitions);
+    bool addManualMarker(const QString& message);
     void loadProtocolFile(const QString& path);
     void clearProtocol();
     bool startSession(const QString& directory);
@@ -123,6 +126,9 @@ signals:
     void csvFieldsRestored(QStringList fields);
     void derivedFieldsConfigured(bool success, QStringList messages);
     void derivedFieldsRestored(QVariantList definitions);
+    void alertRulesConfigured(bool success, QStringList messages);
+    void alertRulesRestored(QVariantList definitions);
+    void timelineEventsChanged(QVariantList events);
     void rosbagInspectionStarted(QString source, QString destination);
     void rosbagInspectionFinished(bool success,
                                   QString source,
@@ -149,6 +155,10 @@ private:
     [[nodiscard]] std::vector<lab::core::DataSample> appendDerivedSamples(
         std::span<const lab::core::DataSample> inputs,
         bool record);
+    void processAlerts(std::span<const lab::core::DataSample> samples, bool record);
+    void publishTimelineEvent(lab::core::SessionEvent event, bool record);
+    void clearTimelineEvents();
+    void leaveReplayForLiveSource();
     [[nodiscard]] bool isDeclaredRecordingSource(const std::string& key) const noexcept;
 
     lab::adapters::serial::SerialSource source_;
@@ -171,6 +181,12 @@ private:
     std::atomic_bool recordingRemoteAgent_{};
     lab::core::TimeSeriesStore timeSeries_{120'000};
     lab::core::DerivedFieldEngine derivedFields_;
+    lab::core::ThresholdAlertEngine alertRules_;
+    std::atomic<lab::core::Timestamp> latestLiveTimestamp_{};
+    std::atomic_uint64_t nextTimelineSequence_{};
+    std::atomic_bool replaying_{};
+    std::mutex timelineEventsMutex_;
+    std::deque<lab::core::SessionEvent> timelineEvents_;
     std::mutex uiQueueMutex_;
     std::deque<lab::core::DataChunk> uiQueue_;
     std::mutex protocolQueueMutex_;

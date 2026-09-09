@@ -3,6 +3,7 @@
 #include "lab/core/time_series_store.hpp"
 
 #include <QStringList>
+#include <QVariantList>
 #include <QWidget>
 
 class QCheckBox;
@@ -29,6 +30,7 @@ public:
 public slots:
     void useProtocolFields(const QStringList& fields);
     void useExternalFields(const QStringList& fields);
+    void setTimelineEvents(const QVariantList& events);
 
 signals:
     void fieldsChanged(QStringList fields);

@@ -1,6 +1,7 @@
 #include "ui/main_window.hpp"
 
 #include "ui/derived_fields_widget.hpp"
+#include "ui/alerts_widget.hpp"
 #include "ui/network_panel.hpp"
 #include "ui/remote_agent_panel.hpp"
 #include "ui/plot_widget.hpp"
@@ -16,6 +17,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QLabel>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -35,6 +37,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     toolbar->setMovable(false);
     recordAction_ = toolbar->addAction(tr("开始 Session 记录"));
     recordAction_->setCheckable(true);
+    auto* markerAction = toolbar->addAction(tr("添加 Marker"));
     toolbar->addSeparator();
     auto* architectureAction = toolbar->addAction(tr("架构状态"));
 
@@ -44,6 +47,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     terminal_ = new TerminalWidget(this);
     plot_ = new PlotWidget(&session_.timeSeries(), this);
     derivedFields_ = new DerivedFieldsWidget(this);
+    alerts_ = new AlertsWidget(this);
     protocol_ = new ProtocolWidget(this);
     replay_ = new ReplayWidget(this);
     sendPanel_ = new SendPanel(this);
@@ -52,6 +56,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs->addTab(terminal_, tr("终端"));
     tabs->addTab(plot_, tr("实时曲线"));
     tabs->addTab(derivedFields_, tr("派生变量"));
+    tabs->addTab(alerts_, tr("Marker 与告警"));
     tabs->addTab(protocol_, tr("协议解析"));
     tabs->addTab(replay_, tr("Session 回放"));
 
@@ -125,6 +130,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::setCsvFields);
     connect(derivedFields_, &DerivedFieldsWidget::applyRequested,
             &session_, &lab::app::SerialSession::setDerivedFields);
+    connect(alerts_, &AlertsWidget::addMarkerRequested,
+            &session_, &lab::app::SerialSession::addManualMarker);
+    connect(alerts_, &AlertsWidget::applyRequested,
+            &session_, &lab::app::SerialSession::setAlertRules);
     connect(protocol_, &ProtocolWidget::loadProtocolRequested,
             &session_, &lab::app::SerialSession::loadProtocolFile);
     connect(protocol_, &ProtocolWidget::disableProtocolRequested,
@@ -204,6 +213,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             derivedFields_, &DerivedFieldsWidget::showConfigurationResult);
     connect(&session_, &lab::app::SerialSession::derivedFieldsRestored,
             derivedFields_, &DerivedFieldsWidget::setDefinitions);
+    connect(&session_, &lab::app::SerialSession::alertRulesConfigured,
+            alerts_, &AlertsWidget::showConfigurationResult);
+    connect(&session_, &lab::app::SerialSession::alertRulesRestored,
+            alerts_, &AlertsWidget::setDefinitions);
+    connect(&session_, &lab::app::SerialSession::timelineEventsChanged,
+            alerts_, &AlertsWidget::setTimelineEvents);
+    connect(&session_, &lab::app::SerialSession::timelineEventsChanged,
+            plot_, &PlotWidget::setTimelineEvents);
     connect(&session_, &lab::app::SerialSession::recordingChanged,
             this, [this](bool active, const QString& message) {
                 recordAction_->setText(active ? tr("停止 Session 记录")
@@ -222,6 +239,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                     backlog > 1000 ? QStringLiteral("color: #ff6b6b;") : QString());
             });
     connect(recordAction_, &QAction::toggled, this, &MainWindow::toggleRecording);
+    connect(markerAction, &QAction::triggered, this, [this] {
+        bool accepted = false;
+        const auto message = QInputDialog::getText(
+            this,
+            tr("添加 Marker"),
+            tr("说明"),
+            QLineEdit::Normal,
+            {},
+            &accepted);
+        if (accepted && !message.trimmed().isEmpty()) {
+            session_.addManualMarker(message);
+        }
+    });
     connect(architectureAction, &QAction::triggered, this, [this] {
         QMessageBox::information(
             this,

@@ -4,6 +4,7 @@
 #include "lab/core/derived_field_engine.hpp"
 #include "lab/core/frame_stream_parser.hpp"
 #include "lab/core/raw_log_recorder.hpp"
+#include "lab/core/threshold_alert_engine.hpp"
 
 #include <condition_variable>
 #include <cstddef>
@@ -35,6 +36,7 @@ struct SessionStartOptions {
     std::vector<SessionSourceMetadata> sources;
     std::vector<std::string> csvFields;
     std::vector<DerivedFieldDefinition> derivedFields;
+    std::vector<ThresholdAlertDefinition> alertRules;
     std::string protocolName;
     std::string protocolJson;
 };

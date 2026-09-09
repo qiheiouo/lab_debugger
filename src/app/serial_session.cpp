@@ -15,8 +15,12 @@
 #include <QVariantMap>
 
 #include <algorithm>
+#include <charconv>
+#include <cmath>
 #include <filesystem>
 #include <limits>
+#include <optional>
+#include <sstream>
 #include <string_view>
 
 namespace lab::app {
@@ -27,6 +31,93 @@ constexpr std::string_view networkSourceKey = "network";
 constexpr std::string_view remoteAgentSourceKey = "remote_agent";
 constexpr qint64 maximumDerivedConfigurationBytes = 1024 * 1024;
 constexpr qsizetype maximumDerivedDefinitions = 128;
+constexpr qint64 maximumAlertConfigurationBytes = 1024 * 1024;
+constexpr qsizetype maximumAlertDefinitions = 128;
+constexpr qint64 maximumEventLogBytes = 64 * 1024 * 1024;
+constexpr qint64 maximumEventLineBytes = 64 * 1024;
+constexpr qsizetype maximumTimelineEvents = 10'000;
+
+void updateLatestTimestamp(std::atomic<lab::core::Timestamp>& target,
+                           lab::core::Timestamp value) {
+    auto previous = target.load();
+    while (value > previous &&
+           !target.compare_exchange_weak(previous, value)) {
+    }
+}
+
+QVariantMap eventToVariant(const lab::core::SessionEvent& event) {
+    QVariantMap result;
+    result.insert(QStringLiteral("timestamp_ns"), QVariant::fromValue(event.timestamp));
+    result.insert(QStringLiteral("source_id"), QString::fromStdString(event.sourceId));
+    result.insert(QStringLiteral("sequence"), QVariant::fromValue(event.sequence));
+    result.insert(QStringLiteral("severity"), QString::fromStdString(event.severity));
+    result.insert(QStringLiteral("category"), QString::fromStdString(event.category));
+    result.insert(QStringLiteral("message"), QString::fromStdString(event.message));
+    return result;
+}
+
+QVariantList derivedDefinitionsToVariant(
+    const std::vector<lab::core::DerivedFieldDefinition>& definitions) {
+    QVariantList result;
+    result.reserve(static_cast<qsizetype>(definitions.size()));
+    for (const auto& definition : definitions) {
+        QVariantMap value;
+        value.insert(QStringLiteral("name"), QString::fromStdString(definition.name));
+        value.insert(QStringLiteral("expression"),
+                     QString::fromStdString(definition.expression));
+        value.insert(QStringLiteral("unit"), QString::fromStdString(definition.unit));
+        result.push_back(value);
+    }
+    return result;
+}
+
+QVariantList alertDefinitionsToVariant(
+    const std::vector<lab::core::ThresholdAlertDefinition>& definitions) {
+    QVariantList result;
+    result.reserve(static_cast<qsizetype>(definitions.size()));
+    for (const auto& definition : definitions) {
+        QVariantMap value;
+        value.insert(QStringLiteral("name"), QString::fromStdString(definition.name));
+        value.insert(QStringLiteral("field"), QString::fromStdString(definition.field));
+        value.insert(QStringLiteral("comparison"),
+                     QString::fromStdString(lab::core::toString(definition.comparison)));
+        value.insert(QStringLiteral("threshold"), definition.threshold);
+        value.insert(QStringLiteral("hysteresis"), definition.hysteresis);
+        value.insert(QStringLiteral("message"), QString::fromStdString(definition.message));
+        result.push_back(value);
+    }
+    return result;
+}
+
+std::optional<lab::core::Timestamp> parseTimestampField(std::string_view line) {
+    constexpr std::string_view key = "\"timestamp_ns\"";
+    std::size_t position = 0;
+    while (position < line.size() &&
+           (line[position] == ' ' || line[position] == '\t')) {
+        ++position;
+    }
+    if (position >= line.size() || line[position++] != '{') return std::nullopt;
+    while (position < line.size() &&
+           (line[position] == ' ' || line[position] == '\t')) {
+        ++position;
+    }
+    if (line.substr(position, key.size()) != key) return std::nullopt;
+    position = line.find(':', position + key.size());
+    if (position == std::string_view::npos) return std::nullopt;
+    ++position;
+    while (position < line.size() &&
+           (line[position] == ' ' || line[position] == '\t')) {
+        ++position;
+    }
+    lab::core::Timestamp result{};
+    const auto parsed = std::from_chars(line.data() + position,
+                                        line.data() + line.size(),
+                                        result);
+    if (parsed.ec != std::errc{} || parsed.ptr == line.data() + position) {
+        return std::nullopt;
+    }
+    return result;
+}
 
 bool sameSettings(const lab::adapters::serial::SerialSettings& left,
                   const lab::adapters::serial::SerialSettings& right) {
@@ -130,6 +221,7 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 std::scoped_lock routeLock(routingMutex_);
                 const auto declared = isDeclaredRecordingSource(key);
                 timeSeries_.append(sample);
+                updateLatestTimestamp(latestLiveTimestamp_, sample.timestamp);
                 if (declared) {
                     recorder_.enqueueSample(sample);
                 }
@@ -145,6 +237,7 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 const auto recording = recorder_.isRecording();
                 const auto declared = isDeclaredRecordingSource(key);
                 if (!recording || declared) {
+                    processAlerts(samples, declared);
                     derived = appendDerivedSamples(samples, declared);
                 }
             }
@@ -321,10 +414,12 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
     processing_.setQualifyFieldNames(true);
     processing_.setSampleHandler([this](const lab::core::DataSample& sample) {
         recorder_.enqueueSample(sample);
+        updateLatestTimestamp(latestLiveTimestamp_, sample.timestamp);
         discoverLiveField(sample.field);
     });
     processing_.setSampleBatchHandler(
         [this](std::span<const lab::core::DataSample> samples) {
+            processAlerts(samples, true);
             for (const auto& output : appendDerivedSamples(samples, true)) {
                 discoverLiveField(output.field);
             }
@@ -414,7 +509,78 @@ std::vector<lab::core::DataSample> SerialSession::appendDerivedSamples(
         timeSeries_.append(sample);
         if (record) recorder_.enqueueSample(sample);
     }
+    processAlerts(output, record);
     return output;
+}
+
+void SerialSession::processAlerts(
+    std::span<const lab::core::DataSample> samples,
+    bool record) {
+    if (samples.empty() || replaying_.load()) return;
+    for (const auto& trigger : alertRules_.consumeBatch(samples)) {
+        std::ostringstream detail;
+        detail.precision(17);
+        detail << '[' << trigger.name << "] " << trigger.field << '='
+               << trigger.value << ' '
+               << (trigger.comparison == lab::core::ThresholdComparison::Above
+                       ? '>'
+                       : '<')
+               << ' ' << trigger.threshold;
+        if (!trigger.message.empty()) detail << " — " << trigger.message;
+        publishTimelineEvent({trigger.timestamp,
+                              trigger.sourceId,
+                              "warning",
+                              "alert",
+                              detail.str(),
+                              trigger.sequence},
+                             record);
+    }
+}
+
+void SerialSession::publishTimelineEvent(
+    lab::core::SessionEvent event,
+    bool record) {
+    event.sequence = nextTimelineSequence_.fetch_add(1);
+    QVariantList snapshot;
+    {
+        std::scoped_lock lock(timelineEventsMutex_);
+        if (timelineEvents_.size() ==
+            static_cast<std::size_t>(maximumTimelineEvents)) {
+            timelineEvents_.pop_front();
+        }
+        timelineEvents_.push_back(event);
+        snapshot.reserve(static_cast<qsizetype>(timelineEvents_.size()));
+        for (const auto& item : timelineEvents_) {
+            snapshot.push_back(eventToVariant(item));
+        }
+    }
+    if (record) recorder_.enqueueEvent(std::move(event));
+    emit timelineEventsChanged(snapshot);
+}
+
+void SerialSession::clearTimelineEvents() {
+    {
+        std::scoped_lock lock(timelineEventsMutex_);
+        timelineEvents_.clear();
+    }
+    emit timelineEventsChanged({});
+}
+
+void SerialSession::leaveReplayForLiveSource() {
+    replay_.close();
+    if (!replaying_.exchange(false)) return;
+    replayRawOnly_.store(false);
+    replayStructuredRosbag_.store(false);
+    {
+        std::scoped_lock routeLock(routingMutex_);
+        rosbagReplayTopics_.clear();
+        replayFieldNames_.clear();
+        replayMappingWarnings_.clear();
+    }
+    alertRules_.resetValues();
+    latestLiveTimestamp_.store(0);
+    nextTimelineSequence_.store(0);
+    clearTimelineEvents();
 }
 
 void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings) {
@@ -423,7 +589,7 @@ void SerialSession::connectSerial(lab::adapters::serial::SerialSettings settings
         emit sourceError(tr("当前 Session 未声明此串口配置，停止记录后才能更改"));
         return;
     }
-    replay_.close();
+    leaveReplayForLiveSource();
     sendTarget_ = SendTarget::Serial;
     sourceManager_.close(std::string(serialSourceKey));
     lastSettings_ = std::move(settings);
@@ -444,7 +610,7 @@ void SerialSession::reconnectSerial() {
         emit sourceError(tr("当前 Session 未声明串口源，停止记录后才能加入"));
         return;
     }
-    replay_.close();
+    leaveReplayForLiveSource();
     sendTarget_ = SendTarget::Serial;
     sourceManager_.close(std::string(serialSourceKey));
     source_.setSettings(lastSettings_);
@@ -457,7 +623,7 @@ void SerialSession::connectNetwork(lab::adapters::network::NetworkSettings setti
         emit sourceError(tr("当前 Session 未声明此网络配置，停止记录后才能更改"));
         return;
     }
-    replay_.close();
+    leaveReplayForLiveSource();
     sendTarget_ = SendTarget::Network;
     sourceManager_.close(std::string(networkSourceKey));
     lastNetworkSettings_ = std::move(settings);
@@ -479,7 +645,7 @@ void SerialSession::reconnectNetwork() {
         emit sourceError(tr("当前 Session 未声明网络源，停止记录后才能加入"));
         return;
     }
-    replay_.close();
+    leaveReplayForLiveSource();
     sendTarget_ = SendTarget::Network;
     sourceManager_.close(std::string(networkSourceKey));
     network_.setSettings(lastNetworkSettings_);
@@ -494,7 +660,7 @@ void SerialSession::connectRemoteAgent(
         emit sourceError(tr("当前 Session 未声明此 Remote Agent 配置，停止记录后才能更改"));
         return;
     }
-    replay_.close();
+    leaveReplayForLiveSource();
     sourceManager_.close(std::string(remoteAgentSourceKey));
     lastRemoteAgentSettings_ = std::move(settings);
     remoteAgentConfigured_ = true;
@@ -515,7 +681,7 @@ void SerialSession::reconnectRemoteAgent() {
         emit sourceError(tr("当前 Session 未声明 Remote Agent，停止记录后才能加入"));
         return;
     }
-    replay_.close();
+    leaveReplayForLiveSource();
     sourceManager_.close(std::string(remoteAgentSourceKey));
     remoteAgent_.setSettings(lastRemoteAgentSettings_);
     sourceManager_.open(std::string(remoteAgentSourceKey));
@@ -570,6 +736,8 @@ void SerialSession::setCsvFields(const QStringList& fields) {
     activeCsvFields_ = names;
     processing_.setFieldNames(std::move(names));
     derivedFields_.resetValues();
+    alertRules_.resetValues();
+    latestLiveTimestamp_.store(0);
     timeSeries_.clear();
     {
         std::scoped_lock lock(liveFieldsMutex_);
@@ -629,6 +797,88 @@ bool SerialSession::setDerivedFields(const QVariantList& definitions) {
     return true;
 }
 
+bool SerialSession::setAlertRules(const QVariantList& definitions) {
+    if (recorder_.isRecording()) {
+        emit alertRulesConfigured(
+            false,
+            {tr("Session 记录期间告警规则已冻结，请停止记录后再修改")});
+        return false;
+    }
+
+    std::vector<lab::core::ThresholdAlertDefinition> requested;
+    requested.reserve(static_cast<std::size_t>(definitions.size()));
+    for (const auto& value : definitions) {
+        const auto definition = value.toMap();
+        const auto name = definition.value(QStringLiteral("name")).toString().trimmed();
+        const auto field = definition.value(QStringLiteral("field")).toString().trimmed();
+        const auto comparison =
+            definition.value(QStringLiteral("comparison")).toString().trimmed();
+        const auto message =
+            definition.value(QStringLiteral("message")).toString().trimmed();
+        const auto toString = [](const QString& text) {
+            const auto bytes = text.toUtf8();
+            return std::string(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+        };
+        requested.push_back({toString(name),
+                             toString(field),
+                             comparison == QStringLiteral("below")
+                                 ? lab::core::ThresholdComparison::Below
+                                 : comparison == QStringLiteral("above")
+                                       ? lab::core::ThresholdComparison::Above
+                                       : static_cast<lab::core::ThresholdComparison>(-1),
+                             definition.value(QStringLiteral("threshold")).toDouble(),
+                             definition.value(QStringLiteral("hysteresis")).toDouble(),
+                             toString(message)});
+    }
+
+    const auto result = alertRules_.setDefinitions(std::move(requested));
+    if (!result.success()) {
+        QStringList messages;
+        for (const auto& issue : result.issues) {
+            messages.push_back(
+                tr("第 %1 行：%2 [%3]")
+                    .arg(static_cast<qulonglong>(issue.definitionIndex + 1))
+                    .arg(QString::fromStdString(issue.message),
+                         QString::fromStdString(issue.code)));
+        }
+        emit alertRulesConfigured(false, messages);
+        return false;
+    }
+    const auto count = alertRules_.definitions().size();
+    emit alertRulesConfigured(
+        true,
+        {count == 0
+             ? tr("阈值告警已全部关闭")
+             : tr("已应用 %1 个阈值告警；告警采用边沿触发与回差复位")
+                   .arg(static_cast<qulonglong>(count))});
+    return true;
+}
+
+bool SerialSession::addManualMarker(const QString& message) {
+    if (replaying_.load()) {
+        emit sourceError(tr("回放 Session 是只读的，不能添加实时 Marker"));
+        return false;
+    }
+    const auto cleaned = message.trimmed();
+    const auto bytes = cleaned.toUtf8();
+    if (bytes.isEmpty() || bytes.size() > 1024 || cleaned.contains(QLatin1Char('\n')) ||
+        cleaned.contains(QLatin1Char('\r'))) {
+        emit sourceError(tr("Marker 说明不能为空、换行或超过 1024 字节"));
+        return false;
+    }
+    auto timestamp = latestLiveTimestamp_.load();
+    if (timestamp == 0) timestamp = lab::core::nowTimestampNs();
+    publishTimelineEvent({timestamp,
+                          "lab_debugger",
+                          "info",
+                          "marker",
+                          std::string(bytes.constData(),
+                                      static_cast<std::size_t>(bytes.size())),
+                          0},
+                         recorder_.isRecording());
+    return true;
+}
+
 void SerialSession::loadProtocolFile(const QString& path) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
@@ -661,6 +911,8 @@ void SerialSession::loadProtocolFile(const QString& path) {
     const auto protocolName = QString::fromStdString(result.definition->name);
     processing_.setProtocolDefinition(*result.definition);
     derivedFields_.resetValues();
+    alertRules_.resetValues();
+    latestLiveTimestamp_.store(0);
     timeSeries_.clear();
     {
         std::scoped_lock lock(liveFieldsMutex_);
@@ -686,6 +938,8 @@ void SerialSession::loadProtocolFile(const QString& path) {
 void SerialSession::clearProtocol() {
     processing_.clearProtocolDefinition();
     derivedFields_.resetValues();
+    alertRules_.resetValues();
+    latestLiveTimestamp_.store(0);
     {
         std::scoped_lock lock(protocolQueueMutex_);
         protocolQueue_.clear();
@@ -714,7 +968,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.17.0";
+    options.softwareVersion = "0.18.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -722,6 +976,7 @@ bool SerialSession::startSession(const QString& directory) {
     options.protocolJson = activeProtocolJson_;
     options.csvFields = activeCsvFields_;
     options.derivedFields = derivedFields_.definitions();
+    options.alertRules = alertRules_.definitions();
     if (serialOpen) {
         options.sources.push_back({
             source_.sourceId(),
@@ -766,6 +1021,10 @@ bool SerialSession::startSession(const QString& directory) {
         std::scoped_lock routeLock(routingMutex_);
         processing_.flush();
         derivedFields_.resetValues();
+        alertRules_.resetValues();
+        latestLiveTimestamp_.store(0);
+        nextTimelineSequence_.store(0);
+        clearTimelineEvents();
         recordingSerial_.store(serialOpen);
         recordingNetwork_.store(networkOpen);
         recordingRemoteAgent_.store(remoteAgentOpen);
@@ -832,8 +1091,15 @@ bool SerialSession::openReplaySession(const QString& directory) {
         return false;
     }
 
+    const auto previousDerivedFields =
+        derivedDefinitionsToVariant(derivedFields_.definitions());
+    const auto previousAlertRules =
+        alertDefinitionsToVariant(alertRules_.definitions());
+
     sourceManager_.closeAll();
     replay_.close();
+    replaying_.store(false);
+    clearTimelineEvents();
     {
         std::scoped_lock routeLock(routingMutex_);
         processing_.flush();
@@ -991,11 +1257,151 @@ bool SerialSession::openReplaySession(const QString& directory) {
             restoredDerivedFields.push_back(restored);
         }
     }
+    QVariantList restoredAlertRules;
+    const auto alertPath = QDir(sessionDirectory).filePath(
+        QStringLiteral("configuration/alert_rules.json"));
+    if (QFileInfo::exists(alertPath)) {
+        QFile alertFile(alertPath);
+        if (!alertFile.open(QIODevice::ReadOnly)) {
+            emit replayOpenFailed(tr("无法读取 Session 告警规则配置"));
+            return false;
+        }
+        const auto declaredSize = alertFile.size();
+        if (declaredSize < 0 || declaredSize > maximumAlertConfigurationBytes) {
+            emit replayOpenFailed(tr("Session 告警规则配置超过 1 MiB 安全限制"));
+            return false;
+        }
+        const auto contents = alertFile.readAll();
+        if (alertFile.error() != QFileDevice::NoError ||
+            contents.size() != declaredSize) {
+            emit replayOpenFailed(tr("Session 告警规则配置读取不完整"));
+            return false;
+        }
+        QJsonParseError parseError;
+        const auto document = QJsonDocument::fromJson(contents, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+            emit replayOpenFailed(tr("Session 告警规则配置已损坏"));
+            return false;
+        }
+        const auto object = document.object();
+        const auto formatVersion = object.value(QStringLiteral("format_version"));
+        const auto rulesValue = object.value(QStringLiteral("rules"));
+        if (!formatVersion.isDouble() || formatVersion.toDouble() != 1.0 ||
+            !rulesValue.isArray()) {
+            emit replayOpenFailed(tr("Session 告警规则格式版本不受支持或规则缺失"));
+            return false;
+        }
+        const auto rules = rulesValue.toArray();
+        if (rules.size() > maximumAlertDefinitions) {
+            emit replayOpenFailed(tr("Session 告警规则超过 128 项安全限制"));
+            return false;
+        }
+        for (const auto& value : rules) {
+            if (!value.isObject()) {
+                emit replayOpenFailed(tr("Session 告警规则包含无效条目"));
+                return false;
+            }
+            const auto rule = value.toObject();
+            const auto name = rule.value(QStringLiteral("name"));
+            const auto field = rule.value(QStringLiteral("field"));
+            const auto comparison = rule.value(QStringLiteral("comparison"));
+            const auto threshold = rule.value(QStringLiteral("threshold"));
+            const auto hysteresis = rule.value(QStringLiteral("hysteresis"));
+            const auto message = rule.value(QStringLiteral("message"));
+            if (!name.isString() || !field.isString() || !comparison.isString() ||
+                !threshold.isDouble() || !hysteresis.isDouble() ||
+                !message.isString() || !std::isfinite(threshold.toDouble()) ||
+                !std::isfinite(hysteresis.toDouble())) {
+                emit replayOpenFailed(tr("Session 告警规则条目类型无效"));
+                return false;
+            }
+            QVariantMap restored;
+            restored.insert(QStringLiteral("name"), name.toString());
+            restored.insert(QStringLiteral("field"), field.toString());
+            restored.insert(QStringLiteral("comparison"), comparison.toString());
+            restored.insert(QStringLiteral("threshold"), threshold.toDouble());
+            restored.insert(QStringLiteral("hysteresis"), hysteresis.toDouble());
+            restored.insert(QStringLiteral("message"), message.toString());
+            restoredAlertRules.push_back(restored);
+        }
+    }
+
+    std::deque<lab::core::SessionEvent> restoredEvents;
+    const auto eventPath = QDir(sessionDirectory).filePath(QStringLiteral("events.jsonl"));
+    if (QFileInfo::exists(eventPath)) {
+        QFile eventFile(eventPath);
+        if (!eventFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            emit replayOpenFailed(tr("无法读取 Session Marker/告警记录"));
+            return false;
+        }
+        if (eventFile.size() < 0 || eventFile.size() > maximumEventLogBytes) {
+            emit replayOpenFailed(tr("Session 事件记录超过 64 MiB 安全限制"));
+            return false;
+        }
+        while (!eventFile.atEnd()) {
+            const auto line = eventFile.readLine(maximumEventLineBytes + 2);
+            if (line.size() > maximumEventLineBytes ||
+                (!line.endsWith('\n') && !eventFile.atEnd())) {
+                emit replayOpenFailed(tr("Session 事件记录包含超长行"));
+                return false;
+            }
+            if (line.trimmed().isEmpty()) continue;
+            QJsonParseError parseError;
+            const auto document = QJsonDocument::fromJson(line, &parseError);
+            if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+                emit replayOpenFailed(tr("Session 事件记录包含损坏的 JSON 行"));
+                return false;
+            }
+            const auto object = document.object();
+            const auto source = object.value(QStringLiteral("source_id"));
+            const auto severity = object.value(QStringLiteral("severity"));
+            const auto category = object.value(QStringLiteral("category"));
+            const auto message = object.value(QStringLiteral("message"));
+            if (!source.isString() || !severity.isString() || !category.isString() ||
+                !message.isString()) {
+                emit replayOpenFailed(tr("Session 事件记录字段类型无效"));
+                return false;
+            }
+            if (category.toString() != QStringLiteral("marker") &&
+                category.toString() != QStringLiteral("alert")) {
+                continue;
+            }
+            const std::string_view bytes(line.constData(),
+                                         static_cast<std::size_t>(line.size()));
+            const auto timestamp = parseTimestampField(bytes);
+            if (!timestamp || *timestamp <= 0 ||
+                source.toString().toUtf8().size() > 1024 ||
+                severity.toString().toUtf8().size() > 64 ||
+                message.toString().toUtf8().size() > 4096) {
+                emit replayOpenFailed(tr("Session Marker/告警记录未通过安全校验"));
+                return false;
+            }
+            if (restoredEvents.size() ==
+                static_cast<std::size_t>(maximumTimelineEvents)) {
+                emit replayOpenFailed(tr("Session Marker/告警超过 10000 项安全限制"));
+                return false;
+            }
+            restoredEvents.push_back({*timestamp,
+                                      source.toString().toStdString(),
+                                      severity.toString().toStdString(),
+                                      category.toString().toStdString(),
+                                      message.toString().toStdString(),
+                                      static_cast<std::uint64_t>(restoredEvents.size())});
+        }
+        if (eventFile.error() != QFileDevice::NoError) {
+            emit replayOpenFailed(tr("Session 事件记录读取失败"));
+            return false;
+        }
+    }
+    if (!setAlertRules(restoredAlertRules)) {
+        emit replayOpenFailed(tr("Session 告警规则无法通过安全校验"));
+        return false;
+    }
     if (!setDerivedFields(restoredDerivedFields)) {
+        static_cast<void>(setAlertRules(previousAlertRules));
         emit replayOpenFailed(tr("Session 派生变量配置无法通过安全校验"));
         return false;
     }
-    emit derivedFieldsRestored(restoredDerivedFields);
     replay_.setPath(std::filesystem::path(rawPath.toStdWString()));
     if (!replay_.open()) {
         replayRawOnly_.store(false);
@@ -1004,9 +1410,26 @@ bool SerialSession::openReplaySession(const QString& directory) {
             std::scoped_lock routeLock(routingMutex_);
             rosbagReplayTopics_.clear();
         }
+        static_cast<void>(setAlertRules(previousAlertRules));
+        static_cast<void>(setDerivedFields(previousDerivedFields));
         emit replayOpenFailed(tr("无法打开回放文件；详细原因已写入状态栏和日志"));
         return false;
     }
+    QVariantList restoredEventValues;
+    {
+        std::scoped_lock lock(timelineEventsMutex_);
+        timelineEvents_ = std::move(restoredEvents);
+        restoredEventValues.reserve(static_cast<qsizetype>(timelineEvents_.size()));
+        for (const auto& event : timelineEvents_) {
+            restoredEventValues.push_back(eventToVariant(event));
+        }
+    }
+    nextTimelineSequence_.store(
+        static_cast<std::uint64_t>(restoredEventValues.size()));
+    replaying_.store(true);
+    emit derivedFieldsRestored(restoredDerivedFields);
+    emit alertRulesRestored(restoredAlertRules);
+    emit timelineEventsChanged(restoredEventValues);
     const auto replayStatus = replay_.status();
     emit replayOpened(sessionDirectory,
                       replayStatus.recoveredTruncatedTail,
@@ -1133,7 +1556,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.17.0";
+            options.softwareVersion = "0.18.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {
@@ -1214,6 +1637,7 @@ void SerialSession::cancelRosbag2Import() {
 
 void SerialSession::closeReplay() {
     replay_.close();
+    replaying_.store(false);
     replayRawOnly_.store(false);
     replayStructuredRosbag_.store(false);
     std::scoped_lock routeLock(routingMutex_);
@@ -1221,6 +1645,8 @@ void SerialSession::closeReplay() {
     replayFieldNames_.clear();
     replayMappingWarnings_.clear();
     derivedFields_.resetValues();
+    alertRules_.resetValues();
+    clearTimelineEvents();
 }
 
 void SerialSession::pauseReplay() {
@@ -1243,6 +1669,7 @@ void SerialSession::seekReplay(double fraction) {
         processing_.flush();
         processing_.resetParsers();
         derivedFields_.resetValues();
+        alertRules_.resetValues();
         replay_.seekFraction(fraction);
         timeSeries_.clear();
         {

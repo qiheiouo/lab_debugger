@@ -1,5 +1,6 @@
 #include "ui/main_window.hpp"
 #include "ui/derived_fields_widget.hpp"
+#include "ui/alerts_widget.hpp"
 #include "ui/plot_widget.hpp"
 #include "ui/send_panel.hpp"
 
@@ -54,6 +55,22 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        lab::ui::AlertsWidget alerts;
+        QVariantMap rule;
+        rule.insert(QStringLiteral("name"), QStringLiteral("overheat"));
+        rule.insert(QStringLiteral("field"), QStringLiteral("temperature"));
+        rule.insert(QStringLiteral("comparison"), QStringLiteral("above"));
+        rule.insert(QStringLiteral("threshold"), 80.0);
+        rule.insert(QStringLiteral("hysteresis"), 5.0);
+        rule.insert(QStringLiteral("message"), QStringLiteral("check cooling"));
+        alerts.setDefinitions({rule});
+        if (alerts.definitions().size() != 1 ||
+            alerts.definitions().front().toMap()
+                    .value(QStringLiteral("hysteresis")).toDouble() != 5.0) {
+            std::cerr << "GUI smoke test failed: alert rule table does not preserve input\n";
+            return 1;
+        }
+
         lab::ui::MainWindow window;
         window.show();
         if (!window.isVisible()) {
@@ -63,6 +80,11 @@ int main(int argc, char* argv[]) {
         if (!window.findChild<lab::ui::DerivedFieldsWidget*>(
                 QStringLiteral("derivedFieldsWidget"))) {
             std::cerr << "GUI smoke test failed: derived fields tab is missing\n";
+            return 1;
+        }
+        if (!window.findChild<lab::ui::AlertsWidget*>(
+                QStringLiteral("alertsWidget"))) {
+            std::cerr << "GUI smoke test failed: marker and alerts tab is missing\n";
             return 1;
         }
         QTimer::singleShot(150, &application, [] {

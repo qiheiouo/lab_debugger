@@ -392,6 +392,7 @@ bool SessionRecorder::writeMetadata(const std::string& status, Timestamp endTime
              << "\", \"snapshot\": "
              << (options.protocolJson.empty() ? "null" : "\"protocol/initial.json\"") << "},\n"
              << "  \"derived_fields\": \"configuration/derived_fields.json\",\n"
+             << "  \"alert_rules\": \"configuration/alert_rules.json\",\n"
              << "  \"sources\": [";
     for (std::size_t index = 0; index < options.sources.size(); ++index) {
         const auto& source = options.sources[index];
@@ -465,6 +466,34 @@ bool SessionRecorder::writeConfigurationFiles() {
         if (!derived) {
             std::scoped_lock lock(mutex_);
             error_ = "cannot finish derived field configuration";
+            return false;
+        }
+    }
+
+    {
+        std::ofstream alerts(
+            root / "configuration" / "alert_rules.json", std::ios::trunc);
+        if (!alerts) {
+            std::scoped_lock lock(mutex_);
+            error_ = "cannot write threshold alert configuration";
+            return false;
+        }
+        alerts << "{\n  \"format_version\": 1,\n  \"rules\": [";
+        for (std::size_t index = 0; index < options.alertRules.size(); ++index) {
+            const auto& rule = options.alertRules[index];
+            alerts << (index == 0 ? "\n" : ",\n")
+                   << "    {\"name\": \"" << jsonEscape(rule.name)
+                   << "\", \"field\": \"" << jsonEscape(rule.field)
+                   << "\", \"comparison\": \"" << toString(rule.comparison)
+                   << "\", \"threshold\": " << std::setprecision(17)
+                   << rule.threshold << ", \"hysteresis\": " << rule.hysteresis
+                   << ", \"message\": \"" << jsonEscape(rule.message) << "\"}";
+        }
+        if (!options.alertRules.empty()) alerts << '\n';
+        alerts << "  ]\n}\n";
+        if (!alerts) {
+            std::scoped_lock lock(mutex_);
+            error_ = "cannot finish threshold alert configuration";
             return false;
         }
     }

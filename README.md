@@ -6,6 +6,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - `IDataSource` 与正式 `SourceManager`，串口、网络和 ROS Agent 可同时连接、统计和记录；
 - CSV/二进制流解析状态按 `sourceId` 隔离，同名字段以“来源.字段”形成独立曲线；
 - 安全派生变量：受限表达式、依赖排序、跨来源显式引用，以及低通、高通、移动平均、微分、积分和角度展开；
+- 可记录、可回放的手动 Marker 与阈值告警，支持回差复位并在曲线上标注；
 - 独立线程的串口 I/O、文本解析和原始数据写盘；
 - Windows 串口枚举、连接、收发、ASCII/HEX、定时发送；
 - RX/TX 时间戳终端、暂停显示、保存、复制；
@@ -28,7 +29,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 后台 rosbag2 SQLite 预检/导入、`metadata.yaml` 无损保存与交叉校验、可搜索 Topic 筛选、分卷时间归并、原始 CDR 安全回放和常见 ROS 消息离线曲线；
 - 可测试的 `MockDataSource` 与核心测试。
 
-详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
+详细设计见 [架构文档](docs/ARCHITECTURE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，Marker 与告警见 [时间线说明](docs/MARKERS_ALERTS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
 
 ## Windows 构建
 
@@ -61,6 +62,7 @@ cmake --install build --config Release --prefix dist/LabDebugger
 5. 收到数据后，显示列表会出现类似 `serial:COM5.speed` 的来源限定字段；勾选需要观察的字段。曲线以 30 FPS 刷新，采集和解析仍按原始速率进行。
 6. 如需计算功率，在“派生变量”页填写名称 `power`、表达式 `` `serial:COM5.voltage` * `serial:COM5.current` `` 和单位 `W`，应用后即可像普通字段一样勾选、统计和记录。
 7. 如需平滑功率，再添加 `smooth_power`，表达式填写 `lowpass(power, 0.2)`；滤波结果同样进入曲线、Session 与确定性回放。
+8. 在“Marker 与告警”页可添加“开始加载”等人工标记；也可为完整字段名设置高于/低于阈值和回差。Marker 与告警会显示在曲线并随 Session 回放恢复。
 
 若 STM32 输出二进制帧，打开“协议解析”页并加载
 `examples/protocols/stm32_status.json`。有效帧、丢弃字节和校验错误会分别统计，

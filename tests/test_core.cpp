@@ -9,6 +9,7 @@
 #include "lab/core/session_recorder.hpp"
 #include "lab/core/source_manager.hpp"
 #include "lab/core/time_series_store.hpp"
+#include "lab/core/threshold_alert_engine.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -96,6 +97,54 @@ void testTimeSeriesAndStatistics() {
     const auto interpolated = analysisStore.interpolate("signal", 5);
     require(interpolated && std::abs(*interpolated - 50.0) < 1e-12,
             "linear interpolation");
+}
+
+void testThresholdAlertEngine() {
+    lab::core::ThresholdAlertEngine engine;
+    const auto configured = engine.setDefinitions({
+        {"overheat", "temperature", lab::core::ThresholdComparison::Above,
+         80.0, 5.0, "检查散热"},
+        {"undervoltage", "voltage", lab::core::ThresholdComparison::Below,
+         20.0, 1.0, "检查供电"}});
+    require(configured.success(), "valid threshold rules configure");
+
+    require(engine.consume({1, "source", "temperature", 80.0, "C", 0}).empty(),
+            "threshold equality does not trigger above rule");
+    auto triggers = engine.consume({2, "source", "temperature", 81.0, "C", 1});
+    require(triggers.size() == 1 && triggers.front().name == "overheat" &&
+                triggers.front().value == 81.0,
+            "above threshold produces one trigger");
+    require(engine.consume({3, "source", "temperature", 90.0, "C", 2}).empty(),
+            "latched threshold does not spam");
+    require(engine.consume({4, "source", "temperature", 76.0, "C", 3}).empty(),
+            "hysteresis band keeps alert latched");
+    require(engine.consume({5, "source", "temperature", 75.0, "C", 4}).empty(),
+            "recovery does not emit an entrance alert");
+    triggers = engine.consume({6, "source", "temperature", 81.0, "C", 5});
+    require(triggers.size() == 1 && triggers.front().sequence == 1,
+            "rule can trigger again after hysteresis recovery");
+
+    const std::vector<lab::core::DataSample> batch{
+        lab::core::DataSample{7, "source", "voltage", 19.0, "V", 6},
+        lab::core::DataSample{7, "source", "unrelated", 1000.0, {}, 7}};
+    triggers = engine.consumeBatch(batch);
+    require(triggers.size() == 1 && triggers.front().name == "undervoltage",
+            "batch evaluates matching exact fields");
+    engine.resetValues();
+    require(engine.consume({8, "source", "voltage", 19.0, "V", 8}).size() == 1,
+            "reset clears latch state");
+
+    const auto previous = engine.definitions();
+    const auto invalid = engine.setDefinitions({
+        {"bad", "temperature", lab::core::ThresholdComparison::Above,
+         std::numeric_limits<double>::quiet_NaN(), -1.0, {}}});
+    require(!invalid.success() && engine.definitions() == previous,
+            "invalid replacement preserves active configuration");
+
+    std::vector<lab::core::ThresholdAlertDefinition> tooMany(129);
+    const auto oversized = engine.setDefinitions(std::move(tooMany));
+    require(!oversized.success() && engine.definitions() == previous,
+            "rule count limit is transactional");
 }
 
 void testDerivedFieldEngine() {
@@ -583,6 +632,12 @@ void testSessionRecorder() {
     options.protocolJson = "{\"name\":\"demo\"}";
     options.csvFields = {"speed", "voltage"};
     options.derivedFields = {{"power", "voltage * current", "W"}};
+    options.alertRules = {{"low_voltage",
+                           "voltage",
+                           lab::core::ThresholdComparison::Below,
+                           20.0,
+                           1.0,
+                           "check supply"}};
     options.sources.push_back({"serial:COM1", "serial", "COM1", {{"baud", "115200"}}});
     require(recorder.start(directory, options), "session recorder starts");
     recorder.enqueueRaw({"serial:COM1", 100, 101, 1, lab::core::Direction::Rx, {0xAA}});
@@ -611,6 +666,8 @@ void testSessionRecorder() {
             "session CSV field configuration exists");
     require(std::filesystem::exists(directory / "configuration" / "derived_fields.json"),
             "session derived field configuration exists");
+    require(std::filesystem::exists(directory / "configuration" / "alert_rules.json"),
+            "session threshold alert configuration exists");
 
     std::ifstream metadata(directory / "metadata.json");
     const std::string metadataText{
@@ -729,6 +786,7 @@ int main() {
     try {
         testRingBufferWrapAround();
         testTimeSeriesAndStatistics();
+        testThresholdAlertEngine();
         testDerivedFieldEngine();
         testStatefulDerivedFieldTransforms();
         testCsvSplitChunksAndInvalidLine();

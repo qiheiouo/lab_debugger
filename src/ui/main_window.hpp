@@ -10,6 +10,7 @@ class QLabel;
 namespace lab::ui {
 
 class PlotWidget;
+class AlertsWidget;
 class DerivedFieldsWidget;
 class NetworkPanel;
 class RemoteAgentPanel;
@@ -38,6 +39,7 @@ private:
     RemoteAgentPanel* remoteAgentPanel_{};
     TerminalWidget* terminal_{};
     PlotWidget* plot_{};
+    AlertsWidget* alerts_{};
     DerivedFieldsWidget* derivedFields_{};
     ProtocolWidget* protocol_{};
     ReplayWidget* replay_{};
