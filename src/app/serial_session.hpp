@@ -6,6 +6,7 @@
 #include "lab/adapters/rosbag2/rosbag2_importer.hpp"
 #include "lab/core/data_chunk.hpp"
 #include "lab/core/derived_field_engine.hpp"
+#include "lab/core/health_alert_engine.hpp"
 #include "lab/core/processing_pipeline.hpp"
 #include "lab/core/replay_source.hpp"
 #include "lab/core/session_recorder.hpp"
@@ -72,6 +73,7 @@ public slots:
     bool resetSourceParserConfiguration(const QString& sourceId);
     bool setDerivedFields(const QVariantList& definitions);
     bool setAlertRules(const QVariantList& definitions);
+    bool setHealthAlertRules(const QVariantList& definitions);
     bool addManualMarker(const QString& message);
     void loadProtocolFile(const QString& path);
     void clearProtocol();
@@ -148,6 +150,8 @@ signals:
     void derivedFieldsRestored(QVariantList definitions);
     void alertRulesConfigured(bool success, QStringList messages);
     void alertRulesRestored(QVariantList definitions);
+    void healthAlertRulesConfigured(bool success, QStringList messages);
+    void healthAlertRulesRestored(QVariantList definitions);
     void timelineEventsChanged(QVariantList events);
     void rosbagInspectionStarted(QString source, QString destination);
     void rosbagInspectionFinished(bool success,
@@ -181,6 +185,10 @@ private:
         std::span<const lab::core::DataSample> inputs,
         bool record);
     void processAlerts(std::span<const lab::core::DataSample> samples, bool record);
+    void processHealthAlerts();
+    void armHealthAlertTargets();
+    [[nodiscard]] bool shouldRecordHealthAlert(
+        const std::string& sourceId) const noexcept;
     void publishTimelineEvent(lab::core::SessionEvent event, bool record);
     void clearTimelineEvents();
     void leaveReplayForLiveSource();
@@ -217,6 +225,8 @@ private:
     lab::core::TimeSeriesStore timeSeries_{120'000};
     lab::core::DerivedFieldEngine derivedFields_;
     lab::core::ThresholdAlertEngine alertRules_;
+    lab::core::HealthAlertEngine healthAlertRules_;
+    std::set<std::pair<std::string, std::string>> remoteSubscriptions_;
     std::atomic<lab::core::Timestamp> latestLiveTimestamp_{};
     std::atomic_uint64_t nextTimelineSequence_{};
     std::atomic_bool replaying_{};

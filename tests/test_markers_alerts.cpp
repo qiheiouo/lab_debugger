@@ -78,6 +78,7 @@ QVariantList overheatRules(quint16 port) {
     rule.insert(QStringLiteral("comparison"), QStringLiteral("above"));
     rule.insert(QStringLiteral("threshold"), 80.0);
     rule.insert(QStringLiteral("hysteresis"), 5.0);
+    rule.insert(QStringLiteral("duration_ms"), 0);
     rule.insert(QStringLiteral("message"), QStringLiteral("检查散热"));
     QVariantMap derivedRule;
     derivedRule.insert(QStringLiteral("name"), QStringLiteral("派生温度过高"));
@@ -85,6 +86,7 @@ QVariantList overheatRules(quint16 port) {
     derivedRule.insert(QStringLiteral("comparison"), QStringLiteral("above"));
     derivedRule.insert(QStringLiteral("threshold"), 80.0);
     derivedRule.insert(QStringLiteral("hysteresis"), 5.0);
+    derivedRule.insert(QStringLiteral("duration_ms"), 0);
     derivedRule.insert(QStringLiteral("message"), QStringLiteral("检查派生指标"));
     return {rule, derivedRule};
 }
@@ -179,9 +181,15 @@ int main(int argc, char *argv[]) {
         const auto alertDocument =
             QJsonDocument::fromJson(QByteArray::fromStdString(alertConfiguration));
         require(alertDocument.isObject() &&
-                    alertDocument.object().value(QStringLiteral("format_version")).toInt() == 1 &&
+                    alertDocument.object().value(QStringLiteral("format_version")).toInt() == 2 &&
+                    alertDocument.object()
+                            .value(QStringLiteral("rules"))
+                            .toArray()
+                            .at(0)
+                            .toObject()
+                            .contains(QStringLiteral("duration_ms")) &&
                     alertDocument.object().value(QStringLiteral("rules")).toArray().size() == 2,
-                "threshold rule snapshot is stored with an explicit format version");
+                "threshold rule snapshot stores the sustained duration in format version 2");
 
         timeline.clear();
         require(session.openReplaySession(fromPath(root)), "marker session reopens");
@@ -209,6 +217,27 @@ int main(int argc, char *argv[]) {
         session.disconnectNetwork();
 
         const auto alertPath = root / "configuration" / "alert_rules.json";
+        auto legacyDocument = alertDocument;
+        auto legacyObject = legacyDocument.object();
+        legacyObject.insert(QStringLiteral("format_version"), 1);
+        auto legacyRules = legacyObject.value(QStringLiteral("rules")).toArray();
+        for (auto index = 0; index < legacyRules.size(); ++index) {
+            auto legacyRule = legacyRules[index].toObject();
+            legacyRule.remove(QStringLiteral("duration_ms"));
+            legacyRules[index] = legacyRule;
+        }
+        legacyObject.insert(QStringLiteral("rules"), legacyRules);
+        legacyDocument.setObject(legacyObject);
+        writeText(alertPath,
+                  legacyDocument.toJson(QJsonDocument::Compact).toStdString());
+        replayFailure.clear();
+        require(session.openReplaySession(fromPath(root)) && replayFailure.isEmpty() &&
+                    restoredRules.front()
+                            .toMap()
+                            .value(QStringLiteral("duration_ms"))
+                            .toLongLong() == 0,
+                "legacy version 1 threshold rules reopen with zero duration");
+        session.closeReplay();
         writeText(alertPath, "{\"format_version\":999,\"rules\":[]}");
         replayFailure.clear();
         require(!session.openReplaySession(fromPath(root)) && !replayFailure.isEmpty(),

@@ -1,5 +1,6 @@
 #include "lab/core/csv_stream_parser.hpp"
 #include "lab/core/derived_field_engine.hpp"
+#include "lab/core/health_alert_engine.hpp"
 #include "lab/core/mock_data_source.hpp"
 #include "lab/core/processing_pipeline.hpp"
 #include "lab/core/raw_log_reader.hpp"
@@ -145,6 +146,83 @@ void testThresholdAlertEngine() {
     const auto oversized = engine.setDefinitions(std::move(tooMany));
     require(!oversized.success() && engine.definitions() == previous,
             "rule count limit is transactional");
+
+    lab::core::ThresholdAlertEngine delayed;
+    require(delayed.setDefinitions({
+                {"sustained", "temperature",
+                 lab::core::ThresholdComparison::Above,
+                 80.0, 2.0, "持续高温", 100}}).success(),
+            "sustained threshold rule configures");
+    require(delayed.consume({1'000, "source", "temperature", 81.0, "C", 0}).empty() &&
+                delayed.consume({1'050, "source", "temperature", 82.0, "C", 1}).empty(),
+            "sustained rule waits for its full duration");
+    require(delayed.consume({1'025, "source", "temperature", 79.0, "C", 2}).empty(),
+            "out-of-order samples do not corrupt sustained state");
+    auto sustained =
+        delayed.consume({1'100, "source", "temperature", 83.0, "C", 3});
+    require(sustained.size() == 1 && sustained.front().durationNs == 100,
+            "continuous breach triggers exactly at configured duration");
+    delayed.resetValues();
+    require(delayed.consume({2'000, "source", "temperature", 81.0, "C", 4}).empty() &&
+                delayed.consume({2'050, "source", "temperature", 80.0, "C", 5}).empty() &&
+                delayed.consume({2'100, "source", "temperature", 81.0, "C", 6}).empty(),
+            "returning to the threshold before timeout restarts duration");
+}
+
+void testHealthAlertEngine() {
+    constexpr lab::core::Timestamp window = 100'000'000;
+    lab::core::HealthAlertEngine engine;
+    const auto configured = engine.setDefinitions({
+        {"source_timeout", "udp:127.0.0.1:9000",
+         lab::core::HealthAlertKind::Inactivity, 1, window, "检查数据链路"},
+        {"crc_burst", "udp:127.0.0.1:9000",
+         lab::core::HealthAlertKind::ErrorRate, 2, window, "检查线路质量"}});
+    require(configured.success(), "valid health alert rules configure");
+
+    const std::string source = "udp:127.0.0.1:9000";
+    engine.arm(source, 1'000'000'000);
+    require(engine.evaluate(1'099'999'999).empty(),
+            "inactivity rule waits for its complete timeout");
+    auto triggers = engine.evaluate(1'100'000'000);
+    require(triggers.size() == 1 &&
+                triggers.front().kind == lab::core::HealthAlertKind::Inactivity,
+            "armed inactive source triggers once");
+    require(engine.evaluate(1'200'000'000).empty(),
+            "inactivity alert remains latched without repeated events");
+    engine.observeActivity(source, 1'201'000'000);
+    require(engine.evaluate(1'300'999'999).empty(),
+            "new activity recovers an inactivity alert");
+    triggers = engine.evaluate(1'301'000'000);
+    require(triggers.size() == 1 && triggers.front().sequence == 1,
+            "a later inactivity period can alert again");
+
+    engine.observeError(source, 2'000'000'000);
+    require(engine.evaluate(2'000'000'000).empty(),
+            "one error remains below a two-error window threshold");
+    engine.observeError(source, 2'050'000'000);
+    triggers = engine.evaluate(2'050'000'000);
+    require(triggers.size() == 1 &&
+                triggers.front().kind == lab::core::HealthAlertKind::ErrorRate &&
+                triggers.front().observedErrors == 2,
+            "error burst triggers at the configured count");
+    require(engine.evaluate(2'075'000'000).empty(),
+            "error-rate alert does not spam while latched");
+    require(engine.evaluate(2'151'000'000).empty(),
+            "expired error window recovers without an event");
+    engine.observeError(source, 2'220'000'000);
+    engine.observeError(source, 2'210'000'000);
+    triggers = engine.evaluate(2'220'000'000);
+    require(triggers.size() == 1 && triggers.front().sequence == 3,
+            "out-of-order error observations remain a deterministic window");
+
+    engine.disarm(source);
+    require(engine.evaluate(3'000'000'000).empty(),
+            "disarmed source no longer produces timeout alerts");
+    const auto previous = engine.definitions();
+    const auto invalid = engine.setDefinitions({
+        {"bad", {}, lab::core::HealthAlertKind::Inactivity, 0, 0, {}}});
+    require(!invalid.success() && engine.definitions() == previous,
+            "invalid health configuration preserves active definitions");
 }
 
 void testDerivedFieldEngine() {
@@ -715,7 +793,14 @@ void testSessionRecorder() {
                            lab::core::ThresholdComparison::Below,
                            20.0,
                            1.0,
-                           "check supply"}};
+                           "check supply",
+                           250'000'000}};
+    options.healthAlertRules = {{"serial_silence",
+                                 "serial:COM1",
+                                 lab::core::HealthAlertKind::Inactivity,
+                                 1,
+                                 1'000'000'000,
+                                 "check cable"}};
     options.sources.push_back({"serial:COM1",
                                "serial",
                                "COM1",
@@ -751,6 +836,9 @@ void testSessionRecorder() {
             "session derived field configuration exists");
     require(std::filesystem::exists(directory / "configuration" / "alert_rules.json"),
             "session threshold alert configuration exists");
+    require(std::filesystem::exists(
+                directory / "configuration" / "health_alert_rules.json"),
+            "session health alert configuration exists");
     std::ifstream sourceConfiguration(directory / "configuration" / "source_0.json");
     const std::string sourceConfigurationText{
         std::istreambuf_iterator<char>(sourceConfiguration),
@@ -770,6 +858,8 @@ void testSessionRecorder() {
             "session metadata contains frame count");
     require(metadataText.find("\"source_parser_format\": 1") != std::string::npos,
             "metadata declares versioned source parser snapshots");
+    require(metadataText.find("\"health_alert_rules\"") != std::string::npos,
+            "metadata declares the health alert snapshot");
     metadata.close();
 
     std::ifstream values(directory / "values.csv");
@@ -785,6 +875,28 @@ void testSessionRecorder() {
     require(derivedText.find("\"expression\": \"voltage * current\"") !=
                 std::string::npos,
             "session preserves safe derived expressions for deterministic replay");
+
+    std::ifstream alertConfiguration(
+        directory / "configuration" / "alert_rules.json");
+    const std::string alertConfigurationText{
+        std::istreambuf_iterator<char>(alertConfiguration),
+        std::istreambuf_iterator<char>()};
+    require(alertConfigurationText.find("\"format_version\": 2") !=
+                std::string::npos &&
+                alertConfigurationText.find("\"duration_ms\": 250") !=
+                    std::string::npos,
+            "session preserves sustained threshold alert duration");
+
+    std::ifstream healthConfiguration(
+        directory / "configuration" / "health_alert_rules.json");
+    const std::string healthConfigurationText{
+        std::istreambuf_iterator<char>(healthConfiguration),
+        std::istreambuf_iterator<char>()};
+    require(healthConfigurationText.find("\"kind\": \"inactivity\"") !=
+                std::string::npos &&
+                healthConfigurationText.find("\"window_ms\": 1000") !=
+                    std::string::npos,
+            "session preserves exact-source health alert rules");
 
     lab::core::SessionRecorder overwriteGuard;
     require(!overwriteGuard.start(directory, options),
@@ -879,6 +991,7 @@ int main() {
         testRingBufferWrapAround();
         testTimeSeriesAndStatistics();
         testThresholdAlertEngine();
+        testHealthAlertEngine();
         testDerivedFieldEngine();
         testStatefulDerivedFieldTransforms();
         testCsvSplitChunksAndInvalidLine();

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -14,6 +15,7 @@ constexpr std::size_t maximumDefinitions = 128;
 constexpr std::size_t maximumNameLength = 256;
 constexpr std::size_t maximumFieldLength = 1024;
 constexpr std::size_t maximumMessageLength = 4096;
+constexpr Timestamp maximumDurationNs = 86'400'000'000'000LL;
 
 bool containsControlCharacter(std::string_view value) {
     return std::any_of(value.begin(), value.end(), [](char character) {
@@ -43,6 +45,8 @@ struct ThresholdAlertEngine::Impl {
     struct Rule {
         ThresholdAlertDefinition definition;
         bool active{};
+        std::optional<Timestamp> breachedSince;
+        Timestamp lastTimestamp{};
     };
 
     mutable std::mutex mutex;
@@ -98,7 +102,13 @@ ThresholdAlertEngine::setDefinitions(std::vector<ThresholdAlertDefinition> defin
             result.issues.push_back(
                 {index, "invalid_message", "message is too long or contains control characters"});
         }
-        rules.push_back({std::move(definition), false});
+        if (definition.durationNs < 0 ||
+            definition.durationNs > maximumDurationNs) {
+            result.issues.push_back(
+                {index, "invalid_duration",
+                 "duration must be between zero and 24 hours"});
+        }
+        rules.push_back({std::move(definition), false, std::nullopt, 0});
     }
     if (!result.success()) return result;
 
@@ -116,8 +126,11 @@ void ThresholdAlertEngine::clear() {
 
 void ThresholdAlertEngine::resetValues() {
     std::scoped_lock lock(impl_->mutex);
-    for (auto &rule : impl_->rules)
+    for (auto &rule : impl_->rules) {
         rule.active = false;
+        rule.breachedSince.reset();
+        rule.lastTimestamp = 0;
+    }
     impl_->nextSequence = 0;
 }
 
@@ -143,16 +156,39 @@ ThresholdAlertEngine::consumeBatch(std::span<const DataSample> samples) {
         if (!std::isfinite(sample.value)) continue;
         for (auto &rule : impl_->rules) {
             if (sample.field != rule.definition.field) continue;
-            if (rule.active) {
-                if (recovered(rule.definition, sample.value)) rule.active = false;
+            if (rule.lastTimestamp != 0 && sample.timestamp < rule.lastTimestamp) {
                 continue;
             }
-            if (!breached(rule.definition, sample.value)) continue;
+            rule.lastTimestamp = sample.timestamp;
+            if (rule.active) {
+                if (recovered(rule.definition, sample.value)) {
+                    rule.active = false;
+                    rule.breachedSince.reset();
+                }
+                continue;
+            }
+            if (!breached(rule.definition, sample.value)) {
+                rule.breachedSince.reset();
+                continue;
+            }
+            if (rule.definition.durationNs > 0) {
+                if (sample.timestamp <= 0) continue;
+                if (!rule.breachedSince) {
+                    rule.breachedSince = sample.timestamp;
+                    continue;
+                }
+                if (sample.timestamp < *rule.breachedSince ||
+                    sample.timestamp - *rule.breachedSince <
+                        rule.definition.durationNs) {
+                    continue;
+                }
+            }
             rule.active = true;
+            rule.breachedSince.reset();
             result.push_back({sample.timestamp, sample.sourceId, rule.definition.name,
                               rule.definition.field, rule.definition.comparison,
                               rule.definition.threshold, sample.value, rule.definition.message,
-                              impl_->nextSequence++});
+                              impl_->nextSequence++, rule.definition.durationNs});
         }
     }
     return result;

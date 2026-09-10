@@ -393,6 +393,7 @@ bool SessionRecorder::writeMetadata(const std::string& status, Timestamp endTime
              << (options.protocolJson.empty() ? "null" : "\"protocol/initial.json\"") << "},\n"
              << "  \"derived_fields\": \"configuration/derived_fields.json\",\n"
              << "  \"alert_rules\": \"configuration/alert_rules.json\",\n"
+             << "  \"health_alert_rules\": \"configuration/health_alert_rules.json\",\n"
              << "  \"source_parser_format\": 1,\n"
              << "  \"sources\": [";
     for (std::size_t index = 0; index < options.sources.size(); ++index) {
@@ -479,7 +480,7 @@ bool SessionRecorder::writeConfigurationFiles() {
             error_ = "cannot write threshold alert configuration";
             return false;
         }
-        alerts << "{\n  \"format_version\": 1,\n  \"rules\": [";
+        alerts << "{\n  \"format_version\": 2,\n  \"rules\": [";
         for (std::size_t index = 0; index < options.alertRules.size(); ++index) {
             const auto& rule = options.alertRules[index];
             alerts << (index == 0 ? "\n" : ",\n")
@@ -488,6 +489,7 @@ bool SessionRecorder::writeConfigurationFiles() {
                    << "\", \"comparison\": \"" << toString(rule.comparison)
                    << "\", \"threshold\": " << std::setprecision(17)
                    << rule.threshold << ", \"hysteresis\": " << rule.hysteresis
+                   << ", \"duration_ms\": " << rule.durationNs / 1'000'000
                    << ", \"message\": \"" << jsonEscape(rule.message) << "\"}";
         }
         if (!options.alertRules.empty()) alerts << '\n';
@@ -495,6 +497,34 @@ bool SessionRecorder::writeConfigurationFiles() {
         if (!alerts) {
             std::scoped_lock lock(mutex_);
             error_ = "cannot finish threshold alert configuration";
+            return false;
+        }
+    }
+
+    {
+        std::ofstream health(
+            root / "configuration" / "health_alert_rules.json", std::ios::trunc);
+        if (!health) {
+            std::scoped_lock lock(mutex_);
+            error_ = "cannot write health alert configuration";
+            return false;
+        }
+        health << "{\n  \"format_version\": 1,\n  \"rules\": [";
+        for (std::size_t index = 0; index < options.healthAlertRules.size(); ++index) {
+            const auto& rule = options.healthAlertRules[index];
+            health << (index == 0 ? "\n" : ",\n")
+                   << "    {\"name\": \"" << jsonEscape(rule.name)
+                   << "\", \"source_id\": \"" << jsonEscape(rule.sourceId)
+                   << "\", \"kind\": \"" << toString(rule.kind)
+                   << "\", \"error_count\": " << rule.errorCount
+                   << ", \"window_ms\": " << rule.windowNs / 1'000'000
+                   << ", \"message\": \"" << jsonEscape(rule.message) << "\"}";
+        }
+        if (!options.healthAlertRules.empty()) health << '\n';
+        health << "  ]\n}\n";
+        if (!health) {
+            std::scoped_lock lock(mutex_);
+            error_ = "cannot finish health alert configuration";
             return false;
         }
     }

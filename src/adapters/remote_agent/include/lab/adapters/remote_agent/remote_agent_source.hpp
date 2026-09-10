@@ -20,7 +20,7 @@ struct RemoteAgentSettings {
     std::string host{"127.0.0.1"};
     std::uint16_t port{9750};
     std::string clientName{"Lab Debugger"};
-    std::string clientVersion{"0.20.0"};
+    std::string clientVersion{"0.21.0"};
     bool autoReconnect{};
 };
 
@@ -63,6 +63,7 @@ public:
     [[nodiscard]] HandshakeState handshakeState() const noexcept;
     [[nodiscard]] std::optional<lab::core::ClockSyncEstimate>
     clockSyncEstimate() const;
+    [[nodiscard]] std::string topicSourceId(const std::string& topic) const;
 
 private:
     void handleHello(const lab::core::agent::Hello& hello);

@@ -19,6 +19,7 @@ struct ThresholdAlertDefinition {
     double threshold{};
     double hysteresis{};
     std::string message;
+    Timestamp durationNs{};
 
     bool operator==(const ThresholdAlertDefinition &) const = default;
 };
@@ -47,6 +48,7 @@ struct ThresholdAlertTrigger {
     double value{};
     std::string message;
     std::uint64_t sequence{};
+    Timestamp durationNs{};
 };
 
 class ThresholdAlertEngine {

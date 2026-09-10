@@ -2,6 +2,8 @@
 
 Lab Debugger 0.20 支持在一个桌面进程中同时使用多个串口和多个 TCP/UDP 端点。本地串口与网络实例合计最多 16 个，并可再连接一个 Remote ROS Agent。每个实例保留独立的连接状态、收发序号、CSV 半行、二进制半帧、解析配置、曲线和 Session 身份。
 
+0.21 起，“Marker 与告警”页还可以按完整 `sourceId` 分别监测各来源的协议/I/O 错误频率和无数据超时。ROS2 Topic 使用 `ros-agent:<agent-id>:<topic>`，例如 `ros-agent:robot-a:/imu`；只有该 Topic 的样本会复位其超时，其他 Topic 或本地设备不会相互代替。
+
 ## 添加和管理实例
 
 ### 多串口

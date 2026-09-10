@@ -747,6 +747,10 @@ RemoteAgentSource::clockSyncEstimate() const {
     return clockSyncEstimate_;
 }
 
+std::string RemoteAgentSource::topicSourceId(const std::string& topic) const {
+    return agentSourceId(topic);
+}
+
 void RemoteAgentSource::handleHello(const lab::core::agent::Hello& hello) {
     {
         std::scoped_lock lock(agentIdentityMutex_);

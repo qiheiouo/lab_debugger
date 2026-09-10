@@ -143,12 +143,33 @@ int main(int argc, char* argv[]) {
         rule.insert(QStringLiteral("comparison"), QStringLiteral("above"));
         rule.insert(QStringLiteral("threshold"), 80.0);
         rule.insert(QStringLiteral("hysteresis"), 5.0);
+        rule.insert(QStringLiteral("duration_ms"), 250);
         rule.insert(QStringLiteral("message"), QStringLiteral("check cooling"));
         alerts.setDefinitions({rule});
         if (alerts.definitions().size() != 1 ||
             alerts.definitions().front().toMap()
-                    .value(QStringLiteral("hysteresis")).toDouble() != 5.0) {
+                    .value(QStringLiteral("hysteresis")).toDouble() != 5.0 ||
+            alerts.definitions().front().toMap()
+                    .value(QStringLiteral("duration_ms")).toInt() != 250) {
             std::cerr << "GUI smoke test failed: alert rule table does not preserve input\n";
+            return 1;
+        }
+        QVariantMap healthRule;
+        healthRule.insert(QStringLiteral("name"), QStringLiteral("udp_silent"));
+        healthRule.insert(QStringLiteral("source_id"),
+                          QStringLiteral("udp:127.0.0.1:9000"));
+        healthRule.insert(QStringLiteral("kind"), QStringLiteral("inactivity"));
+        healthRule.insert(QStringLiteral("error_count"), 1);
+        healthRule.insert(QStringLiteral("window_ms"), 1500);
+        healthRule.insert(QStringLiteral("message"), QStringLiteral("check link"));
+        alerts.setHealthDefinitions({healthRule});
+        if (alerts.healthDefinitions().size() != 1 ||
+            alerts.healthDefinitions().front().toMap()
+                    .value(QStringLiteral("source_id")).toString() !=
+                QStringLiteral("udp:127.0.0.1:9000") ||
+            alerts.healthDefinitions().front().toMap()
+                    .value(QStringLiteral("window_ms")).toInt() != 1500) {
+            std::cerr << "GUI smoke test failed: health alert table does not preserve input\n";
             return 1;
         }
 

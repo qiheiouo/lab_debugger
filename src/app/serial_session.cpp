@@ -41,6 +41,9 @@ constexpr qsizetype maximumCsvFields = 256;
 constexpr qsizetype maximumCsvFieldBytes = 1024;
 constexpr qint64 maximumAlertConfigurationBytes = 1024 * 1024;
 constexpr qsizetype maximumAlertDefinitions = 128;
+constexpr qint64 maximumHealthAlertConfigurationBytes = 1024 * 1024;
+constexpr qsizetype maximumHealthAlertDefinitions = 128;
+constexpr qint64 maximumAlertWindowMs = 86'400'000;
 constexpr qint64 maximumEventLogBytes = 64 * 1024 * 1024;
 constexpr qint64 maximumEventLineBytes = 64 * 1024;
 constexpr qsizetype maximumTimelineEvents = 10'000;
@@ -191,7 +194,29 @@ QVariantList alertDefinitionsToVariant(
                      QString::fromStdString(lab::core::toString(definition.comparison)));
         value.insert(QStringLiteral("threshold"), definition.threshold);
         value.insert(QStringLiteral("hysteresis"), definition.hysteresis);
+        value.insert(QStringLiteral("duration_ms"), definition.durationNs / 1'000'000);
         value.insert(QStringLiteral("message"), QString::fromStdString(definition.message));
+        result.push_back(value);
+    }
+    return result;
+}
+
+QVariantList healthAlertDefinitionsToVariant(
+    const std::vector<lab::core::HealthAlertDefinition>& definitions) {
+    QVariantList result;
+    result.reserve(static_cast<qsizetype>(definitions.size()));
+    for (const auto& definition : definitions) {
+        QVariantMap value;
+        value.insert(QStringLiteral("name"), QString::fromStdString(definition.name));
+        value.insert(QStringLiteral("source_id"),
+                     QString::fromStdString(definition.sourceId));
+        value.insert(QStringLiteral("kind"),
+                     QString::fromStdString(lab::core::toString(definition.kind)));
+        value.insert(QStringLiteral("error_count"),
+                     QVariant::fromValue<qulonglong>(definition.errorCount));
+        value.insert(QStringLiteral("window_ms"), definition.windowNs / 1'000'000);
+        value.insert(QStringLiteral("message"),
+                     QString::fromStdString(definition.message));
         result.push_back(value);
     }
     return result;
@@ -263,6 +288,10 @@ bool isNetworkSourceKey(std::string_view key) {
 SerialSession::SerialSession(QObject* parent) : QObject(parent) {
     sourceManager_.setCallbacks({
         [this](const std::string& key, const lab::core::DataChunk& chunk) {
+            if (chunk.direction == lab::core::Direction::Rx) {
+                healthAlertRules_.observeActivity(
+                    chunk.sourceId, chunk.receiveTimestamp);
+            }
             std::scoped_lock routeLock(routingMutex_);
             const auto recording = recorder_.isRecording();
             const auto declared = isDeclaredRecordingSource(key);
@@ -280,6 +309,9 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
         [this](const std::string& key,
                const std::string& sourceId,
                lab::core::SourceState state) {
+            if (state == lab::core::SourceState::Open) {
+                healthAlertRules_.arm(sourceId, lab::core::nowTimestampNs());
+            }
             const auto label = isSerialSourceKey(key)
                                    ? "Serial"
                                    : isNetworkSourceKey(key) ? "Network" : "Remote Agent";
@@ -296,6 +328,14 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 this,
                 [this, key, sourceId, state] {
                     if (key == remoteAgentSourceKey) {
+                        if (state == lab::core::SourceState::Open) {
+                            const auto now = lab::core::nowTimestampNs();
+                            for (const auto& [topic, type] : remoteSubscriptions_) {
+                                static_cast<void>(type);
+                                healthAlertRules_.arm(
+                                    remoteAgent_.topicSourceId(topic), now);
+                            }
+                        }
                         emit remoteAgentStateChanged(static_cast<int>(state));
                         return;
                     }
@@ -320,6 +360,9 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
         [this](const std::string& key,
                const std::string& sourceId,
                const std::string& message) {
+            healthAlertRules_.observeError(
+                sourceId.empty() ? key : sourceId,
+                lab::core::nowTimestampNs());
             if (isDeclaredRecordingSource(key)) {
                 recorder_.enqueueEvent({
                     lab::core::nowTimestampNs(),
@@ -363,6 +406,8 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
         [this](const std::string& key,
                std::span<const lab::core::DataSample> samples) {
             if (key != remoteAgentSourceKey || samples.empty()) return;
+            healthAlertRules_.observeActivity(
+                samples.front().sourceId, lab::core::nowTimestampNs());
             std::vector<lab::core::DataSample> derived;
             {
                 std::scoped_lock routeLock(routingMutex_);
@@ -409,7 +454,12 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 },
                 Qt::QueuedConnection);
         },
-        {},
+        [this](const lab::core::agent::SampleBatch& batch) {
+            const auto now = lab::core::nowTimestampNs();
+            healthAlertRules_.observeActivity(remoteAgent_.sourceId(), now);
+            healthAlertRules_.observeActivity(
+                remoteAgent_.topicSourceId(batch.topic), now);
+        },
         {},
         [this](const lab::core::ClockSyncEstimate& estimate) {
             if (isDeclaredRecordingSource(std::string(remoteAgentSourceKey))) {
@@ -561,6 +611,8 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
             protocolQueue_.push_back(event);
         }
         if (event.kind != lab::core::FrameEventKind::FrameDecoded) {
+            healthAlertRules_.observeError(
+                event.sourceId, lab::core::nowTimestampNs());
             recorder_.enqueueEvent({event.sourceTimestamp,
                                     event.sourceId,
                                     "warning",
@@ -658,7 +710,61 @@ void SerialSession::processAlerts(
                        ? '>'
                        : '<')
                << ' ' << trigger.threshold;
+        if (trigger.durationNs > 0) {
+            detail << " sustained_for_ms=" << trigger.durationNs / 1'000'000;
+        }
         if (!trigger.message.empty()) detail << " — " << trigger.message;
+        publishTimelineEvent({trigger.timestamp,
+                              trigger.sourceId,
+                              "warning",
+                              "alert",
+                              detail.str(),
+                              trigger.sequence},
+                             record);
+    }
+}
+
+bool SerialSession::shouldRecordHealthAlert(
+    const std::string& sourceId) const noexcept {
+    if (std::string_view(sourceId).starts_with("ros-agent:")) {
+        return isDeclaredRecordingSource(std::string(remoteAgentSourceKey));
+    }
+    return isDeclaredRecordingSource(sourceId);
+}
+
+void SerialSession::armHealthAlertTargets() {
+    const auto now = lab::core::nowTimestampNs();
+    for (const auto& [sourceId, source] : serialSources_) {
+        if (source->isOpen()) healthAlertRules_.arm(sourceId, now);
+    }
+    for (const auto& [sourceId, source] : networkSources_) {
+        if (source->isOpen()) healthAlertRules_.arm(sourceId, now);
+    }
+    if (remoteAgent_.isOpen()) {
+        healthAlertRules_.arm(remoteAgent_.sourceId(), now);
+        for (const auto& [topic, type] : remoteSubscriptions_) {
+            static_cast<void>(type);
+            healthAlertRules_.arm(remoteAgent_.topicSourceId(topic), now);
+        }
+    }
+}
+
+void SerialSession::processHealthAlerts() {
+    if (replaying_.load()) return;
+    for (const auto& trigger :
+         healthAlertRules_.evaluate(lab::core::nowTimestampNs())) {
+        std::ostringstream detail;
+        detail << '[' << trigger.name << "] " << trigger.sourceId;
+        if (trigger.kind == lab::core::HealthAlertKind::ErrorRate) {
+            detail << " errors=" << trigger.observedErrors
+                   << " threshold=" << trigger.configuredErrors
+                   << " window_ms=" << trigger.windowNs / 1'000'000;
+        } else {
+            detail << " no_data_for_ms=" << trigger.windowNs / 1'000'000;
+        }
+        if (!trigger.message.empty()) detail << " — " << trigger.message;
+        const auto record = recorder_.isRecording() &&
+                            shouldRecordHealthAlert(trigger.sourceId);
         publishTimelineEvent({trigger.timestamp,
                               trigger.sourceId,
                               "warning",
@@ -710,6 +816,8 @@ void SerialSession::leaveReplayForLiveSource() {
         replayMappingWarnings_.clear();
     }
     alertRules_.resetValues();
+    healthAlertRules_.resetValues();
+    armHealthAlertTargets();
     latestLiveTimestamp_.store(0);
     nextTimelineSequence_.store(0);
     clearTimelineEvents();
@@ -981,6 +1089,7 @@ bool SerialSession::removeLocalSource(const QString& sourceId) {
     localSourceStates_.erase(key);
     processing_.clearSourceConfiguration(key);
     sourceParserConfigurations_.erase(key);
+    healthAlertRules_.disarm(key);
     if (selectedSerialSource_ == key) {
         selectedSerialSource_ = serialSources_.empty()
                                     ? std::string{}
@@ -1020,6 +1129,14 @@ void SerialSession::connectRemoteAgent(
         return;
     }
     leaveReplayForLiveSource();
+    if (remoteAgentConfigured_ &&
+        (settings.host != lastRemoteAgentSettings_.host ||
+         settings.port != lastRemoteAgentSettings_.port)) {
+        for (const auto& [topic, type] : remoteSubscriptions_) {
+            static_cast<void>(type);
+            healthAlertRules_.disarm(remoteAgent_.topicSourceId(topic));
+        }
+    }
     sourceManager_.close(std::string(remoteAgentSourceKey));
     lastRemoteAgentSettings_ = std::move(settings);
     remoteAgentConfigured_ = true;
@@ -1102,13 +1219,28 @@ void SerialSession::subscribeRemoteTopic(
     lab::core::agent::SubscriptionRequest request) {
     if (!remoteAgent_.subscribe(request)) {
         emit sourceError(tr("Remote Agent 订阅请求未被发送"));
+        return;
     }
+    remoteSubscriptions_.insert({request.topic, request.type});
+    healthAlertRules_.arm(
+        remoteAgent_.topicSourceId(request.topic),
+        lab::core::nowTimestampNs());
 }
 
 void SerialSession::unsubscribeRemoteTopic(
     lab::core::agent::SubscriptionRequest request) {
     if (!remoteAgent_.unsubscribe(request)) {
         emit sourceError(tr("Remote Agent 取消订阅请求未被发送"));
+        return;
+    }
+    remoteSubscriptions_.erase({request.topic, request.type});
+    const auto sameTopicRemains = std::ranges::any_of(
+        remoteSubscriptions_, [&request](const auto& subscription) {
+            return subscription.first == request.topic;
+        });
+    if (!sameTopicRemains) {
+        healthAlertRules_.disarm(
+            remoteAgent_.topicSourceId(request.topic));
     }
 }
 
@@ -1292,6 +1424,8 @@ bool SerialSession::resetSourceParserConfiguration(const QString& sourceId) {
 void SerialSession::resetParserDependentState() {
     derivedFields_.resetValues();
     alertRules_.resetValues();
+    healthAlertRules_.resetValues();
+    armHealthAlertTargets();
     latestLiveTimestamp_.store(0);
     timeSeries_.clear();
     {
@@ -1374,6 +1508,15 @@ bool SerialSession::setAlertRules(const QVariantList& definitions) {
             definition.value(QStringLiteral("comparison")).toString().trimmed();
         const auto message =
             definition.value(QStringLiteral("message")).toString().trimmed();
+        const auto durationMs =
+            definition.value(QStringLiteral("duration_ms"), 0).toLongLong();
+        const auto durationNs = durationMs < 0
+                                    ? static_cast<lab::core::Timestamp>(-1)
+                                : durationMs > maximumAlertWindowMs
+                                    ? static_cast<lab::core::Timestamp>(
+                                          maximumAlertWindowMs) * 1'000'000 + 1
+                                    : static_cast<lab::core::Timestamp>(
+                                          durationMs) * 1'000'000;
         const auto toString = [](const QString& text) {
             const auto bytes = text.toUtf8();
             return std::string(bytes.constData(), static_cast<std::size_t>(bytes.size()));
@@ -1387,7 +1530,8 @@ bool SerialSession::setAlertRules(const QVariantList& definitions) {
                                        : static_cast<lab::core::ThresholdComparison>(-1),
                              definition.value(QStringLiteral("threshold")).toDouble(),
                              definition.value(QStringLiteral("hysteresis")).toDouble(),
-                             toString(message)});
+                             toString(message),
+                             durationNs});
     }
 
     const auto result = alertRules_.setDefinitions(std::move(requested));
@@ -1409,6 +1553,69 @@ bool SerialSession::setAlertRules(const QVariantList& definitions) {
         {count == 0
              ? tr("阈值告警已全部关闭")
              : tr("已应用 %1 个阈值告警；告警采用边沿触发与回差复位")
+                   .arg(static_cast<qulonglong>(count))});
+    return true;
+}
+
+bool SerialSession::setHealthAlertRules(const QVariantList& definitions) {
+    if (recorder_.isRecording()) {
+        emit healthAlertRulesConfigured(
+            false,
+            {tr("Session 记录期间运行健康告警已冻结，请停止记录后再修改")});
+        return false;
+    }
+
+    std::vector<lab::core::HealthAlertDefinition> requested;
+    requested.reserve(static_cast<std::size_t>(definitions.size()));
+    const auto toString = [](const QString& text) {
+        const auto bytes = text.toUtf8();
+        return std::string(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+    };
+    for (const auto& value : definitions) {
+        const auto definition = value.toMap();
+        const auto kind = definition.value(QStringLiteral("kind")).toString();
+        const auto windowMs =
+            definition.value(QStringLiteral("window_ms")).toLongLong();
+        const auto windowNs = windowMs < 0
+                                  ? static_cast<lab::core::Timestamp>(-1)
+                              : windowMs > maximumAlertWindowMs
+                                  ? static_cast<lab::core::Timestamp>(
+                                        maximumAlertWindowMs) * 1'000'000 + 1
+                                  : static_cast<lab::core::Timestamp>(
+                                        windowMs) * 1'000'000;
+        requested.push_back({
+            toString(definition.value(QStringLiteral("name")).toString().trimmed()),
+            toString(definition.value(QStringLiteral("source_id")).toString().trimmed()),
+            kind == QStringLiteral("error_rate")
+                ? lab::core::HealthAlertKind::ErrorRate
+            : kind == QStringLiteral("inactivity")
+                ? lab::core::HealthAlertKind::Inactivity
+                : static_cast<lab::core::HealthAlertKind>(-1),
+            definition.value(QStringLiteral("error_count"), 1).toULongLong(),
+            windowNs,
+            toString(definition.value(QStringLiteral("message")).toString().trimmed())});
+    }
+
+    const auto result = healthAlertRules_.setDefinitions(std::move(requested));
+    if (!result.success()) {
+        QStringList messages;
+        for (const auto& issue : result.issues) {
+            messages.push_back(
+                tr("第 %1 行：%2 [%3]")
+                    .arg(static_cast<qulonglong>(issue.definitionIndex + 1))
+                    .arg(QString::fromStdString(issue.message),
+                         QString::fromStdString(issue.code)));
+        }
+        emit healthAlertRulesConfigured(false, messages);
+        return false;
+    }
+    armHealthAlertTargets();
+    const auto count = healthAlertRules_.definitions().size();
+    emit healthAlertRulesConfigured(
+        true,
+        {count == 0
+             ? tr("运行健康告警已全部关闭")
+             : tr("已应用 %1 个运行健康告警；超时从来源打开或 Topic 订阅时开始计时")
                    .arg(static_cast<qulonglong>(count))});
     return true;
 }
@@ -1515,7 +1722,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.20.0";
+    options.softwareVersion = "0.21.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -1524,6 +1731,7 @@ bool SerialSession::startSession(const QString& directory) {
     options.csvFields = activeCsvFields_;
     options.derivedFields = derivedFields_.definitions();
     options.alertRules = alertRules_.definitions();
+    options.healthAlertRules = healthAlertRules_.definitions();
     for (const auto& [sourceId, source] : serialSources_) {
         if (!source->isOpen()) continue;
         const auto settings = source->settings();
@@ -1576,6 +1784,8 @@ bool SerialSession::startSession(const QString& directory) {
         processing_.flush();
         derivedFields_.resetValues();
         alertRules_.resetValues();
+        healthAlertRules_.resetValues();
+        armHealthAlertTargets();
         latestLiveTimestamp_.store(0);
         nextTimelineSequence_.store(0);
         clearTimelineEvents();
@@ -1648,6 +1858,8 @@ bool SerialSession::openReplaySession(const QString& directory) {
         derivedDefinitionsToVariant(derivedFields_.definitions());
     const auto previousAlertRules =
         alertDefinitionsToVariant(alertRules_.definitions());
+    const auto previousHealthAlertRules =
+        healthAlertDefinitionsToVariant(healthAlertRules_.definitions());
 
     sourceManager_.closeAll();
     replay_.close();
@@ -1658,6 +1870,8 @@ bool SerialSession::openReplaySession(const QString& directory) {
         processing_.flush();
         processing_.resetParsers();
         derivedFields_.resetValues();
+        alertRules_.resetValues();
+        healthAlertRules_.resetValues();
         timeSeries_.clear();
     }
     {
@@ -2076,7 +2290,9 @@ bool SerialSession::openReplaySession(const QString& directory) {
         const auto object = document.object();
         const auto formatVersion = object.value(QStringLiteral("format_version"));
         const auto rulesValue = object.value(QStringLiteral("rules"));
-        if (!formatVersion.isDouble() || formatVersion.toDouble() != 1.0 ||
+        if (!formatVersion.isDouble() ||
+            (formatVersion.toDouble() != 1.0 &&
+             formatVersion.toDouble() != 2.0) ||
             !rulesValue.isArray()) {
             emit replayOpenFailed(tr("Session 告警规则格式版本不受支持或规则缺失"));
             return false;
@@ -2097,11 +2313,19 @@ bool SerialSession::openReplaySession(const QString& directory) {
             const auto comparison = rule.value(QStringLiteral("comparison"));
             const auto threshold = rule.value(QStringLiteral("threshold"));
             const auto hysteresis = rule.value(QStringLiteral("hysteresis"));
+            const auto duration = rule.value(QStringLiteral("duration_ms"));
             const auto message = rule.value(QStringLiteral("message"));
             if (!name.isString() || !field.isString() || !comparison.isString() ||
                 !threshold.isDouble() || !hysteresis.isDouble() ||
                 !message.isString() || !std::isfinite(threshold.toDouble()) ||
-                !std::isfinite(hysteresis.toDouble())) {
+                !std::isfinite(hysteresis.toDouble()) ||
+                (formatVersion.toDouble() == 2.0 &&
+                 (!duration.isDouble() ||
+                  !std::isfinite(duration.toDouble()) ||
+                  std::floor(duration.toDouble()) != duration.toDouble() ||
+                  duration.toDouble() < 0.0 ||
+                  duration.toDouble() >
+                      static_cast<double>(maximumAlertWindowMs)))) {
                 emit replayOpenFailed(tr("Session 告警规则条目类型无效"));
                 return false;
             }
@@ -2111,8 +2335,98 @@ bool SerialSession::openReplaySession(const QString& directory) {
             restored.insert(QStringLiteral("comparison"), comparison.toString());
             restored.insert(QStringLiteral("threshold"), threshold.toDouble());
             restored.insert(QStringLiteral("hysteresis"), hysteresis.toDouble());
+            restored.insert(QStringLiteral("duration_ms"),
+                            formatVersion.toDouble() == 2.0
+                                ? duration.toDouble()
+                                : 0.0);
             restored.insert(QStringLiteral("message"), message.toString());
             restoredAlertRules.push_back(restored);
+        }
+    }
+
+    QVariantList restoredHealthAlertRules;
+    const auto healthAlertPath = QDir(sessionDirectory).filePath(
+        QStringLiteral("configuration/health_alert_rules.json"));
+    if (QFileInfo::exists(healthAlertPath)) {
+        QFile healthAlertFile(healthAlertPath);
+        if (!healthAlertFile.open(QIODevice::ReadOnly)) {
+            emit replayOpenFailed(tr("无法读取 Session 运行健康告警配置"));
+            return false;
+        }
+        const auto declaredSize = healthAlertFile.size();
+        if (declaredSize < 0 ||
+            declaredSize > maximumHealthAlertConfigurationBytes) {
+            emit replayOpenFailed(
+                tr("Session 运行健康告警配置超过 1 MiB 安全限制"));
+            return false;
+        }
+        const auto contents = healthAlertFile.readAll();
+        if (healthAlertFile.error() != QFileDevice::NoError ||
+            contents.size() != declaredSize) {
+            emit replayOpenFailed(tr("Session 运行健康告警配置读取不完整"));
+            return false;
+        }
+        QJsonParseError parseError;
+        const auto document = QJsonDocument::fromJson(contents, &parseError);
+        if (parseError.error != QJsonParseError::NoError ||
+            !document.isObject()) {
+            emit replayOpenFailed(tr("Session 运行健康告警配置已损坏"));
+            return false;
+        }
+        const auto object = document.object();
+        const auto formatVersion = object.value(QStringLiteral("format_version"));
+        const auto rulesValue = object.value(QStringLiteral("rules"));
+        if (!formatVersion.isDouble() || formatVersion.toDouble() != 1.0 ||
+            !rulesValue.isArray()) {
+            emit replayOpenFailed(
+                tr("Session 运行健康告警格式版本不受支持或规则缺失"));
+            return false;
+        }
+        const auto rules = rulesValue.toArray();
+        if (rules.size() > maximumHealthAlertDefinitions) {
+            emit replayOpenFailed(
+                tr("Session 运行健康告警超过 128 项安全限制"));
+            return false;
+        }
+        for (const auto& value : rules) {
+            if (!value.isObject()) {
+                emit replayOpenFailed(
+                    tr("Session 运行健康告警包含无效条目"));
+                return false;
+            }
+            const auto rule = value.toObject();
+            const auto name = rule.value(QStringLiteral("name"));
+            const auto sourceId = rule.value(QStringLiteral("source_id"));
+            const auto kind = rule.value(QStringLiteral("kind"));
+            const auto errorCount = rule.value(QStringLiteral("error_count"));
+            const auto window = rule.value(QStringLiteral("window_ms"));
+            const auto message = rule.value(QStringLiteral("message"));
+            if (!name.isString() || !sourceId.isString() || !kind.isString() ||
+                (kind.toString() != QStringLiteral("error_rate") &&
+                 kind.toString() != QStringLiteral("inactivity")) ||
+                !errorCount.isDouble() ||
+                !std::isfinite(errorCount.toDouble()) ||
+                std::floor(errorCount.toDouble()) != errorCount.toDouble() ||
+                errorCount.toDouble() < 1.0 || errorCount.toDouble() > 10'000.0 ||
+                !window.isDouble() || !std::isfinite(window.toDouble()) ||
+                std::floor(window.toDouble()) != window.toDouble() ||
+                window.toDouble() < 1.0 ||
+                window.toDouble() >
+                    static_cast<double>(maximumAlertWindowMs) ||
+                !message.isString()) {
+                emit replayOpenFailed(
+                    tr("Session 运行健康告警条目类型或范围无效"));
+                return false;
+            }
+            QVariantMap restored;
+            restored.insert(QStringLiteral("name"), name.toString());
+            restored.insert(QStringLiteral("source_id"), sourceId.toString());
+            restored.insert(QStringLiteral("kind"), kind.toString());
+            restored.insert(QStringLiteral("error_count"),
+                            errorCount.toDouble());
+            restored.insert(QStringLiteral("window_ms"), window.toDouble());
+            restored.insert(QStringLiteral("message"), message.toString());
+            restoredHealthAlertRules.push_back(restored);
         }
     }
 
@@ -2183,12 +2497,19 @@ bool SerialSession::openReplaySession(const QString& directory) {
             return false;
         }
     }
+    if (!setHealthAlertRules(restoredHealthAlertRules)) {
+        emit replayOpenFailed(
+            tr("Session 运行健康告警无法通过安全校验"));
+        return false;
+    }
     if (!setAlertRules(restoredAlertRules)) {
+        static_cast<void>(setHealthAlertRules(previousHealthAlertRules));
         emit replayOpenFailed(tr("Session 告警规则无法通过安全校验"));
         return false;
     }
     if (!setDerivedFields(restoredDerivedFields)) {
         static_cast<void>(setAlertRules(previousAlertRules));
+        static_cast<void>(setHealthAlertRules(previousHealthAlertRules));
         emit replayOpenFailed(tr("Session 派生变量配置无法通过安全校验"));
         return false;
     }
@@ -2201,6 +2522,7 @@ bool SerialSession::openReplaySession(const QString& directory) {
             rosbagReplayTopics_.clear();
         }
         static_cast<void>(setAlertRules(previousAlertRules));
+        static_cast<void>(setHealthAlertRules(previousHealthAlertRules));
         static_cast<void>(setDerivedFields(previousDerivedFields));
         emit replayOpenFailed(tr("无法打开回放文件；详细原因已写入状态栏和日志"));
         return false;
@@ -2219,6 +2541,7 @@ bool SerialSession::openReplaySession(const QString& directory) {
     replaying_.store(true);
     emit derivedFieldsRestored(restoredDerivedFields);
     emit alertRulesRestored(restoredAlertRules);
+    emit healthAlertRulesRestored(restoredHealthAlertRules);
     emit timelineEventsChanged(restoredEventValues);
     const auto replayStatus = replay_.status();
     emit replayOpened(sessionDirectory,
@@ -2346,7 +2669,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.20.0";
+            options.softwareVersion = "0.21.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {
@@ -2436,6 +2759,8 @@ void SerialSession::closeReplay() {
     replayMappingWarnings_.clear();
     derivedFields_.resetValues();
     alertRules_.resetValues();
+    healthAlertRules_.resetValues();
+    armHealthAlertTargets();
     clearTimelineEvents();
 }
 
@@ -2460,6 +2785,7 @@ void SerialSession::seekReplay(double fraction) {
         processing_.resetParsers();
         derivedFields_.resetValues();
         alertRules_.resetValues();
+        healthAlertRules_.resetValues();
         replay_.seekFraction(fraction);
         timeSeries_.clear();
         {
@@ -2473,6 +2799,7 @@ void SerialSession::seekReplay(double fraction) {
 }
 
 void SerialSession::drainUiQueue() {
+    processHealthAlerts();
     std::deque<lab::core::DataChunk> batch;
     {
         std::scoped_lock lock(uiQueueMutex_);

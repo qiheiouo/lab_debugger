@@ -3,6 +3,7 @@
 #include "lab/core/data_sample.hpp"
 #include "lab/core/derived_field_engine.hpp"
 #include "lab/core/frame_stream_parser.hpp"
+#include "lab/core/health_alert_engine.hpp"
 #include "lab/core/raw_log_recorder.hpp"
 #include "lab/core/threshold_alert_engine.hpp"
 
@@ -45,6 +46,7 @@ struct SessionStartOptions {
     std::vector<std::string> csvFields;
     std::vector<DerivedFieldDefinition> derivedFields;
     std::vector<ThresholdAlertDefinition> alertRules;
+    std::vector<HealthAlertDefinition> healthAlertRules;
     std::string protocolName;
     std::string protocolJson;
 };

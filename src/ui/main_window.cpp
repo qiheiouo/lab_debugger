@@ -139,6 +139,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::addManualMarker);
     connect(alerts_, &AlertsWidget::applyRequested,
             &session_, &lab::app::SerialSession::setAlertRules);
+    connect(alerts_, &AlertsWidget::applyHealthRequested,
+            &session_, &lab::app::SerialSession::setHealthAlertRules);
     connect(protocol_, &ProtocolWidget::csvConfigurationRequested,
             this, [this](const QString& sourceId, const QStringList& fields) {
                 if (sourceId.isEmpty()) {
@@ -252,6 +254,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             alerts_, &AlertsWidget::showConfigurationResult);
     connect(&session_, &lab::app::SerialSession::alertRulesRestored,
             alerts_, &AlertsWidget::setDefinitions);
+    connect(&session_, &lab::app::SerialSession::healthAlertRulesConfigured,
+            alerts_, &AlertsWidget::showHealthConfigurationResult);
+    connect(&session_, &lab::app::SerialSession::healthAlertRulesRestored,
+            alerts_, &AlertsWidget::setHealthDefinitions);
     connect(&session_, &lab::app::SerialSession::timelineEventsChanged,
             alerts_, &AlertsWidget::setTimelineEvents);
     connect(&session_, &lab::app::SerialSession::timelineEventsChanged,

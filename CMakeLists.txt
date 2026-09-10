@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.20.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.21.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -28,6 +28,7 @@ add_library(lab_core STATIC
     src/core/src/csv_stream_parser.cpp
     src/core/src/derived_field_engine.cpp
     src/core/src/frame_stream_parser.cpp
+    src/core/src/health_alert_engine.cpp
     src/core/src/logger.cpp
     src/core/src/mock_data_source.cpp
     src/core/src/processing_pipeline.cpp
@@ -326,6 +327,18 @@ if(LAB_DEBUGGER_BUILD_TESTS)
         )
         add_test(NAME lab_marker_alert_tests COMMAND lab_marker_alert_tests)
         set_tests_properties(lab_marker_alert_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 20
+        )
+        add_executable(lab_health_alert_tests
+            tests/test_health_alerts.cpp
+        )
+        target_link_libraries(lab_health_alert_tests
+            PRIVATE lab_app_ui Qt6::Core Qt6::Network
+        )
+        add_test(NAME lab_health_alert_tests COMMAND lab_health_alert_tests)
+        set_tests_properties(lab_health_alert_tests PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
             TIMEOUT 20

@@ -242,6 +242,8 @@ void testHandshakeCatalogSamplesAndControls() {
                        events.hellos.size() == 1;
             }),
             "valid hello completes handshake");
+    require(source.topicSourceId("/imu") == "ros-agent:robot-a:/imu",
+            "topic health identity exactly matches raw and structured sample identity");
 
     StreamDecoder clientDecoder;
     const auto handshakeFrames = receiveFrames(*peer, clientDecoder, 2);
