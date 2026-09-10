@@ -189,6 +189,8 @@ private:
     void armHealthAlertTargets();
     [[nodiscard]] bool shouldRecordHealthAlert(
         const std::string& sourceId) const noexcept;
+    void updateRemoteAgentHealthIdentity(const std::string& agentId);
+    void disarmRemoteAgentHealthIdentity(const std::string& agentId);
     void publishTimelineEvent(lab::core::SessionEvent event, bool record);
     void clearTimelineEvents();
     void leaveReplayForLiveSource();
@@ -216,6 +218,7 @@ private:
     std::jthread rosbagImportWorker_;
     lab::adapters::remote_agent::RemoteAgentSettings lastRemoteAgentSettings_;
     bool remoteAgentConfigured_{};
+    std::string remoteAgentHealthIdentity_;
     std::string selectedSerialSource_;
     std::string selectedNetworkSource_;
     std::string sendTargetSource_;

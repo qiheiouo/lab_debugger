@@ -194,7 +194,8 @@ QVariantList alertDefinitionsToVariant(
                      QString::fromStdString(lab::core::toString(definition.comparison)));
         value.insert(QStringLiteral("threshold"), definition.threshold);
         value.insert(QStringLiteral("hysteresis"), definition.hysteresis);
-        value.insert(QStringLiteral("duration_ms"), definition.durationNs / 1'000'000);
+        value.insert(QStringLiteral("duration_ms"),
+                     static_cast<qlonglong>(definition.durationNs / 1'000'000));
         value.insert(QStringLiteral("message"), QString::fromStdString(definition.message));
         result.push_back(value);
     }
@@ -214,7 +215,8 @@ QVariantList healthAlertDefinitionsToVariant(
                      QString::fromStdString(lab::core::toString(definition.kind)));
         value.insert(QStringLiteral("error_count"),
                      QVariant::fromValue<qulonglong>(definition.errorCount));
-        value.insert(QStringLiteral("window_ms"), definition.windowNs / 1'000'000);
+        value.insert(QStringLiteral("window_ms"),
+                     static_cast<qlonglong>(definition.windowNs / 1'000'000));
         value.insert(QStringLiteral("message"),
                      QString::fromStdString(definition.message));
         result.push_back(value);
@@ -430,6 +432,7 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
             QMetaObject::invokeMethod(
                 this,
                 [this, agentId, version, hostName, capabilities = hello.capabilities] {
+                    updateRemoteAgentHealthIdentity(utf8String(agentId));
                     emit remoteAgentHello(agentId, version, hostName, capabilities);
                 },
                 Qt::QueuedConnection);
@@ -730,6 +733,24 @@ bool SerialSession::shouldRecordHealthAlert(
         return isDeclaredRecordingSource(std::string(remoteAgentSourceKey));
     }
     return isDeclaredRecordingSource(sourceId);
+}
+
+void SerialSession::disarmRemoteAgentHealthIdentity(const std::string& agentId) {
+    if (agentId.empty()) return;
+    const auto sourceId = std::string("ros-agent:") + agentId;
+    healthAlertRules_.disarm(sourceId);
+    for (const auto& [topic, type] : remoteSubscriptions_) {
+        static_cast<void>(type);
+        healthAlertRules_.disarm(sourceId + ':' + topic);
+    }
+}
+
+void SerialSession::updateRemoteAgentHealthIdentity(const std::string& agentId) {
+    if (!remoteAgentHealthIdentity_.empty() &&
+        remoteAgentHealthIdentity_ != agentId) {
+        disarmRemoteAgentHealthIdentity(remoteAgentHealthIdentity_);
+    }
+    remoteAgentHealthIdentity_ = agentId;
 }
 
 void SerialSession::armHealthAlertTargets() {
@@ -1132,10 +1153,8 @@ void SerialSession::connectRemoteAgent(
     if (remoteAgentConfigured_ &&
         (settings.host != lastRemoteAgentSettings_.host ||
          settings.port != lastRemoteAgentSettings_.port)) {
-        for (const auto& [topic, type] : remoteSubscriptions_) {
-            static_cast<void>(type);
-            healthAlertRules_.disarm(remoteAgent_.topicSourceId(topic));
-        }
+        disarmRemoteAgentHealthIdentity(remoteAgentHealthIdentity_);
+        remoteAgentHealthIdentity_.clear();
     }
     sourceManager_.close(std::string(remoteAgentSourceKey));
     lastRemoteAgentSettings_ = std::move(settings);
