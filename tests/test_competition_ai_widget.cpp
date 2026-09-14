@@ -32,13 +32,23 @@ int main(int argc, char* argv[]) {
         QStringLiteral("confirmAiSend"));
     const auto* analyze = widget.findChild<QPushButton*>(
         QStringLiteral("startAiAnalysisButton"));
+    auto* loadDemo = widget.findChild<QPushButton*>(
+        QStringLiteral("loadAiDemoButton"));
     const auto* status = widget.findChild<QLabel*>(
         QStringLiteral("aiAnalysisStatus"));
     if (!widget.isVisible() || !model || model->count() != 2 || !key ||
         key->echoMode() != QLineEdit::Password || !preview || !confirm ||
-        !analyze || !status || !widget.summaryJson().isEmpty() ||
+        !analyze || !loadDemo || !status || !widget.summaryJson().isEmpty() ||
         !status->text().contains(QStringLiteral("有效的 Session"))) {
         std::cerr << "Lab Debugger competition AI widget test failed.\n";
+        return 1;
+    }
+    loadDemo->click();
+    if (widget.summaryJson().isEmpty() ||
+        !widget.sessionDirectory().contains(
+            QStringLiteral("competition_ai_demo")) ||
+        !status->text().contains(QStringLiteral("合成 ROS2 小车示例"))) {
+        std::cerr << "Lab Debugger bundled AI demo test failed.\n";
         return 1;
     }
     std::cout << "Lab Debugger competition AI widget test passed.\n";

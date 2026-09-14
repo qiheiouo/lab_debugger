@@ -1,0 +1,4 @@
+{"timestamp_ns":1000000000,"source_id":"operator","sequence":1,"severity":"info","category":"marker","message":"开始直行速度阶跃"}
+{"timestamp_ns":5000000000,"source_id":"operator","sequence":2,"severity":"info","category":"marker","message":"人为增加右轮阻力（合成场景）"}
+{"timestamp_ns":6000000000,"source_id":"derived:tracking","sequence":3,"severity":"warning","category":"alert","message":"速度跟踪误差持续超过 0.4 m/s"}
+{"timestamp_ns":8000000000,"source_id":"operator","sequence":4,"severity":"info","category":"marker","message":"移除右轮阻力（合成场景）"}

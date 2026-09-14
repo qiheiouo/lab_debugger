@@ -217,6 +217,9 @@ if(LAB_DEBUGGER_BUILD_GUI)
             docs/COMPETITION_DESIGN.md
             DESTINATION .
         )
+        install(DIRECTORY examples/competition_ai_demo
+            DESTINATION examples
+        )
         qt_generate_deploy_app_script(
             TARGET lab_debugger
             OUTPUT_SCRIPT deploy_script
@@ -434,6 +437,9 @@ if(LAB_DEBUGGER_BUILD_TESTS)
         )
         target_link_libraries(lab_competition_ai_tests
             PRIVATE lab_competition_ai Qt6::Core Qt6::Network
+        )
+        target_compile_definitions(lab_competition_ai_tests PRIVATE
+            LAB_COMPETITION_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
         )
         add_test(NAME lab_competition_ai_tests COMMAND lab_competition_ai_tests)
         set_tests_properties(lab_competition_ai_tests PROPERTIES

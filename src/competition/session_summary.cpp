@@ -356,6 +356,14 @@ SessionSummaryResult SessionSummaryBuilder::build(
 
     QJsonObject session;
     session.insert(QStringLiteral("directory_name"), directoryInfo.fileName());
+    session.insert(QStringLiteral("session_name"),
+                   metadata.value(QStringLiteral("session_name"))
+                       .toString()
+                       .left(256));
+    session.insert(QStringLiteral("data_origin"),
+                   metadata.value(QStringLiteral("data_origin"))
+                       .toString()
+                       .left(128));
     session.insert(QStringLiteral("status"),
                    metadata.value(QStringLiteral("status")).toString());
     session.insert(QStringLiteral("software_version"),

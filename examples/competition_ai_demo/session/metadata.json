@@ -1,0 +1,16 @@
+{
+  "format": "lab-debug-session",
+  "format_version": 1,
+  "status": "completed",
+  "software_version": "0.22.0-competition-ai",
+  "session_name": "synthetic_ros2_wheel_resistance_demo",
+  "data_origin": "synthetic_competition_demo",
+  "start_time_ns": 1000000000,
+  "end_time_ns": 10000000000,
+  "sources": [
+    {"id": "ros-agent:demo:/cmd_vel", "type": "ros_remote_agent", "name": "ROS2 /cmd_vel（合成）"},
+    {"id": "ros-agent:demo:/odom", "type": "ros_remote_agent", "name": "ROS2 /odom（合成）"},
+    {"id": "ros-agent:demo:/imu", "type": "ros_remote_agent", "name": "ROS2 /imu（合成）"},
+    {"id": "derived:tracking", "type": "derived", "name": "速度跟踪误差（合成）"}
+  ]
+}

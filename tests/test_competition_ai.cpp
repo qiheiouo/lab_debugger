@@ -244,6 +244,38 @@ void testDeepSeekClient(const QByteArray& summary) {
             "non-local plain HTTP endpoint is rejected before transmission");
 }
 
+void testBundledDemo() {
+    const auto directory = QDir(QString::fromUtf8(LAB_COMPETITION_SOURCE_DIR))
+                               .filePath(QStringLiteral(
+                                   "examples/competition_ai_demo/session"));
+    const auto result = lab::competition::SessionSummaryBuilder::build(directory);
+    require(result.success && result.valueRowsScanned == 40 &&
+                result.malformedRows == 0,
+            "bundled synthetic demo is a valid AI Session summary");
+    QJsonParseError parseError;
+    const auto root = QJsonDocument::fromJson(result.json, &parseError).object();
+    require(parseError.error == QJsonParseError::NoError &&
+                root.value(QStringLiteral("fields")).toArray().size() == 4 &&
+                root.value(QStringLiteral("events")).toArray().size() == 4 &&
+                root.value(QStringLiteral("session"))
+                        .toObject()
+                        .value(QStringLiteral("data_origin"))
+                        .toString() == QStringLiteral("synthetic_competition_demo"),
+            "bundled demo keeps its synthetic origin and expected evidence");
+    bool trackingErrorFound = false;
+    for (const auto& value : root.value(QStringLiteral("fields")).toArray()) {
+        const auto field = value.toObject();
+        if (field.value(QStringLiteral("field")).toString() ==
+            QStringLiteral("speed_tracking_error")) {
+            trackingErrorFound =
+                qAbs(field.value(QStringLiteral("max")).toDouble() - 0.78) <
+                1e-12;
+        }
+    }
+    require(trackingErrorFound,
+            "bundled demo exposes the intended tracking-error evidence");
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -252,6 +284,7 @@ int main(int argc, char* argv[]) {
         QByteArray summary;
         testSummaryBuilder(summary);
         testDeepSeekClient(summary);
+        testBundledDemo();
         std::cout << "Lab Debugger competition AI tests passed.\n";
         return 0;
     } catch (const std::exception& error) {

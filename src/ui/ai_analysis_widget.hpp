@@ -28,6 +28,7 @@ public:
 
 private:
     void chooseSessionDirectory();
+    void loadBundledDemo();
     void startAnalysis();
     void saveReport();
     void setBusy(bool busy);

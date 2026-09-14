@@ -4,9 +4,11 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -15,6 +17,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QVBoxLayout>
 
 namespace lab::ui {
@@ -36,11 +39,14 @@ AiAnalysisWidget::AiAnalysisWidget(QWidget* parent)
     sessionPath_->setReadOnly(true);
     auto* chooseButton = new QPushButton(tr("选择 Session"), this);
     chooseButton->setObjectName(QStringLiteral("chooseAiSessionButton"));
+    auto* demoButton = new QPushButton(tr("载入合成演示"), this);
+    demoButton->setObjectName(QStringLiteral("loadAiDemoButton"));
     summarizeButton_ = new QPushButton(tr("生成本地摘要"), this);
     summarizeButton_->setObjectName(QStringLiteral("generateAiSummaryButton"));
     auto* sessionRow = new QHBoxLayout;
     sessionRow->addWidget(sessionPath_, 1);
     sessionRow->addWidget(chooseButton);
+    sessionRow->addWidget(demoButton);
     sessionRow->addWidget(summarizeButton_);
 
     model_ = new QComboBox(this);
@@ -120,6 +126,8 @@ AiAnalysisWidget::AiAnalysisWidget(QWidget* parent)
 
     connect(chooseButton, &QPushButton::clicked,
             this, &AiAnalysisWidget::chooseSessionDirectory);
+    connect(demoButton, &QPushButton::clicked,
+            this, &AiAnalysisWidget::loadBundledDemo);
     connect(summarizeButton_, &QPushButton::clicked,
             this, &AiAnalysisWidget::generateSummary);
     connect(analyzeButton_, &QPushButton::clicked,
@@ -205,6 +213,26 @@ void AiAnalysisWidget::chooseSessionDirectory() {
     const auto selected = QFileDialog::getExistingDirectory(
         this, tr("选择 Lab Debugger Session"), initial);
     if (!selected.isEmpty()) setSessionDirectory(selected);
+}
+
+void AiAnalysisWidget::loadBundledDemo() {
+    const auto applicationDirectory = QCoreApplication::applicationDirPath();
+    const QString relative = QStringLiteral("examples/competition_ai_demo/session");
+    const QStringList candidates{
+        QDir(applicationDirectory).filePath(QStringLiteral("../") + relative),
+        QDir(applicationDirectory).filePath(QStringLiteral("../../") + relative),
+        QDir::current().filePath(relative)};
+    for (const auto& candidate : candidates) {
+        const auto normalized = QDir(candidate).absolutePath();
+        if (QFileInfo::exists(QDir(normalized).filePath(
+                QStringLiteral("metadata.json")))) {
+            setSessionDirectory(normalized);
+            generateSummary();
+            setStatus(tr("已载入合成 ROS2 小车示例；请确认数据来源后再分析"));
+            return;
+        }
+    }
+    setStatus(tr("未找到随程序安装的合成演示数据"), true);
 }
 
 void AiAnalysisWidget::startAnalysis() {
