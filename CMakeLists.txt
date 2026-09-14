@@ -215,6 +215,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
             docs/TIME_ALIGNMENT.md
             docs/COMPETITION_AI.md
             docs/COMPETITION_DESIGN.md
+            docs/COMPETITION_SUBMISSION_CHECKLIST.md
+            docs/THIRD_PARTY_NOTICES.md
             DESTINATION .
         )
         install(DIRECTORY examples/competition_ai_demo
