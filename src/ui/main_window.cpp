@@ -1,5 +1,6 @@
 #include "ui/main_window.hpp"
 
+#include "ui/ai_analysis_widget.hpp"
 #include "ui/derived_fields_widget.hpp"
 #include "ui/alerts_widget.hpp"
 #include "ui/network_panel.hpp"
@@ -30,7 +31,7 @@
 namespace lab::ui {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    setWindowTitle(tr("Lab Debugger / 实验室调试助手"));
+    setWindowTitle(tr("Lab Debugger AI 竞赛版 / 实验室智能诊断助手"));
     resize(1280, 820);
     setMinimumSize(900, 600);
 
@@ -47,6 +48,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     remoteAgentPanel_ = new RemoteAgentPanel(this);
     terminal_ = new TerminalWidget(this);
     plot_ = new PlotWidget(&session_.timeSeries(), this);
+    aiAnalysis_ = new AiAnalysisWidget(this);
     derivedFields_ = new DerivedFieldsWidget(this);
     alerts_ = new AlertsWidget(this);
     timeAlignment_ = new TimeAlignmentWidget(this);
@@ -62,6 +64,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs->addTab(timeAlignment_, tr("时间同步"));
     tabs->addTab(protocol_, tr("协议解析"));
     tabs->addTab(replay_, tr("Session 回放"));
+    tabs->addTab(aiAnalysis_, tr("AI 智能诊断（比赛版）"));
 
     auto* right = new QWidget(this);
     auto* rightLayout = new QVBoxLayout(right);
@@ -235,6 +238,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             protocol_, &ProtocolWidget::showParserErrors);
     connect(&session_, &lab::app::SerialSession::replayOpened,
             replay_, &ReplayWidget::setOpened);
+    connect(&session_, &lab::app::SerialSession::replayOpened,
+            this,
+            [this](const QString& directory, bool, bool, bool) {
+                aiAnalysis_->setSessionDirectory(directory);
+            });
     connect(&session_, &lab::app::SerialSession::replayOpenFailed,
             replay_, &ReplayWidget::showOpenError);
     connect(&session_, &lab::app::SerialSession::replayStatusChanged,

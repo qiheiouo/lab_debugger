@@ -13,7 +13,8 @@ int main(int argc, char* argv[]) {
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("LabDebugger"));
     QCoreApplication::setApplicationName(QStringLiteral("Lab Debugger"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.22.0"));
+    QCoreApplication::setApplicationVersion(
+        QStringLiteral("0.22.0-competition-ai"));
 
     const auto dataDirectory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     QDir().mkpath(dataDirectory);

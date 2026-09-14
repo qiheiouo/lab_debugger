@@ -2,6 +2,11 @@
 
 Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路、Phase 5 网络数据源、Phase 6 Remote ROS Agent 主链路、Phase 7 rosbag2 离线分析，并已进入 Phase 8 多源同步基础建设：
 
+> 当前分支是 2026 计算机应用大赛专用版本。在稳定 0.22 主链路上增加
+> DeepSeek Session 智能诊断演示，不计划把 AI 依赖直接合并回长期主线。
+> 使用说明见 [DeepSeek 智能诊断](docs/COMPETITION_AI.md)，参赛材料可从
+> [竞赛版软件设计说明](docs/COMPETITION_DESIGN.md) 继续整理。
+
 - 与 Qt UI 解耦的 C++20 数据核心；
 - `IDataSource` 与正式 `SourceManager`，最多 16 个本地串口/网络实例可动态增删，并可与 ROS Agent 同时连接、统计和记录；
 - CSV/二进制流解析状态按 `sourceId` 隔离，同名字段以“来源.字段”形成独立曲线；
@@ -31,7 +36,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 后台 rosbag2 SQLite 预检/导入、`metadata.yaml` 无损保存与交叉校验、可搜索 Topic 筛选、分卷时间归并、原始 CDR 安全回放和常见 ROS 消息离线曲线；
 - 可测试的 `MockDataSource` 与核心测试。
 
-详细设计见 [架构文档](docs/ARCHITECTURE.md)，多设备操作见 [多数据源使用说明](docs/MULTI_SOURCE.md)，时间策略见 [多源时间对齐说明](docs/TIME_ALIGNMENT.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，逐来源配置见 [解析配置说明](docs/SOURCE_PARSERS.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，Marker 与告警见 [时间线说明](docs/MARKERS_ALERTS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，当前完成度与暂停后的计划见 [项目进度与后续计划](docs/PROJECT_STATUS_AND_PLAN.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
+详细设计见 [架构文档](docs/ARCHITECTURE.md)，比赛版 AI 操作见 [DeepSeek 智能诊断说明](docs/COMPETITION_AI.md)，多设备操作见 [多数据源使用说明](docs/MULTI_SOURCE.md)，时间策略见 [多源时间对齐说明](docs/TIME_ALIGNMENT.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，逐来源配置见 [解析配置说明](docs/SOURCE_PARSERS.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，Marker 与告警见 [时间线说明](docs/MARKERS_ALERTS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，当前完成度与暂停后的计划见 [项目进度与后续计划](docs/PROJECT_STATUS_AND_PLAN.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
 
 ## Windows 构建
 

@@ -1,4 +1,5 @@
 #include "ui/main_window.hpp"
+#include "ui/ai_analysis_widget.hpp"
 #include "ui/derived_fields_widget.hpp"
 #include "ui/alerts_widget.hpp"
 #include "ui/plot_widget.hpp"
@@ -206,6 +207,16 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        lab::ui::AiAnalysisWidget aiAnalysis;
+        aiAnalysis.setSessionDirectory(QStringLiteral("competition-fixture"));
+        if (aiAnalysis.objectName() != QStringLiteral("aiAnalysisWidget") ||
+            aiAnalysis.sessionDirectory().isEmpty() ||
+            !aiAnalysis.findChild<QLineEdit*>(
+                QStringLiteral("deepSeekApiKey"))) {
+            std::cerr << "GUI smoke test failed: competition AI controls are missing\n";
+            return 1;
+        }
+
         lab::ui::ProtocolWidget protocol;
         QVariantMap parserSource;
         parserSource.insert(QStringLiteral("id"),
@@ -252,6 +263,11 @@ int main(int argc, char* argv[]) {
         if (!window.findChild<lab::ui::TimeAlignmentWidget*>(
                 QStringLiteral("timeAlignmentWidget"))) {
             std::cerr << "GUI smoke test failed: time alignment tab is missing\n";
+            return 1;
+        }
+        if (!window.findChild<lab::ui::AiAnalysisWidget*>(
+                QStringLiteral("aiAnalysisWidget"))) {
+            std::cerr << "GUI smoke test failed: competition AI tab is missing\n";
             return 1;
         }
         QTimer::singleShot(150, &application, [] {

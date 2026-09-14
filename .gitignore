@@ -1,4 +1,6 @@
 /build/
+/build-*/
+/\.validation-tools*/
 /dist/
 /.idea/
 /.vscode/

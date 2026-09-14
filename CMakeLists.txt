@@ -128,6 +128,40 @@ if(LAB_DEBUGGER_BUILD_GUI)
             )
         endif()
 
+        add_library(lab_competition_ai STATIC
+            src/competition/deepseek_client.cpp
+            src/competition/deepseek_client.hpp
+            src/competition/session_summary.cpp
+            src/competition/session_summary.hpp
+        )
+        set_target_properties(lab_competition_ai PROPERTIES AUTOMOC OFF)
+        target_include_directories(lab_competition_ai PUBLIC src)
+        target_link_libraries(lab_competition_ai PUBLIC Qt6::Core Qt6::Network)
+        if(MSVC)
+            target_compile_options(lab_competition_ai PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(lab_competition_ai PRIVATE
+                -Wall -Wextra -Wpedantic
+            )
+        endif()
+
+        add_library(lab_competition_ai_ui STATIC
+            src/ui/ai_analysis_widget.cpp
+            src/ui/ai_analysis_widget.hpp
+        )
+        set_target_properties(lab_competition_ai_ui PROPERTIES AUTOMOC OFF)
+        target_include_directories(lab_competition_ai_ui PUBLIC src)
+        target_link_libraries(lab_competition_ai_ui
+            PUBLIC lab_competition_ai Qt6::Widgets
+        )
+        if(MSVC)
+            target_compile_options(lab_competition_ai_ui PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(lab_competition_ai_ui PRIVATE
+                -Wall -Wextra -Wpedantic
+            )
+        endif()
+
         add_library(lab_app_ui STATIC
             src/app/serial_session.cpp
             src/app/serial_session.hpp
@@ -161,7 +195,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
         target_include_directories(lab_app_ui PUBLIC src)
         target_link_libraries(lab_app_ui
             PUBLIC lab_core lab_serial_adapter lab_network_adapter
-                   lab_remote_agent_adapter lab_rosbag2_adapter Qt6::Widgets
+                   lab_remote_agent_adapter lab_rosbag2_adapter
+                   lab_competition_ai_ui Qt6::Widgets
         )
 
         qt_add_executable(lab_debugger WIN32 src/app/main.cpp)
@@ -178,6 +213,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
             docs/RUN_WINDOWS.txt
             docs/MULTI_SOURCE.md
             docs/TIME_ALIGNMENT.md
+            docs/COMPETITION_AI.md
+            docs/COMPETITION_DESIGN.md
             DESTINATION .
         )
         qt_generate_deploy_app_script(
@@ -392,6 +429,55 @@ if(LAB_DEBUGGER_BUILD_TESTS)
                 "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
             TIMEOUT 20
         )
+        add_executable(lab_competition_ai_tests
+            tests/test_competition_ai.cpp
+        )
+        target_link_libraries(lab_competition_ai_tests
+            PRIVATE lab_competition_ai Qt6::Core Qt6::Network
+        )
+        add_test(NAME lab_competition_ai_tests COMMAND lab_competition_ai_tests)
+        set_tests_properties(lab_competition_ai_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 20
+        )
+        add_executable(lab_competition_ai_widget_tests
+            tests/test_competition_ai_widget.cpp
+        )
+        target_link_libraries(lab_competition_ai_widget_tests
+            PRIVATE lab_competition_ai_ui Qt6::Widgets
+        )
+        add_test(NAME lab_competition_ai_widget_tests
+            COMMAND lab_competition_ai_widget_tests
+        )
+        set_tests_properties(lab_competition_ai_widget_tests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 15
+        )
+        add_library(lab_competition_ui_integration_check STATIC EXCLUDE_FROM_ALL
+            src/ui/main_window.cpp
+            src/ui/main_window.hpp
+        )
+        set_target_properties(lab_competition_ui_integration_check PROPERTIES
+            AUTOMOC OFF
+        )
+        target_include_directories(lab_competition_ui_integration_check PUBLIC src)
+        target_link_libraries(lab_competition_ui_integration_check
+            PUBLIC lab_core lab_serial_adapter lab_network_adapter
+                   lab_remote_agent_adapter lab_rosbag2_adapter
+                   lab_competition_ai_ui Qt6::Widgets
+        )
+        if(MSVC)
+            target_compile_options(lab_competition_ui_integration_check
+                PRIVATE /W4 /permissive-
+            )
+        else()
+            target_compile_options(lab_competition_ui_integration_check
+                PRIVATE -Wall -Wextra -Wpedantic
+            )
+        endif()
         add_executable(lab_gui_smoke_tests tests/test_gui_smoke.cpp)
         target_link_libraries(lab_gui_smoke_tests PRIVATE lab_app_ui)
         add_test(NAME lab_gui_smoke_tests COMMAND lab_gui_smoke_tests)
