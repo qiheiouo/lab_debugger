@@ -197,8 +197,8 @@ int main(int argc, char* argv[]) {
 
         const auto metadata = readObject(root / "metadata.json");
         require(metadata.value(QStringLiteral("software_version")).toString() ==
-                    QStringLiteral("0.21.0"),
-                "dynamic Session records the desktop 0.20 version");
+                    QStringLiteral("0.22.0"),
+                "dynamic Session records the current desktop version");
         const auto sources = metadata.value(QStringLiteral("sources")).toArray();
         require(sources.size() == 2,
                 "dynamic Session metadata contains both open sources");

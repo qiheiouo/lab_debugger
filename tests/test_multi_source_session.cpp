@@ -251,7 +251,7 @@ void runTest() {
 
     const auto metadata = readJsonObject(root / "metadata.json");
     require(metadata.value(QStringLiteral("software_version")).toString() ==
-                QStringLiteral("0.21.0"),
+                QStringLiteral("0.22.0"),
             "metadata records current application version");
     require(metadata.value(QStringLiteral("status")).toString() ==
                 QStringLiteral("completed"),

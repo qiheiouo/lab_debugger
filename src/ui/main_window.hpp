@@ -19,6 +19,7 @@ class ReplayWidget;
 class SendPanel;
 class SerialPanel;
 class TerminalWidget;
+class TimeAlignmentWidget;
 
 class MainWindow final : public QMainWindow {
     Q_OBJECT
@@ -40,6 +41,7 @@ private:
     TerminalWidget* terminal_{};
     PlotWidget* plot_{};
     AlertsWidget* alerts_{};
+    TimeAlignmentWidget* timeAlignment_{};
     DerivedFieldsWidget* derivedFields_{};
     ProtocolWidget* protocol_{};
     ReplayWidget* replay_{};

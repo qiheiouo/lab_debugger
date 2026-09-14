@@ -13,6 +13,7 @@
 #include "lab/core/source_manager.hpp"
 #include "lab/core/time_series_store.hpp"
 #include "lab/core/threshold_alert_engine.hpp"
+#include "lab/core/time_alignment.hpp"
 
 #include <QByteArray>
 #include <QObject>
@@ -74,6 +75,7 @@ public slots:
     bool setDerivedFields(const QVariantList& definitions);
     bool setAlertRules(const QVariantList& definitions);
     bool setHealthAlertRules(const QVariantList& definitions);
+    bool setTimeAlignmentRules(const QVariantList& definitions);
     bool addManualMarker(const QString& message);
     void loadProtocolFile(const QString& path);
     void clearProtocol();
@@ -152,6 +154,9 @@ signals:
     void alertRulesRestored(QVariantList definitions);
     void healthAlertRulesConfigured(bool success, QStringList messages);
     void healthAlertRulesRestored(QVariantList definitions);
+    void timeAlignmentRulesConfigured(bool success, QStringList messages);
+    void timeAlignmentRulesRestored(QVariantList definitions);
+    void timeAlignmentStatusChanged(QVariantList statuses);
     void timelineEventsChanged(QVariantList events);
     void rosbagInspectionStarted(QString source, QString destination);
     void rosbagInspectionFinished(bool success,
@@ -193,6 +198,7 @@ private:
     void disarmRemoteAgentHealthIdentity(const std::string& agentId);
     void publishTimelineEvent(lab::core::SessionEvent event, bool record);
     void clearTimelineEvents();
+    void publishTimeAlignmentStatus();
     void leaveReplayForLiveSource();
     void publishLocalSources();
     void publishParserSources();
@@ -229,6 +235,8 @@ private:
     lab::core::DerivedFieldEngine derivedFields_;
     lab::core::ThresholdAlertEngine alertRules_;
     lab::core::HealthAlertEngine healthAlertRules_;
+    lab::core::TimeAlignmentEngine timeAlignment_;
+    std::atomic_bool timeAlignmentFrozen_{};
     std::set<std::pair<std::string, std::string>> remoteSubscriptions_;
     std::atomic<lab::core::Timestamp> latestLiveTimestamp_{};
     std::atomic_uint64_t nextTimelineSequence_{};
@@ -254,6 +262,7 @@ private:
     std::unordered_map<std::string, ActiveParserConfiguration>
         sourceParserConfigurations_;
     QTimer refreshTimer_;
+    QTimer timeAlignmentRefreshTimer_;
 };
 
 }  // namespace lab::app

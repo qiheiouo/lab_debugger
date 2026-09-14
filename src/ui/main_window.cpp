@@ -10,6 +10,7 @@
 #include "ui/send_panel.hpp"
 #include "ui/serial_panel.hpp"
 #include "ui/terminal_widget.hpp"
+#include "ui/time_alignment_widget.hpp"
 
 #include <QAction>
 #include <QCloseEvent>
@@ -48,6 +49,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     plot_ = new PlotWidget(&session_.timeSeries(), this);
     derivedFields_ = new DerivedFieldsWidget(this);
     alerts_ = new AlertsWidget(this);
+    timeAlignment_ = new TimeAlignmentWidget(this);
     protocol_ = new ProtocolWidget(this);
     replay_ = new ReplayWidget(this);
     sendPanel_ = new SendPanel(this);
@@ -57,6 +59,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs->addTab(plot_, tr("实时曲线"));
     tabs->addTab(derivedFields_, tr("派生变量"));
     tabs->addTab(alerts_, tr("Marker 与告警"));
+    tabs->addTab(timeAlignment_, tr("时间同步"));
     tabs->addTab(protocol_, tr("协议解析"));
     tabs->addTab(replay_, tr("Session 回放"));
 
@@ -141,6 +144,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &session_, &lab::app::SerialSession::setAlertRules);
     connect(alerts_, &AlertsWidget::applyHealthRequested,
             &session_, &lab::app::SerialSession::setHealthAlertRules);
+    connect(timeAlignment_, &TimeAlignmentWidget::applyRequested,
+            &session_, &lab::app::SerialSession::setTimeAlignmentRules);
     connect(protocol_, &ProtocolWidget::csvConfigurationRequested,
             this, [this](const QString& sourceId, const QStringList& fields) {
                 if (sourceId.isEmpty()) {
@@ -258,6 +263,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             alerts_, &AlertsWidget::showHealthConfigurationResult);
     connect(&session_, &lab::app::SerialSession::healthAlertRulesRestored,
             alerts_, &AlertsWidget::setHealthDefinitions);
+    connect(&session_, &lab::app::SerialSession::timeAlignmentRulesConfigured,
+            timeAlignment_, &TimeAlignmentWidget::showConfigurationResult);
+    connect(&session_, &lab::app::SerialSession::timeAlignmentRulesRestored,
+            timeAlignment_, &TimeAlignmentWidget::setDefinitions);
+    connect(&session_, &lab::app::SerialSession::timeAlignmentStatusChanged,
+            timeAlignment_, &TimeAlignmentWidget::setStatuses);
     connect(&session_, &lab::app::SerialSession::timelineEventsChanged,
             alerts_, &AlertsWidget::setTimelineEvents);
     connect(&session_, &lab::app::SerialSession::timelineEventsChanged,

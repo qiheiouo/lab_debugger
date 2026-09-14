@@ -30,6 +30,7 @@ public:
 
     using SampleHandler = std::function<void(const DataSample&)>;
     using SampleBatchHandler = std::function<void(std::span<const DataSample>)>;
+    using SampleTransform = std::function<DataSample(DataSample)>;
     using FrameHandler = std::function<void(const FrameEvent&)>;
 
     explicit ProcessingPipeline(TimeSeriesStore& store);
@@ -43,6 +44,7 @@ public:
     void setQualifyFieldNames(bool enabled);
     void setSampleHandler(SampleHandler handler);
     void setSampleBatchHandler(SampleBatchHandler handler);
+    void setSampleTransform(SampleTransform transform);
     void setProtocolDefinition(ProtocolDefinition definition);
     void clearProtocolDefinition();
     bool setSourceConfiguration(std::string sourceId,
@@ -85,6 +87,7 @@ private:
     std::mutex handlerMutex_;
     SampleHandler sampleHandler_;
     SampleBatchHandler sampleBatchHandler_;
+    SampleTransform sampleTransform_;
     std::mutex frameHandlerMutex_;
     FrameHandler frameHandler_;
     std::jthread worker_;

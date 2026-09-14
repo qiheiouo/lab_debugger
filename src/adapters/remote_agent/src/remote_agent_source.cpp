@@ -763,16 +763,17 @@ void RemoteAgentSource::handleHello(const lab::core::agent::Hello& hello) {
 void RemoteAgentSource::handleSample(
     const lab::core::agent::Frame& frame,
     const lab::core::agent::SampleBatch& batch) {
+    const auto receiveTimestamp = lab::core::nowTimestampNs();
     const auto timestamp = frame.sourceTimestamp != 0
                                ? frame.sourceTimestamp
                                : (frame.agentReceiveTimestamp != 0
                                       ? frame.agentReceiveTimestamp
-                                      : lab::core::nowTimestampNs());
+                                      : receiveTimestamp);
     const auto id = agentSourceId(batch.topic);
     if (!batch.serializedData.empty()) {
         publishData({id,
-                     frame.sourceTimestamp,
-                     lab::core::nowTimestampNs(),
+                     timestamp,
+                     receiveTimestamp,
                      frame.sequence,
                      lab::core::Direction::Rx,
                      batch.serializedData});
@@ -793,7 +794,9 @@ void RemoteAgentSource::handleSample(
                            batch.topic + "." + field.path,
                            value,
                            field.unit,
-                           frame.sequence});
+                           frame.sequence,
+                           timestamp,
+                           receiveTimestamp});
     }
     publishSamples(samples);
     const auto callbacks = agentCallbacks();

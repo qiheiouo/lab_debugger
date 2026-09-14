@@ -43,6 +43,8 @@ constexpr qint64 maximumAlertConfigurationBytes = 1024 * 1024;
 constexpr qsizetype maximumAlertDefinitions = 128;
 constexpr qint64 maximumHealthAlertConfigurationBytes = 1024 * 1024;
 constexpr qsizetype maximumHealthAlertDefinitions = 128;
+constexpr qint64 maximumTimeAlignmentConfigurationBytes = 1024 * 1024;
+constexpr qsizetype maximumTimeAlignmentDefinitions = 64;
 constexpr qint64 maximumAlertWindowMs = 86'400'000;
 constexpr qint64 maximumEventLogBytes = 64 * 1024 * 1024;
 constexpr qint64 maximumEventLineBytes = 64 * 1024;
@@ -224,6 +226,25 @@ QVariantList healthAlertDefinitionsToVariant(
     return result;
 }
 
+QVariantList timeAlignmentDefinitionsToVariant(
+    const std::vector<lab::core::TimeAlignmentRule>& definitions) {
+    QVariantList result;
+    result.reserve(static_cast<qsizetype>(definitions.size()));
+    for (const auto& definition : definitions) {
+        QVariantMap value;
+        value.insert(QStringLiteral("source_id"),
+                     QString::fromStdString(definition.sourceId));
+        value.insert(QStringLiteral("mode"),
+                     QString::fromLatin1(lab::core::toString(definition.mode)));
+        value.insert(QStringLiteral("offset_ns"),
+                     definition.offsetNs
+                         ? QVariant::fromValue<qlonglong>(*definition.offsetNs)
+                         : QVariant{});
+        result.push_back(value);
+    }
+    return result;
+}
+
 std::optional<lab::core::Timestamp> parseTimestampField(std::string_view line) {
     constexpr std::string_view key = "\"timestamp_ns\"";
     std::size_t position = 0;
@@ -291,6 +312,10 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
     sourceManager_.setCallbacks({
         [this](const std::string& key, const lab::core::DataChunk& chunk) {
             if (chunk.direction == lab::core::Direction::Rx) {
+                static_cast<void>(timeAlignment_.align(
+                    chunk.sourceId,
+                    chunk.sourceTimestamp,
+                    chunk.receiveTimestamp));
                 healthAlertRules_.observeActivity(
                     chunk.sourceId, chunk.receiveTimestamp);
             }
@@ -390,35 +415,45 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
                 },
                 Qt::QueuedConnection);
         },
-        [this](const std::string& key, const lab::core::DataSample& sample) {
-            if (key != remoteAgentSourceKey) {
-                return;
-            }
-            {
-                std::scoped_lock routeLock(routingMutex_);
-                const auto declared = isDeclaredRecordingSource(key);
-                timeSeries_.append(sample);
-                updateLatestTimestamp(latestLiveTimestamp_, sample.timestamp);
-                if (declared) {
-                    recorder_.enqueueSample(sample);
-                }
-            }
-            discoverLiveField(sample.field);
-        },
+        {},
         [this](const std::string& key,
                std::span<const lab::core::DataSample> samples) {
             if (key != remoteAgentSourceKey || samples.empty()) return;
+            std::vector<lab::core::DataSample> alignedSamples;
+            alignedSamples.reserve(samples.size());
+            for (const auto& sample : samples) {
+                auto aligned = sample;
+                const auto sourceTimestamp = aligned.sourceTimestamp != 0
+                                                 ? aligned.sourceTimestamp
+                                                 : aligned.timestamp;
+                const auto result = timeAlignment_.align(
+                    aligned.sourceId,
+                    sourceTimestamp,
+                    aligned.receiveTimestamp,
+                    false);
+                aligned.timestamp = result.timestamp;
+                aligned.sourceTimestamp = sourceTimestamp;
+                alignedSamples.push_back(std::move(aligned));
+            }
             healthAlertRules_.observeActivity(
-                samples.front().sourceId, lab::core::nowTimestampNs());
+                alignedSamples.front().sourceId, lab::core::nowTimestampNs());
             std::vector<lab::core::DataSample> derived;
             {
                 std::scoped_lock routeLock(routingMutex_);
                 const auto recording = recorder_.isRecording();
                 const auto declared = isDeclaredRecordingSource(key);
-                if (!recording || declared) {
-                    processAlerts(samples, declared);
-                    derived = appendDerivedSamples(samples, declared);
+                for (const auto& sample : alignedSamples) {
+                    timeSeries_.append(sample);
+                    updateLatestTimestamp(latestLiveTimestamp_, sample.timestamp);
+                    if (declared) recorder_.enqueueSample(sample);
                 }
+                if (!recording || declared) {
+                    processAlerts(alignedSamples, declared);
+                    derived = appendDerivedSamples(alignedSamples, declared);
+                }
+            }
+            for (const auto& sample : alignedSamples) {
+                discoverLiveField(sample.field);
             }
             for (const auto& output : derived) discoverLiveField(output.field);
         }});
@@ -465,6 +500,9 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
         },
         {},
         [this](const lab::core::ClockSyncEstimate& estimate) {
+            if (!timeAlignmentFrozen_.load()) {
+                timeAlignment_.updateRemoteClock(remoteAgent_.sourceId(), estimate);
+            }
             if (isDeclaredRecordingSource(std::string(remoteAgentSourceKey))) {
                 recorder_.enqueueEvent({
                     estimate.measuredAtNs,
@@ -595,6 +633,19 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
         {}});
 
     processing_.setQualifyFieldNames(true);
+    processing_.setSampleTransform([this](lab::core::DataSample sample) {
+        const auto sourceTimestamp = sample.sourceTimestamp != 0
+                                         ? sample.sourceTimestamp
+                                         : sample.timestamp;
+        const auto result = timeAlignment_.align(
+            sample.sourceId,
+            sourceTimestamp,
+            sample.receiveTimestamp,
+            false);
+        sample.timestamp = result.timestamp;
+        sample.sourceTimestamp = sourceTimestamp;
+        return sample;
+    });
     processing_.setSampleHandler([this](const lab::core::DataSample& sample) {
         recorder_.enqueueSample(sample);
         updateLatestTimestamp(latestLiveTimestamp_, sample.timestamp);
@@ -631,6 +682,10 @@ SerialSession::SerialSession(QObject* parent) : QObject(parent) {
     refreshTimer_.setTimerType(Qt::PreciseTimer);
     connect(&refreshTimer_, &QTimer::timeout, this, &SerialSession::drainUiQueue);
     refreshTimer_.start();
+    timeAlignmentRefreshTimer_.setInterval(1000);
+    connect(&timeAlignmentRefreshTimer_, &QTimer::timeout,
+            this, &SerialSession::publishTimeAlignmentStatus);
+    timeAlignmentRefreshTimer_.start();
 }
 
 SerialSession::~SerialSession() {
@@ -749,6 +804,8 @@ void SerialSession::updateRemoteAgentHealthIdentity(const std::string& agentId) 
     if (!remoteAgentHealthIdentity_.empty() &&
         remoteAgentHealthIdentity_ != agentId) {
         disarmRemoteAgentHealthIdentity(remoteAgentHealthIdentity_);
+        timeAlignment_.clearRemoteClock(
+            std::string("ros-agent:") + remoteAgentHealthIdentity_);
     }
     remoteAgentHealthIdentity_ = agentId;
 }
@@ -827,6 +884,7 @@ void SerialSession::clearTimelineEvents() {
 
 void SerialSession::leaveReplayForLiveSource() {
     replay_.close();
+    timeAlignmentFrozen_.store(false);
     if (!replaying_.exchange(false)) return;
     replayRawOnly_.store(false);
     replayStructuredRosbag_.store(false);
@@ -838,6 +896,7 @@ void SerialSession::leaveReplayForLiveSource() {
     }
     alertRules_.resetValues();
     healthAlertRules_.resetValues();
+    timeAlignment_.resetMeasurements();
     armHealthAlertTargets();
     latestLiveTimestamp_.store(0);
     nextTimelineSequence_.store(0);
@@ -1444,6 +1503,7 @@ void SerialSession::resetParserDependentState() {
     derivedFields_.resetValues();
     alertRules_.resetValues();
     healthAlertRules_.resetValues();
+    timeAlignment_.resetMeasurements();
     armHealthAlertTargets();
     latestLiveTimestamp_.store(0);
     timeSeries_.clear();
@@ -1639,6 +1699,104 @@ bool SerialSession::setHealthAlertRules(const QVariantList& definitions) {
     return true;
 }
 
+bool SerialSession::setTimeAlignmentRules(const QVariantList& definitions) {
+    if (recorder_.isRecording()) {
+        emit timeAlignmentRulesConfigured(
+            false,
+            {tr("Session 记录期间时间对齐策略已冻结，请停止记录后再修改")});
+        return false;
+    }
+    if (definitions.size() > maximumTimeAlignmentDefinitions) {
+        emit timeAlignmentRulesConfigured(
+            false, {tr("时间对齐策略不能超过 64 项")});
+        return false;
+    }
+
+    std::vector<lab::core::TimeAlignmentRule> requested;
+    requested.reserve(static_cast<std::size_t>(definitions.size()));
+    for (const auto& value : definitions) {
+        const auto definition = value.toMap();
+        const auto sourceId =
+            definition.value(QStringLiteral("source_id")).toString().trimmed();
+        const auto modeText =
+            definition.value(QStringLiteral("mode")).toString().trimmed();
+        const auto mode = lab::core::timeAlignmentModeFromString(
+            utf8String(modeText));
+        std::optional<lab::core::Timestamp> offset;
+        const auto offsetValue = definition.value(QStringLiteral("offset_ns"));
+        if (offsetValue.isValid() && !offsetValue.isNull()) {
+            bool valid = false;
+            const auto parsed = offsetValue.toLongLong(&valid);
+            if (!valid) {
+                emit timeAlignmentRulesConfigured(
+                    false,
+                    {tr("来源 %1 的偏移量不是有效整数").arg(sourceId)});
+                return false;
+            }
+            offset = static_cast<lab::core::Timestamp>(parsed);
+        }
+        requested.push_back({utf8String(sourceId),
+                             mode.value_or(
+                                 static_cast<lab::core::TimeAlignmentMode>(-1)),
+                             offset});
+    }
+
+    const auto result = timeAlignment_.configure(std::move(requested));
+    if (!result.success()) {
+        QStringList messages;
+        for (const auto& issue : result.issues) {
+            messages.push_back(
+                tr("第 %1 行：%2")
+                    .arg(static_cast<qulonglong>(issue.index + 1))
+                    .arg(QString::fromStdString(issue.message)));
+        }
+        emit timeAlignmentRulesConfigured(false, messages);
+        return false;
+    }
+    const auto count = timeAlignment_.rules().size();
+    emit timeAlignmentRulesConfigured(
+        true,
+        {count == 0
+             ? tr("已恢复默认源时间；没有额外对齐策略")
+             : tr("已应用 %1 个时间对齐策略；原始时间戳保持不变")
+                   .arg(static_cast<qulonglong>(count))});
+    publishTimeAlignmentStatus();
+    return true;
+}
+
+void SerialSession::publishTimeAlignmentStatus() {
+    QVariantList statuses;
+    const auto snapshot = timeAlignment_.statuses();
+    statuses.reserve(static_cast<qsizetype>(snapshot.size()));
+    for (const auto& status : snapshot) {
+        QVariantMap item;
+        item.insert(QStringLiteral("source_id"),
+                    QString::fromStdString(status.sourceId));
+        item.insert(QStringLiteral("mode"),
+                    QString::fromLatin1(lab::core::toString(status.mode)));
+        item.insert(QStringLiteral("sample_count"),
+                    QVariant::fromValue<qulonglong>(status.sampleCount));
+        item.insert(QStringLiteral("fallback_count"),
+                    QVariant::fromValue<qulonglong>(status.fallbackCount));
+        item.insert(QStringLiteral("out_of_order_count"),
+                    QVariant::fromValue<qulonglong>(status.outOfOrderCount));
+        item.insert(QStringLiteral("applied_offset_ns"),
+                    QVariant::fromValue<qlonglong>(status.appliedOffsetNs));
+        if (status.uncertaintyNs) {
+            item.insert(QStringLiteral("uncertainty_ns"),
+                        QVariant::fromValue<qlonglong>(*status.uncertaintyNs));
+        }
+        if (status.lastLatencyNs) {
+            item.insert(QStringLiteral("latency_ns"),
+                        QVariant::fromValue<qlonglong>(*status.lastLatencyNs));
+        }
+        item.insert(QStringLiteral("last_timestamp_ns"),
+                    QVariant::fromValue<qlonglong>(status.lastAlignedTimestamp));
+        statuses.push_back(item);
+    }
+    emit timeAlignmentStatusChanged(statuses);
+}
+
 bool SerialSession::addManualMarker(const QString& message) {
     if (replaying_.load()) {
         emit sourceError(tr("回放 Session 是只读的，不能添加实时 Marker"));
@@ -1741,7 +1899,7 @@ bool SerialSession::startSession(const QString& directory) {
         return false;
     }
     lab::core::SessionStartOptions options;
-    options.softwareVersion = "0.21.0";
+    options.softwareVersion = "0.22.0";
     options.sessionName = QFileInfo(directory).fileName().toStdString();
     options.machineName = QSysInfo::machineHostName().toStdString();
     options.operatingSystem = QSysInfo::prettyProductName().toStdString();
@@ -1796,14 +1954,24 @@ bool SerialSession::startSession(const QString& directory) {
             std::nullopt});
     }
 
+    timeAlignmentFrozen_.store(true);
+    options.timeAlignmentRules = timeAlignment_.snapshotRules();
     const auto sourceCount = options.sources.size();
     bool result = false;
     {
         std::scoped_lock routeLock(routingMutex_);
+        const auto frozenAlignment =
+            timeAlignment_.configure(options.timeAlignmentRules);
+        if (!frozenAlignment.success()) {
+            timeAlignmentFrozen_.store(false);
+            emit recordingChanged(false, tr("时间对齐策略冻结失败"));
+            return false;
+        }
         processing_.flush();
         derivedFields_.resetValues();
         alertRules_.resetValues();
         healthAlertRules_.resetValues();
+        timeAlignment_.resetMeasurements();
         armHealthAlertTargets();
         latestLiveTimestamp_.store(0);
         nextTimelineSequence_.store(0);
@@ -1815,6 +1983,7 @@ bool SerialSession::startSession(const QString& directory) {
         result = recorder_.start(
             std::filesystem::path(directory.toStdWString()), std::move(options));
         if (!result) {
+            timeAlignmentFrozen_.store(false);
             std::scoped_lock lock(recordingSourcesMutex_);
             recordingSourceKeys_.clear();
         }
@@ -1853,6 +2022,7 @@ void SerialSession::stopSession() {
         std::scoped_lock lock(recordingSourcesMutex_);
         recordingSourceKeys_.clear();
     }
+    timeAlignmentFrozen_.store(false);
     emit recordingChanged(false, tr("Session 记录已安全结束"));
 }
 
@@ -1879,10 +2049,13 @@ bool SerialSession::openReplaySession(const QString& directory) {
         alertDefinitionsToVariant(alertRules_.definitions());
     const auto previousHealthAlertRules =
         healthAlertDefinitionsToVariant(healthAlertRules_.definitions());
+    const auto previousTimeAlignmentRules =
+        timeAlignmentDefinitionsToVariant(timeAlignment_.rules());
 
     sourceManager_.closeAll();
     replay_.close();
     replaying_.store(false);
+    timeAlignmentFrozen_.store(false);
     clearTimelineEvents();
     {
         std::scoped_lock routeLock(routingMutex_);
@@ -1891,6 +2064,7 @@ bool SerialSession::openReplaySession(const QString& directory) {
         derivedFields_.resetValues();
         alertRules_.resetValues();
         healthAlertRules_.resetValues();
+        timeAlignment_.resetMeasurements();
         timeSeries_.clear();
     }
     {
@@ -2449,6 +2623,84 @@ bool SerialSession::openReplaySession(const QString& directory) {
         }
     }
 
+    QVariantList restoredTimeAlignmentRules;
+    const auto timeAlignmentPath = QDir(sessionDirectory).filePath(
+        QStringLiteral("configuration/time_alignment.json"));
+    if (QFileInfo::exists(timeAlignmentPath)) {
+        QFile timeAlignmentFile(timeAlignmentPath);
+        if (!timeAlignmentFile.open(QIODevice::ReadOnly)) {
+            emit replayOpenFailed(tr("无法读取 Session 时间对齐配置"));
+            return false;
+        }
+        const auto declaredSize = timeAlignmentFile.size();
+        if (declaredSize < 0 ||
+            declaredSize > maximumTimeAlignmentConfigurationBytes) {
+            emit replayOpenFailed(tr("Session 时间对齐配置超过 1 MiB 安全限制"));
+            return false;
+        }
+        const auto contents = timeAlignmentFile.readAll();
+        if (timeAlignmentFile.error() != QFileDevice::NoError ||
+            contents.size() != declaredSize) {
+            emit replayOpenFailed(tr("Session 时间对齐配置读取不完整"));
+            return false;
+        }
+        QJsonParseError parseError;
+        const auto document = QJsonDocument::fromJson(contents, &parseError);
+        if (parseError.error != QJsonParseError::NoError ||
+            !document.isObject()) {
+            emit replayOpenFailed(tr("Session 时间对齐配置已损坏"));
+            return false;
+        }
+        const auto object = document.object();
+        const auto formatVersion = object.value(QStringLiteral("format_version"));
+        const auto rulesValue = object.value(QStringLiteral("rules"));
+        if (!formatVersion.isDouble() || formatVersion.toDouble() != 1.0 ||
+            !rulesValue.isArray()) {
+            emit replayOpenFailed(
+                tr("Session 时间对齐格式版本不受支持或规则缺失"));
+            return false;
+        }
+        const auto rules = rulesValue.toArray();
+        if (rules.size() > maximumTimeAlignmentDefinitions) {
+            emit replayOpenFailed(tr("Session 时间对齐配置超过 64 项安全限制"));
+            return false;
+        }
+        for (const auto& value : rules) {
+            if (!value.isObject()) {
+                emit replayOpenFailed(tr("Session 时间对齐配置包含无效条目"));
+                return false;
+            }
+            const auto rule = value.toObject();
+            const auto sourceId = rule.value(QStringLiteral("source_id"));
+            const auto mode = rule.value(QStringLiteral("mode"));
+            const auto offset = rule.value(QStringLiteral("offset_ns"));
+            const auto validOffset = offset.isNull() ||
+                (offset.isDouble() && std::isfinite(offset.toDouble()) &&
+                 std::floor(offset.toDouble()) == offset.toDouble() &&
+                 offset.toDouble() >=
+                     -static_cast<double>(
+                         lab::core::TimeAlignmentEngine::maximumManualOffsetNs) &&
+                 offset.toDouble() <=
+                     static_cast<double>(
+                         lab::core::TimeAlignmentEngine::maximumManualOffsetNs));
+            if (!sourceId.isString() || !mode.isString() || !validOffset) {
+                emit replayOpenFailed(
+                    tr("Session 时间对齐配置条目类型或范围无效"));
+                return false;
+            }
+            QVariantMap restored;
+            restored.insert(QStringLiteral("source_id"), sourceId.toString());
+            restored.insert(QStringLiteral("mode"), mode.toString());
+            if (offset.isDouble()) {
+                restored.insert(
+                    QStringLiteral("offset_ns"),
+                    QVariant::fromValue<qlonglong>(
+                        static_cast<qlonglong>(offset.toDouble())));
+            }
+            restoredTimeAlignmentRules.push_back(restored);
+        }
+    }
+
     std::deque<lab::core::SessionEvent> restoredEvents;
     const auto eventPath = QDir(sessionDirectory).filePath(QStringLiteral("events.jsonl"));
     if (QFileInfo::exists(eventPath)) {
@@ -2516,19 +2768,31 @@ bool SerialSession::openReplaySession(const QString& directory) {
             return false;
         }
     }
+    timeAlignmentFrozen_.store(true);
+    if (!setTimeAlignmentRules(restoredTimeAlignmentRules)) {
+        timeAlignmentFrozen_.store(false);
+        emit replayOpenFailed(tr("Session 时间对齐配置无法通过安全校验"));
+        return false;
+    }
     if (!setHealthAlertRules(restoredHealthAlertRules)) {
+        static_cast<void>(setTimeAlignmentRules(previousTimeAlignmentRules));
+        timeAlignmentFrozen_.store(false);
         emit replayOpenFailed(
             tr("Session 运行健康告警无法通过安全校验"));
         return false;
     }
     if (!setAlertRules(restoredAlertRules)) {
         static_cast<void>(setHealthAlertRules(previousHealthAlertRules));
+        static_cast<void>(setTimeAlignmentRules(previousTimeAlignmentRules));
+        timeAlignmentFrozen_.store(false);
         emit replayOpenFailed(tr("Session 告警规则无法通过安全校验"));
         return false;
     }
     if (!setDerivedFields(restoredDerivedFields)) {
         static_cast<void>(setAlertRules(previousAlertRules));
         static_cast<void>(setHealthAlertRules(previousHealthAlertRules));
+        static_cast<void>(setTimeAlignmentRules(previousTimeAlignmentRules));
+        timeAlignmentFrozen_.store(false);
         emit replayOpenFailed(tr("Session 派生变量配置无法通过安全校验"));
         return false;
     }
@@ -2542,7 +2806,9 @@ bool SerialSession::openReplaySession(const QString& directory) {
         }
         static_cast<void>(setAlertRules(previousAlertRules));
         static_cast<void>(setHealthAlertRules(previousHealthAlertRules));
+        static_cast<void>(setTimeAlignmentRules(previousTimeAlignmentRules));
         static_cast<void>(setDerivedFields(previousDerivedFields));
+        timeAlignmentFrozen_.store(false);
         emit replayOpenFailed(tr("无法打开回放文件；详细原因已写入状态栏和日志"));
         return false;
     }
@@ -2561,6 +2827,7 @@ bool SerialSession::openReplaySession(const QString& directory) {
     emit derivedFieldsRestored(restoredDerivedFields);
     emit alertRulesRestored(restoredAlertRules);
     emit healthAlertRulesRestored(restoredHealthAlertRules);
+    emit timeAlignmentRulesRestored(restoredTimeAlignmentRules);
     emit timelineEventsChanged(restoredEventValues);
     const auto replayStatus = replay_.status();
     emit replayOpened(sessionDirectory,
@@ -2688,7 +2955,7 @@ void SerialSession::importRosbag2(const QString& source,
             options.source = std::filesystem::path(source.toStdWString());
             options.destination = std::filesystem::path(destination.toStdWString());
             options.sessionName = QFileInfo(destination).fileName().toStdString();
-            options.softwareVersion = "0.21.0";
+            options.softwareVersion = "0.22.0";
             options.includedTopics.reserve(
                 static_cast<std::size_t>(selectedTopics.size()));
             for (const auto& selectedValue : selectedTopics) {
@@ -2770,6 +3037,7 @@ void SerialSession::cancelRosbag2Import() {
 void SerialSession::closeReplay() {
     replay_.close();
     replaying_.store(false);
+    timeAlignmentFrozen_.store(false);
     replayRawOnly_.store(false);
     replayStructuredRosbag_.store(false);
     std::scoped_lock routeLock(routingMutex_);
@@ -2779,6 +3047,7 @@ void SerialSession::closeReplay() {
     derivedFields_.resetValues();
     alertRules_.resetValues();
     healthAlertRules_.resetValues();
+    timeAlignment_.resetMeasurements();
     armHealthAlertTargets();
     clearTimelineEvents();
 }
@@ -2805,6 +3074,7 @@ void SerialSession::seekReplay(double fraction) {
         derivedFields_.resetValues();
         alertRules_.resetValues();
         healthAlertRules_.resetValues();
+        timeAlignment_.resetMeasurements();
         replay_.seekFraction(fraction);
         timeSeries_.clear();
         {

@@ -23,6 +23,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 独立 TCP 线程的 `RemoteAgentSource`、5 秒握手超时、严格序号检查与 Ping/Pong；
 - 可选指数退避自动重连、同端点订阅恢复与手动断开取消重试；
 - 基于 Ping/Pong 的 Agent 时钟偏移、RTT 与不确定度估计，结果显示并写入 Session 事件；
+- 逐来源统一时间轴：源时间、电脑接收时间、手动偏移和 ROS Agent 自动校正，原始时间证据保留、同步质量可视化、Session 冻结与确定性回放；
 - ROS Agent 身份、Topic 目录、订阅/取消订阅 UI，以及 CDR/结构化字段双路记录；
 - Remote Agent 本机模拟服务器回环测试；
 - 已在 Ubuntu 22.04/ROS2 Humble + GCC 11 验证的 `lab_debug_agent` ament 包、单客户端 TCP 服务端和 graph 更新；
@@ -30,7 +31,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 后台 rosbag2 SQLite 预检/导入、`metadata.yaml` 无损保存与交叉校验、可搜索 Topic 筛选、分卷时间归并、原始 CDR 安全回放和常见 ROS 消息离线曲线；
 - 可测试的 `MockDataSource` 与核心测试。
 
-详细设计见 [架构文档](docs/ARCHITECTURE.md)，多设备操作见 [多数据源使用说明](docs/MULTI_SOURCE.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，逐来源配置见 [解析配置说明](docs/SOURCE_PARSERS.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，Marker 与告警见 [时间线说明](docs/MARKERS_ALERTS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
+详细设计见 [架构文档](docs/ARCHITECTURE.md)，多设备操作见 [多数据源使用说明](docs/MULTI_SOURCE.md)，时间策略见 [多源时间对齐说明](docs/TIME_ALIGNMENT.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，逐来源配置见 [解析配置说明](docs/SOURCE_PARSERS.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，Marker 与告警见 [时间线说明](docs/MARKERS_ALERTS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，当前完成度与暂停后的计划见 [项目进度与后续计划](docs/PROJECT_STATUS_AND_PLAN.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
 
 ## Windows 构建
 
@@ -65,6 +66,7 @@ cmake --install build --config Release --prefix dist/LabDebugger
 7. 如需平滑功率，再添加 `smooth_power`，表达式填写 `lowpass(power, 0.2)`；滤波结果同样进入曲线、Session 与确定性回放。
 8. 在“Marker 与告警”页可添加“开始加载”等人工标记；也可为完整字段名设置高于/低于阈值、回差和持续时间，或按精确 `sourceId` 监测错误频率与无数据超时。Marker 与告警会显示在曲线并随 Session 回放恢复。
 9. 若串口和网络协议不同，在“协议解析”页选择具体 `sourceId`，分别应用 CSV 字段或加载 JSON 协议；未单独配置的来源继承默认项。
+10. 多设备时在“时间同步”页选择策略：普通串口/网络通常保留源时间，缺少可靠设备时钟时可选电脑接收时间；ROS2 跨机数据可对 Agent 身份使用自动校正。先检查延迟、不确定度、回退和乱序计数，再开始 Session。
 
 若 STM32 输出二进制帧，打开“协议解析”页并加载
 `examples/protocols/stm32_status.json`。有效帧、丢弃字节和校验错误会分别统计，
@@ -90,6 +92,6 @@ cmake --install build --config Release --prefix dist/LabDebugger
 
 ## Remote ROS Agent 客户端
 
-左侧切换到“ROS Agent”页，填写 Linux Agent 地址和端口后连接。客户端必须在 5 秒内收到合法 `Hello`，随后才会显示为就绪；Agent 提供发现能力时客户端自动请求 Topic 目录。新版 Agent 还会为每个 topic/type 显示“内置语义、通用解析、仅原始 CDR、不可订阅”及具体原因，旧 Agent 则明确显示“未提供”。选择 Topic、可靠性与队列深度后可订阅或取消订阅；收到的原始 CDR 进入终端和 Session 原始流，数值及布尔字段直接进入实时曲线和 `values.csv`。客户端还会每 2 秒通过 Ping/Pong 更新 Agent 时钟偏移、RTT 与不确定度，连接页显示当前质量，记录期间写入 `clock_sync` 事件。启用自动重连后，临时网络故障按 250 ms 至 8 s 指数退避，同一端点重新握手成功后会刷新目录并恢复已订阅的 topic/type；手动断开会立即取消重试，协议错误不会无限重连。
+左侧切换到“ROS Agent”页，填写 Linux Agent 地址和端口后连接。客户端必须在 5 秒内收到合法 `Hello`，随后才会显示为就绪；Agent 提供发现能力时客户端自动请求 Topic 目录。新版 Agent 还会为每个 topic/type 显示“内置语义、通用解析、仅原始 CDR、不可订阅”及具体原因，旧 Agent 则明确显示“未提供”。选择 Topic、可靠性与队列深度后可订阅或取消订阅；收到的原始 CDR 进入终端和 Session 原始流，数值及布尔字段直接进入实时曲线和 `values.csv`。客户端还会每 2 秒通过 Ping/Pong 更新 Agent 时钟偏移、RTT 与不确定度；连接页显示当前质量，“时间同步”页可把 Agent 身份及其所有 Topic 校正到桌面统一时间轴，记录期间同时保存确定性策略和 `clock_sync` 事件。启用自动重连后，临时网络故障按 250 ms 至 8 s 指数退避，同一端点重新握手成功后会刷新目录并恢复已订阅的 topic/type；手动断开会立即取消重试，协议错误不会无限重连。
 
 Linux/ROS2 Humble Agent 位于 [`agent/ros2/lab_debug_agent`](agent/ros2/lab_debug_agent/README.md)。Agent 对内置常见消息保留带单位的语义映射，对其余已安装 C++ 与 introspection typesupport 的消息递归展开标量、字符串、嵌套成员和数组；无法安全结构化的内容仍保留原始 CDR。ament 包此前已在 Ubuntu 22.04.5 + ROS2 Humble + GCC 11.4 环境完成构建、launch、真实 ROS graph/CDR、QoS、订阅生命周期、错误恢复、断线重连和 SIGINT 自动测试。协议暂不提供认证或加密，推荐让 Agent 只监听回环地址并通过 SSH 隧道连接。

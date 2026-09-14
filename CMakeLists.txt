@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.21.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.22.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -44,6 +44,7 @@ add_library(lab_core STATIC
     src/core/src/source_manager.cpp
     src/core/src/time_series_store.cpp
     src/core/src/threshold_alert_engine.cpp
+    src/core/src/time_alignment.cpp
 )
 target_include_directories(lab_core PUBLIC src/core/include)
 target_link_libraries(lab_core PUBLIC Threads::Threads)
@@ -154,6 +155,8 @@ if(LAB_DEBUGGER_BUILD_GUI)
             src/ui/serial_panel.hpp
             src/ui/terminal_widget.cpp
             src/ui/terminal_widget.hpp
+            src/ui/time_alignment_widget.cpp
+            src/ui/time_alignment_widget.hpp
         )
         target_include_directories(lab_app_ui PUBLIC src)
         target_link_libraries(lab_app_ui
@@ -174,6 +177,7 @@ if(LAB_DEBUGGER_BUILD_GUI)
         install(FILES
             docs/RUN_WINDOWS.txt
             docs/MULTI_SOURCE.md
+            docs/TIME_ALIGNMENT.md
             DESTINATION .
         )
         qt_generate_deploy_app_script(
@@ -204,6 +208,9 @@ if(LAB_DEBUGGER_BUILD_TESTS)
     add_executable(lab_clock_sync_tests tests/test_clock_sync.cpp)
     target_link_libraries(lab_clock_sync_tests PRIVATE lab_core)
     add_test(NAME lab_clock_sync_tests COMMAND lab_clock_sync_tests)
+    add_executable(lab_time_alignment_tests tests/test_time_alignment.cpp)
+    target_link_libraries(lab_time_alignment_tests PRIVATE lab_core)
+    add_test(NAME lab_time_alignment_tests COMMAND lab_time_alignment_tests)
     add_executable(lab_agent_server_session_tests tests/test_agent_server_session.cpp)
     target_link_libraries(lab_agent_server_session_tests PRIVATE lab_core)
     add_test(NAME lab_agent_server_session_tests COMMAND lab_agent_server_session_tests)
@@ -367,6 +374,20 @@ if(LAB_DEBUGGER_BUILD_TESTS)
             COMMAND lab_dynamic_local_source_tests
         )
         set_tests_properties(lab_dynamic_local_source_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
+            TIMEOUT 20
+        )
+        add_executable(lab_time_alignment_session_tests
+            tests/test_time_alignment_session.cpp
+        )
+        target_link_libraries(lab_time_alignment_session_tests
+            PRIVATE lab_app_ui Qt6::Core Qt6::Network
+        )
+        add_test(NAME lab_time_alignment_session_tests
+            COMMAND lab_time_alignment_session_tests
+        )
+        set_tests_properties(lab_time_alignment_session_tests PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:${LAB_DEBUGGER_QT_BIN_DIR}"
             TIMEOUT 20

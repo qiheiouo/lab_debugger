@@ -1,6 +1,6 @@
 # Session 记录与回放格式
 
-Lab Debugger 0.3 引入目录式 Session，0.4 将 TCP/UDP 配置纳入同一格式，0.8 为 Remote Agent 增加时钟质量事件，0.11 允许 rosbag2 SQLite 安全转换到同一容器，0.15 允许串口、网络和 Remote Agent 同时进入一个 Session，0.16 保存安全派生变量并在回放时恢复，0.17 为派生表达式增加确定性的滤波与时域状态，0.18 增加可回放的 Marker 与阈值告警，0.19 冻结每个本地来源的独立解析配置，0.20 支持冻结任意多个已打开的本地实例，0.21 增加持续阈值和按精确来源统计的运行健康告警。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
+Lab Debugger 0.3 引入目录式 Session，0.4 将 TCP/UDP 配置纳入同一格式，0.8 为 Remote Agent 增加时钟质量事件，0.11 允许 rosbag2 SQLite 安全转换到同一容器，0.15 允许串口、网络和 Remote Agent 同时进入一个 Session，0.16 保存安全派生变量并在回放时恢复，0.17 为派生表达式增加确定性的滤波与时域状态，0.18 增加可回放的 Marker 与阈值告警，0.19 冻结每个本地来源的独立解析配置，0.20 支持冻结任意多个已打开的本地实例，0.21 增加持续阈值和按精确来源统计的运行健康告警，0.22 增加逐来源统一时间轴与原始时间证据。一次记录包含原始数据、解析结果、事件、协议快照和数据源配置，避免只保存 CSV 后无法重新分析。
 
 ```text
 session_YYYYMMDD_HHMMSS/
@@ -19,6 +19,7 @@ session_YYYYMMDD_HHMMSS/
    ├─ derived_fields.json
    ├─ alert_rules.json
    ├─ health_alert_rules.json
+   ├─ time_alignment.json
    └─ csv_fields.txt
 ```
 
@@ -26,7 +27,7 @@ session_YYYYMMDD_HHMMSS/
 
 - `metadata.json`：格式版本、记录状态、开始/结束时间、软件/机器信息、数据源和计数；开始时写入 `recording`，正常结束后改为 `completed`。
 - `raw/stream.ldraw`：RX/TX 原始字节、原始源时间、PC 接收时间、序号和 `sourceId`。这是重新解析时的权威数据。
-- `values.csv`：CSV、二进制协议、ROS 映射或派生计算产生的全部数值字段，采用 17 位有效数字保存 `double`。
+- `values.csv`：CSV、二进制协议、ROS 映射或派生计算产生的全部数值字段，采用 17 位有效数字保存 `double`。0.22 起列为 `timestamp_ns,source_id,sequence,field,value,unit,source_timestamp_ns,receive_timestamp_ns`：第一列是用于曲线/分析的有效时间，末两列保留推导依据。
 - `frames.jsonl`：二进制协议的逐帧结构化字段，也保留 enum、布尔和字节数组等非纯数值表现。
 - `events.jsonl`：连接状态、协议错误、Session 生命周期、Remote Agent 的 `clock_sync`，以及 `marker` / `alert` 时间线事件。时钟事件消息保存 `offset_ns`、`round_trip_ns`、`uncertainty_ns` 和滚动窗口 `samples` 数量。
 - `protocol/`、`configuration/`：记录开始时的协议、字段、派生表达式、告警规则与数据源配置快照。
@@ -38,6 +39,8 @@ session_YYYYMMDD_HHMMSS/
 `configuration/alert_rules.json` 格式版本 2 保存规则名、完整字段名、高于/低于条件、有限阈值、非负回差、0~24 小时持续时间和可选说明。版本 1 仍可读取，持续时间按 0 处理。阈值事件采用边沿触发：持续越界只写一条 `alert`，恢复到包含回差的安全区后才允许再次触发。
 
 `configuration/health_alert_rules.json` 格式版本 1 保存精确 `sourceId` 的滚动窗口错误次数或无数据超时规则。记录开始时两类规则和运行状态都会重置并冻结，记录期间拒绝修改。手动 `marker` 与实际 `alert` 结果直接保存到 `events.jsonl`；回放读取这些既成事实而不重新触发告警，因此暂停、倍速和跳转都不会生成重复事件。
+
+`configuration/time_alignment.json` 格式版本 1 保存逐来源策略。`source` 使用原始源时间，`receive` 使用桌面接收时间，`manual` 把 `offset_ns` 加到源时间，`remote_clock` 使用 Agent Ping/Pong 估计；记录开始时会把当时估计冻结为回放后备偏移。完整 Topic 可继承 Agent 身份规则，越具体的 `sourceId` 优先。记录期间拒绝修改策略；回放先完整校验版本、类型、数量和 ±7 天偏移范围，再事务式应用。旧 Session 缺少此文件时按默认源时间打开。
 
 0.19 的 metadata 增加 `source_parser_format: 1`。每个串口或网络 `configuration/source_<index>.json` 的 `parser` 对象保存最终采用的 CSV 字段、CSV/协议模式及协议快照引用；独立二进制协议原文位于 `protocol/source_<index>_initial.json`。回放严格按原 `sourceId` 恢复，缺失或错误快照不会静默退回默认 CSV。旧 Session 没有该版本字段时仍读取全局 `protocol/initial.json` 或 `configuration/csv_fields.txt`。
 
@@ -74,6 +77,7 @@ repeat:
 - 告警规则和 `marker` / `alert` 时间线会自动恢复；曲线只显示当前可见时间窗内的标记，历史回放保持只读且不会重复写入事件。
 - 逐来源 CSV/协议配置会先完整校验再应用；Remote Agent 与 rosbag2 的 CDR 专用路由保持独立。
 - 普通 CSV/二进制回放按记录中的 `sourceId` 分别恢复半行/半帧状态；曲线字段使用“`sourceId.字段`”，同名字段不会跨来源合并。
+- 时间对齐配置会随 Session 恢复；曲线重建时重新使用原始 `sourceTimestamp` / `receiveTimestamp` 和冻结策略，因此同一原始输入得到相同有效时间戳。
 
 rosbag2 导入 Session 在没有结构化采样时标记 `replay_mode: raw-only`，存在可信内置映射时标记 `replay_mode: rosbag2-structured`，并在 `configuration/rosbag2.json` 保存本次选中的 Topic/类型及 `field_mapping`。两种模式都保留选中数据的完整时间轴和原始 CDR，并明确跳过普通 CSV 与自定义二进制协议解析；结构化模式由专用 CDR 映射器按原始记录序号把数值直接送入曲线。`values.csv` 保存同一批结构化结果用于离线分析，`counts.samples`、`mapped_message_count` 和 `mapping_failure_count` 提供可核验计数。若来源带 `metadata.yaml`，其原始字节保存到 `configuration/rosbag2_metadata.yaml`，摘要、SHA-256 和 SQLite 交叉校验结果同时写入 `configuration/rosbag2.json` 与 `metadata.json.import.metadata_yaml`。单文件、分卷归并、Topic 筛选和限制见 [rosbag2 导入说明](ROSBAG2.md)。
 

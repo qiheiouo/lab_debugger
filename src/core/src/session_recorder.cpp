@@ -129,7 +129,8 @@ bool SessionRecorder::start(
             events_.close();
             return false;
         }
-        values_ << "timestamp_ns,source_id,sequence,field,value,unit\n";
+        values_ << "timestamp_ns,source_id,sequence,field,value,unit,"
+                   "source_timestamp_ns,receive_timestamp_ns\n";
     }
 
     if (!writeConfigurationFiles() || !writeMetadata("recording", 0) ||
@@ -302,10 +303,17 @@ void SessionRecorder::run(std::stop_token stopToken) {
 
 void SessionRecorder::writeItem(const PendingItem& item) {
     if (const auto* sample = std::get_if<DataSample>(&item)) {
+        const auto sourceTimestamp = sample->sourceTimestamp != 0
+                                         ? sample->sourceTimestamp
+                                         : sample->timestamp;
+        const auto receiveTimestamp = sample->receiveTimestamp != 0
+                                          ? sample->receiveTimestamp
+                                          : sample->timestamp;
         values_ << sample->timestamp << ',' << csvEscape(sample->sourceId) << ','
                 << sample->sequence << ',' << csvEscape(sample->field) << ','
                 << std::setprecision(17) << sample->value << ','
-                << csvEscape(sample->unit) << '\n';
+                << csvEscape(sample->unit) << ',' << sourceTimestamp << ','
+                << receiveTimestamp << '\n';
         {
             std::scoped_lock lock(mutex_);
             ++samples_;
@@ -394,6 +402,7 @@ bool SessionRecorder::writeMetadata(const std::string& status, Timestamp endTime
              << "  \"derived_fields\": \"configuration/derived_fields.json\",\n"
              << "  \"alert_rules\": \"configuration/alert_rules.json\",\n"
              << "  \"health_alert_rules\": \"configuration/health_alert_rules.json\",\n"
+             << "  \"time_alignment\": \"configuration/time_alignment.json\",\n"
              << "  \"source_parser_format\": 1,\n"
              << "  \"sources\": [";
     for (std::size_t index = 0; index < options.sources.size(); ++index) {
@@ -525,6 +534,37 @@ bool SessionRecorder::writeConfigurationFiles() {
         if (!health) {
             std::scoped_lock lock(mutex_);
             error_ = "cannot finish health alert configuration";
+            return false;
+        }
+    }
+
+    {
+        std::ofstream alignment(
+            root / "configuration" / "time_alignment.json", std::ios::trunc);
+        if (!alignment) {
+            std::scoped_lock lock(mutex_);
+            error_ = "cannot write time alignment configuration";
+            return false;
+        }
+        alignment << "{\n  \"format_version\": 1,\n  \"rules\": [";
+        for (std::size_t index = 0; index < options.timeAlignmentRules.size(); ++index) {
+            const auto& rule = options.timeAlignmentRules[index];
+            alignment << (index == 0 ? "\n" : ",\n")
+                      << "    {\"source_id\": \"" << jsonEscape(rule.sourceId)
+                      << "\", \"mode\": \"" << toString(rule.mode)
+                      << "\", \"offset_ns\": ";
+            if (rule.offsetNs) {
+                alignment << *rule.offsetNs;
+            } else {
+                alignment << "null";
+            }
+            alignment << '}';
+        }
+        if (!options.timeAlignmentRules.empty()) alignment << '\n';
+        alignment << "  ]\n}\n";
+        if (!alignment) {
+            std::scoped_lock lock(mutex_);
+            error_ = "cannot finish time alignment configuration";
             return false;
         }
     }

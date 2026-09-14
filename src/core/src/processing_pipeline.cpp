@@ -61,6 +61,11 @@ void ProcessingPipeline::setSampleBatchHandler(SampleBatchHandler handler) {
     sampleBatchHandler_ = std::move(handler);
 }
 
+void ProcessingPipeline::setSampleTransform(SampleTransform transform) {
+    std::scoped_lock lock(handlerMutex_);
+    sampleTransform_ = std::move(transform);
+}
+
 void ProcessingPipeline::setProtocolDefinition(ProtocolDefinition definition) {
     std::scoped_lock lock(parserMutex_, queueMutex_);
     queue_.clear();
@@ -221,15 +226,20 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
             }
         }
 
-        for (const auto& batch : sampleBatches) {
+        for (auto& batch : sampleBatches) {
             SampleHandler handler;
             SampleBatchHandler batchHandler;
+            SampleTransform transform;
             {
                 std::scoped_lock lock(handlerMutex_);
                 handler = sampleHandler_;
                 batchHandler = sampleBatchHandler_;
+                transform = sampleTransform_;
             }
-            for (const auto& sample : batch) {
+            for (auto& sample : batch) {
+                sample.sourceTimestamp = chunk.sourceTimestamp;
+                sample.receiveTimestamp = chunk.receiveTimestamp;
+                if (transform) sample = transform(std::move(sample));
                 store_.append(sample);
                 if (handler) handler(sample);
             }
@@ -251,7 +261,17 @@ void ProcessingPipeline::run(std::stop_token stopToken) {
                                           : field.name,
                         *field.numericValue,
                         field.unit,
-                        event.sequence});
+                        event.sequence,
+                        chunk.sourceTimestamp,
+                        chunk.receiveTimestamp});
+                    SampleTransform transform;
+                    {
+                        std::scoped_lock lock(handlerMutex_);
+                        transform = sampleTransform_;
+                    }
+                    if (transform) {
+                        decodedSamples.back() = transform(std::move(decodedSamples.back()));
+                    }
                     const auto& sample = decodedSamples.back();
                     store_.append(sample);
                     SampleHandler sampleHandler;

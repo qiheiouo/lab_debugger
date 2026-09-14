@@ -6,6 +6,7 @@
 #include "lab/core/health_alert_engine.hpp"
 #include "lab/core/raw_log_recorder.hpp"
 #include "lab/core/threshold_alert_engine.hpp"
+#include "lab/core/time_alignment.hpp"
 
 #include <condition_variable>
 #include <cstddef>
@@ -47,6 +48,7 @@ struct SessionStartOptions {
     std::vector<DerivedFieldDefinition> derivedFields;
     std::vector<ThresholdAlertDefinition> alertRules;
     std::vector<HealthAlertDefinition> healthAlertRules;
+    std::vector<TimeAlignmentRule> timeAlignmentRules;
     std::string protocolName;
     std::string protocolJson;
 };

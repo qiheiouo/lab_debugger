@@ -129,6 +129,8 @@ uncertainty = round_trip / 2
 
 `offset > 0` 表示 Agent 时钟领先客户端。客户端保留最近 16 个有效样本，并使用最低 RTT 样本抑制排队抖动；RTT 超过 10 秒、时间戳无效或 nonce 不匹配的响应不进入窗口。连接进入非 Open 状态时立即清空旧估计。结果显示在 ROS Agent 页面，并以 `clock_sync` 类别写入 Session 事件。
 
+桌面端接收 SampleBatch 时优先使用帧中的 source timestamp；若消息没有有效 Header，则使用 Agent receive timestamp；两者都不可用时才回退到桌面接收时间。写入原始记录与数值记录的是“按上述顺序选出的源时间”和桌面接收时间；统一时间轴只改变曲线和分析所用的 effective timestamp。线协议帧仍保留独立的 Agent receive timestamp，但当前 Session 不为“有效 Header 时间”和“Agent 接收时间”同时增加第三个 CSV 列。选择“远程时钟校正”后，桌面端从 Agent 时间中减去上述 offset；Session 开始时会冻结当前规则和校正值，记录期间的新 Ping/Pong 只保留诊断事件，不改变该次 Session 的时间轴。回放从保存的双时间戳与冻结配置重新计算，因此不依赖回放机器的当前网络时延。
+
 该方法假定往返链路大致对称，`±RTT/2` 只是单次测量的不确定度提示。它不会修改系统时钟，不能代替 NTP/PTP；需要严格跨机时间一致性时，应先在操作系统层完成同步。
 
 ## 7. ROS2 Humble 映射

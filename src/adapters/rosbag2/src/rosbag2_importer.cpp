@@ -1122,7 +1122,8 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
     if (!values) {
         return fail("cannot create imported Session values.csv");
     }
-    values << "timestamp_ns,source_id,sequence,field,value,unit\n";
+    values << "timestamp_ns,source_id,sequence,field,value,unit,"
+              "source_timestamp_ns,receive_timestamp_ns\n";
 
     std::uint64_t imported{};
     while (true) {
@@ -1177,7 +1178,8 @@ Rosbag2ImportResult importRosbag2(const Rosbag2ImportOptions& options,
                     values << sampleTimestamp << ',' << csvEscape(chunk.sourceId) << ','
                            << imported << ',' << csvEscape(topic + "." + field.path) << ','
                            << std::setprecision(17) << field.value << ','
-                           << csvEscape(field.unit) << '\n';
+                           << csvEscape(field.unit) << ',' << sampleTimestamp << ','
+                           << record.timestamp << '\n';
                     ++result.sampleCount;
                 }
                 if (!values) {

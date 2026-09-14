@@ -891,7 +891,13 @@ std::vector<DataSample> DerivedFieldEngine::consumeBatch(
                           definition.definition.name,
                           value.value,
                           definition.definition.unit,
-                          impl_->nextSequence++});
+                          impl_->nextSequence++,
+                          trigger.sourceTimestamp != 0
+                              ? trigger.sourceTimestamp
+                              : trigger.timestamp,
+                          trigger.receiveTimestamp != 0
+                              ? trigger.receiveTimestamp
+                              : trigger.timestamp});
     }
     return output;
 }

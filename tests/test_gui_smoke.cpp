@@ -6,12 +6,14 @@
 #include "ui/send_panel.hpp"
 #include "ui/serial_panel.hpp"
 #include "ui/network_panel.hpp"
+#include "ui/time_alignment_widget.hpp"
 
 #include <QApplication>
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QTableWidget>
 #include <QTimer>
 
 #include <iostream>
@@ -173,6 +175,37 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        lab::ui::TimeAlignmentWidget alignment;
+        QVariantMap alignmentRule;
+        alignmentRule.insert(QStringLiteral("source_id"),
+                             QStringLiteral("ros-agent:demo"));
+        alignmentRule.insert(QStringLiteral("mode"),
+                             QStringLiteral("remote_clock"));
+        alignment.setDefinitions({alignmentRule});
+        QVariantMap alignmentStatus;
+        alignmentStatus.insert(QStringLiteral("source_id"),
+                               QStringLiteral("ros-agent:demo:/imu"));
+        alignmentStatus.insert(QStringLiteral("mode"),
+                               QStringLiteral("remote_clock"));
+        alignmentStatus.insert(QStringLiteral("sample_count"), 4);
+        alignmentStatus.insert(QStringLiteral("fallback_count"), 0);
+        alignmentStatus.insert(QStringLiteral("out_of_order_count"), 0);
+        alignmentStatus.insert(QStringLiteral("applied_offset_ns"), -2'000'000);
+        alignmentStatus.insert(QStringLiteral("latency_ns"), 3'000'000);
+        alignmentStatus.insert(QStringLiteral("uncertainty_ns"), 500'000);
+        alignment.setStatuses({alignmentStatus});
+        const auto alignmentDefinitions = alignment.definitions();
+        auto* alignmentStatuses = alignment.findChild<QTableWidget*>(
+            QStringLiteral("timeAlignmentStatuses"));
+        if (alignmentDefinitions.size() != 1 ||
+            alignmentDefinitions.front().toMap()
+                    .value(QStringLiteral("mode")).toString() !=
+                QStringLiteral("remote_clock") ||
+            !alignmentStatuses || alignmentStatuses->rowCount() != 1) {
+            std::cerr << "GUI smoke test failed: time alignment UI does not preserve state\n";
+            return 1;
+        }
+
         lab::ui::ProtocolWidget protocol;
         QVariantMap parserSource;
         parserSource.insert(QStringLiteral("id"),
@@ -214,6 +247,11 @@ int main(int argc, char* argv[]) {
         if (!window.findChild<lab::ui::AlertsWidget*>(
                 QStringLiteral("alertsWidget"))) {
             std::cerr << "GUI smoke test failed: marker and alerts tab is missing\n";
+            return 1;
+        }
+        if (!window.findChild<lab::ui::TimeAlignmentWidget*>(
+                QStringLiteral("timeAlignmentWidget"))) {
+            std::cerr << "GUI smoke test failed: time alignment tab is missing\n";
             return 1;
         }
         QTimer::singleShot(150, &application, [] {

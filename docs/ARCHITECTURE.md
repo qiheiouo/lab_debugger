@@ -17,6 +17,8 @@ Serial / TCP / UDP / Replay / ROS2 / Remote ROS Agent
                     ┌────┴────┐       ▼
                     ▼         ▼    Terminal
                DataSample  FrameEvent
+                    │
+               TimeAlignment
                          │
                          ▼
                   TimeSeriesStore
@@ -35,7 +37,9 @@ Serial / TCP / UDP / Replay / ROS2 / Remote ROS Agent
 - `receiveTimestamp`：Lab Debugger 收到数据的本机 Unix 纳秒时间。
 - `sequence`：每个数据源单调递增。
 - `sourceId`：全局稳定来源标识，为未来多源时间轴保留。
-- `DataSample.timestamp` 默认继承源时间，解析字段可直接进入统一时序存储。
+- `DataSample.timestamp` 是分析有效时间；默认继承源时间，也可按完整 `sourceId` 改用接收时间、手动偏移或 Agent 自动校正。
+
+`TimeAlignmentEngine` 位于纯核心层。规则按最长 `sourceId` 匹配，因此 Agent 身份策略可覆盖其所有 Topic，而 Topic 可单独覆盖。算法不修改系统时钟，也不覆盖 `sourceTimestamp` / `receiveTimestamp`；无有效源时间、偏移溢出或尚无 Agent 估计时明确回退并计数。每个来源还统计最后延迟、不确定度和时间倒退。Session 开始时冻结规则及当前远程时钟修正，回放从原始双时间戳重建相同分析时间轴。
 
 所有记录同时保留原始数据和解析结果的扩展位置。当前 `.ldraw` 二进制格式为：
 
@@ -119,7 +123,7 @@ JSON 是当前内建零依赖格式，加载失败时返回结构化问题且不
 
 - 当前绘图是自绘 Qt Widget，不依赖 Qt Charts；已使用桶内 min/max 降采样保留尖峰，适合 10~20 条常规曲线，但尚未实现 LTTB、GPU 加速和超高密度交互。
 - 当前 UI 支持最多 16 个本地串口/网络实例，但仍只提供一个 Remote Agent 客户端；TCP 客户端以远端地址、TCP 服务端和 UDP 以本地绑定端点作为实例标识，同标识配置视为更新同一实例而不是创建副本。0.19 起 `ProcessingPipeline` 按完整 `sourceId` 解析：每个来源可覆盖默认 CSV 字段或二进制协议，并拥有独立半行/半帧状态；Session 会冻结每个来源解析后的最终配置。
-- 派生变量已提供基础算术、数学函数及低通、高通、移动平均、微分、积分和角度展开；更高级滤波器和严格多源时间对齐仍待后续滤波/同步阶段实现。
+- 派生变量已提供基础算术、数学函数及低通、高通、移动平均、微分、积分和角度展开；多源基础时钟校正已完成，更高级滤波器、跨源插值/重采样和相关性自动估计仍待后续阶段实现。
 - 告警当前提供高于/低于阈值、持续时间、回差复位、错误频率、本地来源/ROS2 Topic 超时、曲线 Marker 与 Session 回放；组合逻辑、声音和确认/消音流程仍待扩展。
 - 回放索引当前在打开文件时同步建立，每条原始记录占 16 字节索引内存；超长 Session 的后台建索引与稀疏缓存仍待实现。
 - rosbag2 当前支持 SQLite3/CDR、Topic 过滤、一组常见消息的离线结构化，以及 `metadata.yaml` 全文保存和稳定字段校验；MCAP、压缩存储、通用 YAML 编辑、动态类型描述及更多消息仍待实现。
