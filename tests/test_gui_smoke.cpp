@@ -9,12 +9,19 @@
 #include "ui/time_alignment_widget.hpp"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QCoreApplication>
 #include <QComboBox>
+#include <QDir>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QFile>
+#include <QMouseEvent>
+#include <QPushButton>
 #include <QTableWidget>
+#include <QTemporaryDir>
 #include <QTimer>
+#include <QToolButton>
 
 #include <iostream>
 
@@ -120,6 +127,85 @@ int main(int argc, char* argv[]) {
             visibleFields->item(0)->text() != QStringLiteral("serial:COM5.speed") ||
             plot.fieldNames() != csvFields) {
             std::cerr << "GUI smoke test failed: source-qualified plot fields changed CSV parsing\n";
+            return 1;
+        }
+        auto* selectionMode = plot.findChild<QToolButton*>(
+            QStringLiteral("plotSelectionMode"));
+        auto* returnLive = plot.findChild<QPushButton*>(
+            QStringLiteral("plotReturnLive"));
+        auto* exportSelection = plot.findChild<QPushButton*>(
+            QStringLiteral("plotExportSelection"));
+        auto* plotCanvas = plot.findChild<QWidget*>(QStringLiteral("plotCanvas"));
+        auto* plotPaused = plot.findChild<QCheckBox*>(QStringLiteral("plotPaused"));
+        if (!selectionMode || !returnLive || !exportSelection ||
+            !plotCanvas || !plotPaused || !selectionMode->isCheckable() ||
+            exportSelection->isEnabled()) {
+            std::cerr << "GUI smoke test failed: plot history controls are not usable\n";
+            return 1;
+        }
+        store.append({1'000'000'000, "serial:COM5", "serial:COM5.speed",
+                      1.25, "m/s", 0});
+        store.append({2'000'000'000, "udp", "udp:127.0.0.1:9000.speed",
+                      2.5, "m/s", 0});
+        plot.resize(900, 600);
+        plot.show();
+        QCoreApplication::processEvents();
+        const auto sendPlotMouse = [&](QEvent::Type type, const QPointF& local,
+                                       Qt::MouseButton button,
+                                       Qt::MouseButtons buttons) {
+            const auto global = plotCanvas->mapToGlobal(local.toPoint());
+            QMouseEvent event(type, local, QPointF(global), button, buttons,
+                              Qt::NoModifier);
+            QApplication::sendEvent(plotCanvas, &event);
+        };
+        selectionMode->setChecked(true);
+        sendPlotMouse(QEvent::MouseButtonPress, QPointF(140, 120),
+                      Qt::LeftButton, Qt::LeftButton);
+        sendPlotMouse(QEvent::MouseMove, QPointF(340, 120),
+                      Qt::NoButton, Qt::LeftButton);
+        sendPlotMouse(QEvent::MouseButtonRelease, QPointF(340, 120),
+                      Qt::LeftButton, Qt::NoButton);
+        if (!exportSelection->isEnabled()) {
+            std::cerr << "GUI smoke test failed: plot drag did not create an export range\n";
+            return 1;
+        }
+        selectionMode->setChecked(false);
+        sendPlotMouse(QEvent::MouseButtonPress, QPointF(340, 120),
+                      Qt::LeftButton, Qt::LeftButton);
+        sendPlotMouse(QEvent::MouseMove, QPointF(440, 120),
+                      Qt::NoButton, Qt::LeftButton);
+        sendPlotMouse(QEvent::MouseButtonRelease, QPointF(440, 120),
+                      Qt::LeftButton, Qt::NoButton);
+        if (!plotPaused->isChecked()) {
+            std::cerr << "GUI smoke test failed: historical drag did not freeze the view\n";
+            return 1;
+        }
+        returnLive->click();
+        if (plotPaused->isChecked()) {
+            std::cerr << "GUI smoke test failed: return-to-live did not resume tracking\n";
+            return 1;
+        }
+        QTemporaryDir plotExportDirectory(
+            QDir::current().filePath(QStringLiteral("plot-export-XXXXXX")));
+        const auto plotExportPath =
+            plotExportDirectory.filePath(QStringLiteral("selected.csv"));
+        QString plotExportError;
+        quint64 plotExportRows = 0;
+        if (!plotExportDirectory.isValid() ||
+            !plot.exportRangeCsv(
+                plotExportPath, 1'000'000'000, 2'000'000'000,
+                {QStringLiteral("serial:COM5.speed"),
+                 QStringLiteral("udp:127.0.0.1:9000.speed")},
+                &plotExportError, &plotExportRows) ||
+            plotExportRows != 2) {
+            std::cerr << "GUI smoke test failed: selected plot CSV export failed: "
+                      << plotExportError.toStdString() << '\n';
+            return 1;
+        }
+        QFile plotExportFile(plotExportPath);
+        if (!plotExportFile.open(QIODevice::ReadOnly) ||
+            !plotExportFile.readAll().contains("timestamp_ns,relative_seconds,field,value")) {
+            std::cerr << "GUI smoke test failed: selected plot CSV file is invalid\n";
             return 1;
         }
 

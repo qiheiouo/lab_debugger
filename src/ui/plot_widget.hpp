@@ -9,10 +9,13 @@
 class QCheckBox;
 class QDoubleSpinBox;
 class QLineEdit;
+class QLabel;
 class QListWidget;
+class QPushButton;
 class QSpinBox;
 class QTableWidget;
 class QTimer;
+class QToolButton;
 
 namespace lab::ui {
 
@@ -26,6 +29,13 @@ public:
         const lab::core::TimeSeriesStore* store,
         QWidget* parent = nullptr);
     [[nodiscard]] QStringList fieldNames() const;
+    [[nodiscard]] bool exportRangeCsv(
+        const QString& filePath,
+        lab::core::Timestamp start,
+        lab::core::Timestamp end,
+        const QStringList& fields,
+        QString* error = nullptr,
+        quint64* rowCount = nullptr) const;
 
 public slots:
     void useProtocolFields(const QStringList& fields);
@@ -40,6 +50,9 @@ private slots:
     void updatePlotAndStatistics();
     void updateSelectedFields();
     void updateRanges();
+    void returnToLive();
+    void clearRangeSelection();
+    void exportSelectedRange();
 
 private:
     [[nodiscard]] QStringList configuredFields() const;
@@ -56,6 +69,11 @@ private:
     QCheckBox* autoY_{};
     QDoubleSpinBox* yMinimum_{};
     QDoubleSpinBox* yMaximum_{};
+    QToolButton* selectionMode_{};
+    QPushButton* returnLive_{};
+    QPushButton* clearSelection_{};
+    QPushButton* exportSelection_{};
+    QLabel* selectionStatus_{};
     QTableWidget* statistics_{};
     QTimer* refreshTimer_{};
 };

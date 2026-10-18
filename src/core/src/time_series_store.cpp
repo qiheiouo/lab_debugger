@@ -21,6 +21,10 @@ void TimeSeriesStore::append(const DataSample& sample) {
     if (!series) {
         series = std::make_unique<Series>(pointsPerField_);
     }
+    if (!series->points.empty() &&
+        sample.timestamp < series->points.back().timestamp) {
+        series->ordered = false;
+    }
     series->points.push(DataPoint{sample.timestamp, sample.value});
 }
 
@@ -48,30 +52,77 @@ std::vector<std::string> TimeSeriesStore::fields() const {
 
 std::vector<DataPoint> TimeSeriesStore::snapshot(
     const std::string& field,
-    Timestamp since) const {
+    Timestamp since,
+    Timestamp until) const {
+    if (since > until) {
+        return {};
+    }
     std::shared_lock lock(mutex_);
     const auto iterator = series_.find(field);
     if (iterator == series_.end()) {
         return {};
     }
-    auto points = iterator->second->points.snapshot();
-    if (since == 0) {
+    return copyRange(*iterator->second, since, until);
+}
+
+std::vector<NamedSeriesSnapshot> TimeSeriesStore::snapshotMany(
+    const std::vector<std::string>& fields,
+    Timestamp since,
+    Timestamp until) const {
+    if (since > until) return {};
+    std::shared_lock lock(mutex_);
+    std::vector<NamedSeriesSnapshot> result;
+    result.reserve(fields.size());
+    for (const auto& field : fields) {
+        const auto iterator = series_.find(field);
+        if (iterator == series_.end()) continue;
+        auto points = copyRange(*iterator->second, since, until);
+        if (!points.empty()) {
+            result.push_back({field, std::move(points)});
+        }
+    }
+    return result;
+}
+
+std::vector<DataPoint> TimeSeriesStore::copyRange(
+    const Series& series,
+    Timestamp since,
+    Timestamp until) {
+    auto points = series.points.snapshot();
+    if (!series.ordered) {
+        std::stable_sort(points.begin(), points.end(),
+                         [](const DataPoint& left, const DataPoint& right) {
+                             return left.timestamp < right.timestamp;
+                         });
+    }
+    if (since == 0 && until == std::numeric_limits<Timestamp>::max()) {
         return points;
     }
-    const auto first = std::lower_bound(
-        points.begin(), points.end(), since,
-        [](const DataPoint& point, Timestamp timestamp) {
-            return point.timestamp < timestamp;
-        });
-    points.erase(points.begin(), first);
+    if (since != 0) {
+        const auto first = std::lower_bound(
+            points.begin(), points.end(), since,
+            [](const DataPoint& point, Timestamp timestamp) {
+                return point.timestamp < timestamp;
+            });
+        points.erase(points.begin(), first);
+    }
+    if (until != std::numeric_limits<Timestamp>::max()) {
+        const auto last = std::upper_bound(
+            points.begin(), points.end(), until,
+            [](Timestamp timestamp, const DataPoint& point) {
+                return timestamp < point.timestamp;
+            });
+        points.erase(last, points.end());
+    }
     return points;
 }
 
 std::vector<DataPoint> TimeSeriesStore::downsampleMinMax(
     const std::string& field,
     Timestamp since,
-    std::size_t maximumPoints) const {
-    const auto points = snapshot(field, since);
+    std::size_t maximumPoints,
+    Timestamp until) const {
+    const auto points = snapshot(field, since, until);
     if (maximumPoints == 0 || points.empty()) {
         return {};
     }
@@ -111,6 +162,29 @@ std::vector<DataPoint> TimeSeriesStore::downsampleMinMax(
     return result;
 }
 
+std::optional<SeriesBounds> TimeSeriesStore::bounds(
+    const std::string& field) const {
+    std::shared_lock lock(mutex_);
+    const auto iterator = series_.find(field);
+    if (iterator == series_.end()) {
+        return std::nullopt;
+    }
+    const auto& points = iterator->second->points;
+    if (points.empty()) {
+        return std::nullopt;
+    }
+    if (iterator->second->ordered) {
+        return SeriesBounds{points.front().timestamp, points.back().timestamp};
+    }
+    const auto snapshot = points.snapshot();
+    const auto [earliest, latest] = std::minmax_element(
+        snapshot.begin(), snapshot.end(),
+        [](const DataPoint& left, const DataPoint& right) {
+            return left.timestamp < right.timestamp;
+        });
+    return SeriesBounds{earliest->timestamp, latest->timestamp};
+}
+
 std::optional<double> TimeSeriesStore::interpolate(
     const std::string& field,
     Timestamp timestamp) const {
@@ -141,8 +215,9 @@ std::optional<double> TimeSeriesStore::interpolate(
 
 std::optional<SeriesStatistics> TimeSeriesStore::statistics(
     const std::string& field,
-    Timestamp since) const {
-    const auto points = snapshot(field, since);
+    Timestamp since,
+    Timestamp until) const {
+    const auto points = snapshot(field, since, until);
     if (points.empty()) {
         return std::nullopt;
     }

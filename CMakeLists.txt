@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(LabDebugger VERSION 0.22.0 LANGUAGES CXX)
+project(LabDebugger VERSION 0.23.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION bin)
@@ -43,6 +43,7 @@ add_library(lab_core STATIC
     src/core/src/session_recorder.cpp
     src/core/src/source_manager.cpp
     src/core/src/time_series_store.cpp
+    src/core/src/time_series_csv_export.cpp
     src/core/src/threshold_alert_engine.cpp
     src/core/src/time_alignment.cpp
 )
@@ -177,6 +178,7 @@ if(LAB_DEBUGGER_BUILD_GUI)
         install(FILES
             docs/RUN_WINDOWS.txt
             docs/MULTI_SOURCE.md
+            docs/PLOT_AND_EXPORT.md
             docs/TIME_ALIGNMENT.md
             DESTINATION .
         )

@@ -1,6 +1,6 @@
 # Lab Debugger / 实验室调试助手
 
-Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、最小 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路、Phase 5 网络数据源、Phase 6 Remote ROS Agent 主链路、Phase 7 rosbag2 离线分析，并已进入 Phase 8 多源同步基础建设：
+Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实时调试平台。本仓库当前实现 Phase 0、可用的 Phase 1、基础完成的 Phase 2、Phase 3 协议引擎、Phase 4 Session/回放链路、Phase 5 网络数据源、Phase 6 Remote ROS Agent 主链路、Phase 7 rosbag2 离线分析，并已进入 Phase 8 多源同步基础建设：
 
 - 与 Qt UI 解耦的 C++20 数据核心；
 - `IDataSource` 与正式 `SourceManager`，最多 16 个本地串口/网络实例可动态增删，并可与 ROS Agent 同时连接、统计和记录；
@@ -11,7 +11,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 独立线程的串口 I/O、文本解析和原始数据写盘；
 - Windows 串口枚举、连接、收发、ASCII/HEX、定时发送；
 - RX/TX 时间戳终端、暂停显示、保存、复制；
-- CSV 风格数值流解析、时序环形缓冲、统计与实时曲线；
+- CSV 风格数值流解析、时序环形缓冲、统计、实时/历史曲线、区间框选与原子 CSV 导出；
 - 严格 JSON 二进制协议描述、流式帧同步、字段解码和 CRC；
 - 协议加载界面、逐帧检查器、错误统计，以及数值字段自动接入曲线；
 - 目录式 Session：原始流、数值、结构化帧、事件、元数据和配置快照；
@@ -31,7 +31,7 @@ Lab Debugger 是面向嵌入式设备、机器人与网络设备的跨平台实�
 - 后台 rosbag2 SQLite 预检/导入、`metadata.yaml` 无损保存与交叉校验、可搜索 Topic 筛选、分卷时间归并、原始 CDR 安全回放和常见 ROS 消息离线曲线；
 - 可测试的 `MockDataSource` 与核心测试。
 
-详细设计见 [架构文档](docs/ARCHITECTURE.md)，多设备操作见 [多数据源使用说明](docs/MULTI_SOURCE.md)，时间策略见 [多源时间对齐说明](docs/TIME_ALIGNMENT.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，逐来源配置见 [解析配置说明](docs/SOURCE_PARSERS.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，Marker 与告警见 [时间线说明](docs/MARKERS_ALERTS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，当前完成度与暂停后的计划见 [项目进度与后续计划](docs/PROJECT_STATUS_AND_PLAN.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
+详细设计见 [架构文档](docs/ARCHITECTURE.md)，多设备操作见 [多数据源使用说明](docs/MULTI_SOURCE.md)，时间策略见 [多源时间对齐说明](docs/TIME_ALIGNMENT.md)，历史曲线与导出见 [曲线使用说明](docs/PLOT_AND_EXPORT.md)，协议格式见 [JSON 协议说明](docs/PROTOCOL_FORMAT.md)，逐来源配置见 [解析配置说明](docs/SOURCE_PARSERS.md)，Session 格式见 [记录与回放说明](docs/SESSION_FORMAT.md)，派生变量语法见 [派生变量说明](docs/DERIVED_FIELDS.md)，Marker 与告警见 [时间线说明](docs/MARKERS_ALERTS.md)，网络语义见 [TCP/UDP 使用说明](docs/NETWORK.md)，远程 ROS 协议见 [Remote Agent 协议](docs/REMOTE_AGENT_PROTOCOL.md)，rosbag2 使用与边界见 [rosbag2 导入说明](docs/ROSBAG2.md)，当前完成度与后续计划见 [项目进度与后续计划](docs/PROJECT_STATUS_AND_PLAN.md)，阶段安排见 [路线图](docs/ROADMAP.md)。
 
 ## Windows 构建
 
@@ -67,6 +67,7 @@ cmake --install build --config Release --prefix dist/LabDebugger
 8. 在“Marker 与告警”页可添加“开始加载”等人工标记；也可为完整字段名设置高于/低于阈值、回差和持续时间，或按精确 `sourceId` 监测错误频率与无数据超时。Marker 与告警会显示在曲线并随 Session 回放恢复。
 9. 若串口和网络协议不同，在“协议解析”页选择具体 `sourceId`，分别应用 CSV 字段或加载 JSON 协议；未单独配置的来源继承默认项。
 10. 多设备时在“时间同步”页选择策略：普通串口/网络通常保留源时间，缺少可靠设备时钟时可选电脑接收时间；ROS2 跨机数据可对 Agent 身份使用自动校正。先检查延迟、不确定度、回退和乱序计数，再开始 Session。
+11. 在曲线内左键拖动可固定并浏览历史，滚轮缩放时间窗；点击“框选区间”后拖出范围，再用“导出所选 CSV”保存当前勾选字段的全部样本。
 
 若 STM32 输出二进制帧，打开“协议解析”页并加载
 `examples/protocols/stm32_status.json`。有效帧、丢弃字节和校验错误会分别统计，

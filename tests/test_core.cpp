@@ -10,6 +10,7 @@
 #include "lab/core/session_recorder.hpp"
 #include "lab/core/source_manager.hpp"
 #include "lab/core/time_series_store.hpp"
+#include "lab/core/time_series_csv_export.hpp"
 #include "lab/core/threshold_alert_engine.hpp"
 
 #include <chrono>
@@ -25,6 +26,7 @@
 #include <mutex>
 #include <random>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -51,6 +53,8 @@ void testRingBufferWrapAround() {
     buffer.push(3);
     buffer.push(4);
     require(buffer.snapshot() == std::vector<int>({2, 3, 4}), "ring order after wrap");
+    require(buffer.front() == 2 && buffer.back() == 4,
+            "ring front and back follow logical order");
     buffer.clear();
     require(buffer.empty(), "ring clear");
 
@@ -98,6 +102,70 @@ void testTimeSeriesAndStatistics() {
     const auto interpolated = analysisStore.interpolate("signal", 5);
     require(interpolated && std::abs(*interpolated - 50.0) < 1e-12,
             "linear interpolation");
+
+    const auto bounded = analysisStore.snapshot("signal", 10, 30);
+    require(bounded.size() == 3 && bounded.front().timestamp == 10 &&
+                bounded.back().timestamp == 30,
+            "inclusive bounded snapshot excludes samples outside the view");
+    require(analysisStore.snapshot("signal", 31, 29).empty(),
+            "reversed time range is empty");
+    const auto bounds = analysisStore.bounds("signal");
+    require(bounds && bounds->earliest == 0 && bounds->latest == 40,
+            "series bounds expose retained history");
+    const auto boundedStats = analysisStore.statistics("signal", 10, 20);
+    require(boundedStats && boundedStats->count == 2 &&
+                boundedStats->minimum == 0.0 && boundedStats->maximum == 100.0,
+            "statistics honor both range boundaries");
+    const auto boundedReduced = analysisStore.downsampleMinMax("signal", 20, 2, 40);
+    require(std::none_of(boundedReduced.begin(), boundedReduced.end(),
+                         [](const auto& point) { return point.value == 100.0; }),
+            "bounded downsampling excludes future and past peaks");
+
+    lab::core::TimeSeriesStore unorderedStore(10);
+    unorderedStore.append({30, "mock", "unordered", 3.0, {}, 0});
+    unorderedStore.append({10, "mock", "unordered", 1.0, {}, 1});
+    unorderedStore.append({20, "mock", "unordered", 2.0, {}, 2});
+    const auto unordered = unorderedStore.snapshot("unordered", 10, 20);
+    const auto unorderedBounds = unorderedStore.bounds("unordered");
+    require(unordered.size() == 2 && unordered[0].timestamp == 10 &&
+                unordered[1].timestamp == 20 && unorderedBounds &&
+                unorderedBounds->earliest == 10 && unorderedBounds->latest == 30,
+            "out-of-order aligned samples remain queryable by time range");
+}
+
+void testTimeSeriesCsvExport() {
+    lab::core::TimeSeriesStore store(20);
+    store.append({1'000'000'000, "serial", "speed", 1.25, "m/s", 0});
+    store.append({3'000'000'000, "serial", "speed", 3.5, "m/s", 1});
+    store.append({2'000'000'000, "serial", "=current", -2.0, "A", 2});
+    store.append({4'000'000'000, "serial", "speed", 99.0, "m/s", 3});
+
+    lab::core::TimeSeriesCsvExportOptions options;
+    options.fields = {"speed", "=current", "speed"};
+    options.start = 1'000'000'000;
+    options.end = 3'000'000'000;
+    options.includeUtf8Bom = false;
+    std::ostringstream output;
+    lab::core::TimeSeriesCsvExportSummary summary;
+    std::string error;
+    require(lab::core::exportTimeSeriesCsv(
+                store, options, output, &summary, &error),
+            "selected time series export succeeds: " + error);
+    require(summary.selectedFieldCount == 2 && summary.fieldsWithData == 2 &&
+                summary.rowCount == 3,
+            "CSV export reports deduplicated fields and exact row count");
+    require(output.str() ==
+                "timestamp_ns,relative_seconds,field,value\n"
+                "1000000000,0.000000000,\"speed\",1.25\n"
+                "2000000000,1.000000000,\"'=current\",-2\n"
+                "3000000000,2.000000000,\"speed\",3.5\n",
+            "CSV export is chronological, bounded, precise and formula-safe");
+
+    options.start = 5;
+    options.end = 4;
+    require(!lab::core::exportTimeSeriesCsv(store, options, output, nullptr, &error) &&
+                !error.empty(),
+            "CSV export rejects a reversed range");
 }
 
 void testThresholdAlertEngine() {
@@ -990,6 +1058,7 @@ int main() {
     try {
         testRingBufferWrapAround();
         testTimeSeriesAndStatistics();
+        testTimeSeriesCsvExport();
         testThresholdAlertEngine();
         testHealthAlertEngine();
         testDerivedFieldEngine();
