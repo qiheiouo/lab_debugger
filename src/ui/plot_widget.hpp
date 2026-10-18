@@ -74,6 +74,7 @@ private:
     QPushButton* clearSelection_{};
     QPushButton* exportSelection_{};
     QLabel* selectionStatus_{};
+    QLabel* statisticsScope_{};
     QTableWidget* statistics_{};
     QTimer* refreshTimer_{};
 };

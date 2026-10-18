@@ -13,6 +13,7 @@
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QDir>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QFile>
@@ -142,10 +143,13 @@ int main(int argc, char* argv[]) {
         auto* plotCanvas = plot.findChild<QWidget*>(QStringLiteral("plotCanvas"));
         auto* plotPaused = plot.findChild<QCheckBox*>(QStringLiteral("plotPaused"));
         auto* plotTimeWindow = plot.findChild<QSpinBox*>();
-        auto* plotStatistics = plot.findChild<QTableWidget*>();
+        auto* plotStatistics = plot.findChild<QTableWidget*>(
+            QStringLiteral("plotStatistics"));
+        auto* statisticsScope = plot.findChild<QLabel*>(
+            QStringLiteral("plotStatisticsScope"));
         if (!selectionMode || !returnLive || !exportSelection ||
             !clearSelection || !plotCanvas || !plotPaused || !plotTimeWindow ||
-            !plotStatistics || !selectionMode->isCheckable() ||
+            !plotStatistics || !statisticsScope || !selectionMode->isCheckable() ||
             exportSelection->isEnabled()) {
             std::cerr << "GUI smoke test failed: plot history controls are not usable\n";
             return 1;
@@ -154,8 +158,12 @@ int main(int argc, char* argv[]) {
                       1.25, "m/s", 0});
         store.append({2'000'000'000, "udp", "udp:127.0.0.1:9000.speed",
                       2.5, "m/s", 0});
+        store.append({14'000'000'000, "serial:COM5", "serial:COM5.speed",
+                      14.0, "m/s", 1});
+        store.append({15'000'000'000, "serial:COM5", "serial:COM5.speed",
+                      15.0, "m/s", 2});
         store.append({20'000'000'000, "serial:COM5", "serial:COM5.speed",
-                      1000.0, "m/s", 1});
+                      1000.0, "m/s", 3});
         plot.resize(900, 600);
         plot.show();
         QCoreApplication::processEvents();
@@ -207,8 +215,17 @@ int main(int argc, char* argv[]) {
             std::cerr << "GUI smoke test failed: valid selected field did not enable export\n";
             return 1;
         }
+        const auto* selectedCurrent = plotStatistics->item(0, 1);
+        const auto* selectedCount = plotStatistics->item(0, 5);
+        if (!statisticsScope->text().contains(QStringLiteral("框选区间")) ||
+            !selectedCurrent || selectedCurrent->text() != QStringLiteral("15") ||
+            !selectedCount || selectedCount->text() != QStringLiteral("2")) {
+            std::cerr << "GUI smoke test failed: selected range statistics are incorrect\n";
+            return 1;
+        }
         clearSelection->click();
-        if (exportSelection->isEnabled() || clearSelection->isEnabled()) {
+        if (exportSelection->isEnabled() || clearSelection->isEnabled() ||
+            !statisticsScope->text().contains(QStringLiteral("当前可见窗口"))) {
             std::cerr << "GUI smoke test failed: clear selection did not reset controls\n";
             return 1;
         }

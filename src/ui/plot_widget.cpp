@@ -567,9 +567,12 @@ PlotWidget::PlotWidget(
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({190, 800});
 
-    statistics_ = new QTableWidget(0, 5, this);
+    statisticsScope_ = new QLabel(tr("统计范围：当前可见窗口"), this);
+    statisticsScope_->setObjectName(QStringLiteral("plotStatisticsScope"));
+    statistics_ = new QTableWidget(0, 6, this);
+    statistics_->setObjectName(QStringLiteral("plotStatistics"));
     statistics_->setHorizontalHeaderLabels(
-        {tr("字段"), tr("Current"), tr("Min"), tr("Max"), tr("Average")});
+        {tr("字段"), tr("Current"), tr("Min"), tr("Max"), tr("Average"), tr("Count")});
     statistics_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     statistics_->verticalHeader()->hide();
     statistics_->setMaximumHeight(150);
@@ -581,6 +584,7 @@ PlotWidget::PlotWidget(
     layout->addLayout(historyControls);
     layout->addWidget(selectionStatus_);
     layout->addWidget(splitter, 1);
+    layout->addWidget(statisticsScope_);
     layout->addWidget(statistics_);
 
     refreshTimer_ = new QTimer(this);
@@ -610,6 +614,7 @@ PlotWidget::PlotWidget(
         if (!range) {
             selectionStatus_->setText(
                 tr("未选择区间；左键拖动浏览历史，滚轮缩放"));
+            updatePlotAndStatistics();
             return;
         }
         const auto duration = lab::core::secondsBetween(range->first, range->second);
@@ -743,13 +748,21 @@ void PlotWidget::updatePlotAndStatistics() {
     }
     const auto fields = visibleFieldNames();
     statistics_->setRowCount(fields.size());
-    const auto visibleRange = canvas_->visibleRange();
+    auto statisticsRange = canvas_->selection();
+    const auto usesSelection = statisticsRange &&
+                               statisticsRange->first < statisticsRange->second;
+    if (!usesSelection) {
+        statisticsRange = canvas_->visibleRange();
+    }
+    statisticsScope_->setText(
+        usesSelection ? tr("统计范围：框选区间")
+                      : tr("统计范围：当前可见窗口"));
     for (int row = 0; row < fields.size(); ++row) {
         statistics_->setItem(row, 0, new QTableWidgetItem(fields[row]));
-        const auto stats = visibleRange
+        const auto stats = statisticsRange
                                ? store_->statistics(fields[row].toStdString(),
-                                                    visibleRange->first,
-                                                    visibleRange->second)
+                                                    statisticsRange->first,
+                                                    statisticsRange->second)
                                : std::nullopt;
         const std::array<double, 4> values = stats
             ? std::array<double, 4>{stats->current, stats->minimum, stats->maximum, stats->average}
@@ -760,6 +773,11 @@ void PlotWidget::updatePlotAndStatistics() {
                 new QTableWidgetItem(stats ? QString::number(values[column], 'g', 8)
                                            : QStringLiteral("—")));
         }
+        statistics_->setItem(
+            row, 5,
+            new QTableWidgetItem(
+                stats ? QString::number(static_cast<qulonglong>(stats->count))
+                      : QStringLiteral("—")));
     }
 }
 
