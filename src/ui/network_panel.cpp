@@ -9,6 +9,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QSettings>
 #include <QSpinBox>
 #include <QVBoxLayout>
 #include <QVariantMap>
@@ -27,6 +28,7 @@ NetworkPanel::NetworkPanel(QWidget* parent) : QWidget(parent) {
     sources_->setMaximumHeight(130);
 
     mode_ = new QComboBox(this);
+    mode_->setObjectName(QStringLiteral("networkMode"));
     mode_->addItem(tr("TCP 客户端"),
                    static_cast<int>(lab::adapters::network::NetworkMode::TcpClient));
     mode_->addItem(tr("TCP 服务端"),
@@ -34,11 +36,15 @@ NetworkPanel::NetworkPanel(QWidget* parent) : QWidget(parent) {
     mode_->addItem(tr("UDP"),
                    static_cast<int>(lab::adapters::network::NetworkMode::Udp));
     remoteHost_ = new QLineEdit(QStringLiteral("127.0.0.1"), this);
+    remoteHost_->setObjectName(QStringLiteral("networkRemoteHost"));
     remotePort_ = new QSpinBox(this);
+    remotePort_->setObjectName(QStringLiteral("networkRemotePort"));
     remotePort_->setRange(1, 65535);
     remotePort_->setValue(9000);
     bindAddress_ = new QLineEdit(QStringLiteral("0.0.0.0"), this);
+    bindAddress_->setObjectName(QStringLiteral("networkBindAddress"));
     localPort_ = new QSpinBox(this);
+    localPort_->setObjectName(QStringLiteral("networkLocalPort"));
     localPort_->setRange(1, 65535);
     localPort_->setValue(9000);
 
@@ -52,6 +58,7 @@ NetworkPanel::NetworkPanel(QWidget* parent) : QWidget(parent) {
     state_ = new QLabel(tr("● 未连接"), this);
     state_->setStyleSheet(QStringLiteral("color: #9aa4b2;"));
     connectButton_ = new QPushButton(tr("添加 / 打开"), this);
+    connectButton_->setObjectName(QStringLiteral("networkConnectButton"));
     disconnectButton_ = new QPushButton(tr("关闭"), this);
     reconnectButton_ = new QPushButton(tr("重开"), this);
     removeButton_ = new QPushButton(tr("移除"), this);
@@ -83,7 +90,10 @@ NetworkPanel::NetworkPanel(QWidget* parent) : QWidget(parent) {
 
     connect(mode_, &QComboBox::currentIndexChanged,
             this, &NetworkPanel::updateModeControls);
-    connect(connectButton_, &QPushButton::clicked, this, &NetworkPanel::connectRequested);
+    connect(connectButton_, &QPushButton::clicked, this, [this] {
+        saveSettings();
+        emit connectRequested();
+    });
     connect(disconnectButton_, &QPushButton::clicked, this, [this] {
         const auto sourceId = selectedSourceId();
         if (!sourceId.isEmpty()) emit disconnectSourceRequested(sourceId);
@@ -98,7 +108,37 @@ NetworkPanel::NetworkPanel(QWidget* parent) : QWidget(parent) {
     });
     connect(sources_, &QListWidget::currentItemChanged,
             this, [this] { loadSelectedSource(); });
+    restoreSettings();
     updateModeControls();
+}
+
+void NetworkPanel::restoreSettings() {
+    QSettings preferences;
+    const auto modeIndex = mode_->findData(preferences.value(
+        QStringLiteral("connections/network/mode"), mode_->currentData()));
+    if (modeIndex >= 0) mode_->setCurrentIndex(modeIndex);
+    remoteHost_->setText(preferences.value(
+        QStringLiteral("connections/network/remote_host"), remoteHost_->text()).toString());
+    remotePort_->setValue(preferences.value(
+        QStringLiteral("connections/network/remote_port"), remotePort_->value()).toInt());
+    bindAddress_->setText(preferences.value(
+        QStringLiteral("connections/network/bind_address"), bindAddress_->text()).toString());
+    localPort_->setValue(preferences.value(
+        QStringLiteral("connections/network/local_port"), localPort_->value()).toInt());
+}
+
+void NetworkPanel::saveSettings() const {
+    QSettings preferences;
+    preferences.setValue(QStringLiteral("connections/network/mode"),
+                         mode_->currentData());
+    preferences.setValue(QStringLiteral("connections/network/remote_host"),
+                         remoteHost_->text().trimmed());
+    preferences.setValue(QStringLiteral("connections/network/remote_port"),
+                         remotePort_->value());
+    preferences.setValue(QStringLiteral("connections/network/bind_address"),
+                         bindAddress_->text().trimmed());
+    preferences.setValue(QStringLiteral("connections/network/local_port"),
+                         localPort_->value());
 }
 
 QString NetworkPanel::selectedSourceId() const {

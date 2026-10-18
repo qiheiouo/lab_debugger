@@ -6,6 +6,7 @@
 #include "ui/send_panel.hpp"
 #include "ui/serial_panel.hpp"
 #include "ui/network_panel.hpp"
+#include "ui/remote_agent_panel.hpp"
 #include "ui/time_alignment_widget.hpp"
 
 #include <QApplication>
@@ -19,7 +20,9 @@
 #include <QFile>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QSettings>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -33,6 +36,34 @@ int main(int argc, char* argv[]) {
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("LabDebugger"));
     QCoreApplication::setApplicationName(QStringLiteral("Lab Debugger GUI Test"));
+
+    QTemporaryDir settingsDirectory;
+    if (!settingsDirectory.isValid()) {
+        std::cerr << "GUI smoke test failed: settings directory is unavailable\n";
+        return 1;
+    }
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                       settingsDirectory.path());
+    QSettings preferences;
+    preferences.clear();
+    preferences.setValue(QStringLiteral("connections/serial/baud"), 460800);
+    preferences.setValue(QStringLiteral("connections/network/mode"),
+                         static_cast<int>(lab::adapters::network::NetworkMode::Udp));
+    preferences.setValue(QStringLiteral("connections/network/remote_host"),
+                         QStringLiteral("192.0.2.10"));
+    preferences.setValue(QStringLiteral("connections/network/remote_port"), 9100);
+    preferences.setValue(QStringLiteral("connections/network/bind_address"),
+                         QStringLiteral("127.0.0.1"));
+    preferences.setValue(QStringLiteral("connections/network/local_port"), 9101);
+    preferences.setValue(QStringLiteral("connections/remote_agent/host"),
+                         QStringLiteral("192.0.2.20"));
+    preferences.setValue(QStringLiteral("connections/remote_agent/port"), 9850);
+    preferences.setValue(QStringLiteral("connections/remote_agent/client_name"),
+                         QStringLiteral("Bench PC"));
+    preferences.setValue(QStringLiteral("connections/remote_agent/auto_reconnect"),
+                         false);
+    preferences.sync();
 
     int result = -1;
     {
@@ -91,8 +122,46 @@ int main(int argc, char* argv[]) {
         networkSource.insert(QStringLiteral("open"), true);
 
         lab::ui::SerialPanel serialPanel;
-        serialPanel.setSources(localSources);
         lab::ui::NetworkPanel networkPanel;
+        lab::ui::RemoteAgentPanel remoteAgentPanel;
+        if (serialPanel.settings().baudRate != 460800) {
+            std::cerr << "GUI smoke test failed: serial preferences were not restored\n";
+            return 1;
+        }
+        serialPanel.setSources(localSources);
+        if (serialPanel.settings().baudRate != 115200) {
+            std::cerr << "GUI smoke test failed: selected source did not replace saved serial form\n";
+            return 1;
+        }
+        const auto rememberedNetwork = networkPanel.settings();
+        const auto rememberedAgent = remoteAgentPanel.settings();
+        if (rememberedNetwork.mode != lab::adapters::network::NetworkMode::Udp ||
+            rememberedNetwork.remoteHost != "192.0.2.10" ||
+            rememberedNetwork.remotePort != 9100 ||
+            rememberedNetwork.bindAddress != "127.0.0.1" ||
+            rememberedNetwork.localPort != 9101 ||
+            rememberedAgent.host != "192.0.2.20" ||
+            rememberedAgent.port != 9850 ||
+            rememberedAgent.clientName != "Bench PC" ||
+            rememberedAgent.autoReconnect) {
+            std::cerr << "GUI smoke test failed: connection preferences were not restored\n";
+            return 1;
+        }
+        auto* rememberedHost = networkPanel.findChild<QLineEdit*>(
+            QStringLiteral("networkRemoteHost"));
+        auto* networkConnect = networkPanel.findChild<QPushButton*>(
+            QStringLiteral("networkConnectButton"));
+        if (!rememberedHost || !networkConnect) {
+            std::cerr << "GUI smoke test failed: network preference controls are missing\n";
+            return 1;
+        }
+        rememberedHost->setText(QStringLiteral("198.51.100.42"));
+        networkConnect->click();
+        if (QSettings().value(QStringLiteral("connections/network/remote_host"))
+                .toString() != QStringLiteral("198.51.100.42")) {
+            std::cerr << "GUI smoke test failed: connection preferences were not saved\n";
+            return 1;
+        }
         networkPanel.setSources(localSources);
         auto* serialList = serialPanel.findChild<QListWidget*>(
             QStringLiteral("serialSourceList"));
@@ -389,6 +458,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        preferences.setValue(QStringLiteral("window/source_tab"), 2);
+        preferences.setValue(QStringLiteral("window/content_tab"), 3);
+        preferences.sync();
         lab::ui::MainWindow window;
         window.show();
         if (!window.isVisible()) {
@@ -408,6 +480,15 @@ int main(int argc, char* argv[]) {
         if (!window.findChild<lab::ui::TimeAlignmentWidget*>(
                 QStringLiteral("timeAlignmentWidget"))) {
             std::cerr << "GUI smoke test failed: time alignment tab is missing\n";
+            return 1;
+        }
+        auto* sourceTabs = window.findChild<QTabWidget*>(
+            QStringLiteral("sourceTabs"));
+        auto* contentTabs = window.findChild<QTabWidget*>(
+            QStringLiteral("contentTabs"));
+        if (!sourceTabs || sourceTabs->currentIndex() != 2 ||
+            !contentTabs || contentTabs->currentIndex() != 3) {
+            std::cerr << "GUI smoke test failed: window tabs were not restored\n";
             return 1;
         }
         QTimer::singleShot(150, &application, [] {

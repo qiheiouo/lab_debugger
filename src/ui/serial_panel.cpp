@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
+#include <QSettings>
 #include <QVariantMap>
 #include <QVBoxLayout>
 
@@ -28,6 +29,7 @@ SerialPanel::SerialPanel(QWidget* parent) : QWidget(parent) {
     sources_->setMaximumHeight(130);
 
     port_ = new QComboBox(this);
+    port_->setObjectName(QStringLiteral("serialPort"));
     auto* refreshButton = new QPushButton(tr("刷新"), this);
     auto* portRow = new QWidget(this);
     auto* portLayout = new QHBoxLayout(portRow);
@@ -36,6 +38,7 @@ SerialPanel::SerialPanel(QWidget* parent) : QWidget(parent) {
     portLayout->addWidget(refreshButton);
 
     baud_ = new QComboBox(this);
+    baud_->setObjectName(QStringLiteral("serialBaud"));
     baud_->setEditable(true);
     for (const auto baud : {9600, 19200, 38400, 57600, 115200, 460800, 921600}) {
         baud_->addItem(QString::number(baud), baud);
@@ -77,6 +80,7 @@ SerialPanel::SerialPanel(QWidget* parent) : QWidget(parent) {
     state_->setStyleSheet(QStringLiteral("color: #9aa4b2;"));
 
     connectButton_ = new QPushButton(tr("添加 / 连接"), this);
+    connectButton_->setObjectName(QStringLiteral("serialConnectButton"));
     disconnectButton_ = new QPushButton(tr("断开"), this);
     reconnectButton_ = new QPushButton(tr("重连"), this);
     removeButton_ = new QPushButton(tr("移除"), this);
@@ -108,7 +112,10 @@ SerialPanel::SerialPanel(QWidget* parent) : QWidget(parent) {
     layout->addWidget(hint);
 
     connect(refreshButton, &QPushButton::clicked, this, &SerialPanel::refreshPorts);
-    connect(connectButton_, &QPushButton::clicked, this, &SerialPanel::connectRequested);
+    connect(connectButton_, &QPushButton::clicked, this, [this] {
+        saveSettings();
+        emit connectRequested();
+    });
     connect(disconnectButton_, &QPushButton::clicked, this, [this] {
         const auto sourceId = selectedSourceId();
         if (!sourceId.isEmpty()) emit disconnectSourceRequested(sourceId);
@@ -124,6 +131,41 @@ SerialPanel::SerialPanel(QWidget* parent) : QWidget(parent) {
     connect(sources_, &QListWidget::currentItemChanged,
             this, [this] { loadSelectedSource(); });
     refreshPorts();
+    restoreSettings();
+}
+
+void SerialPanel::restoreSettings() {
+    QSettings preferences;
+    const auto portIndex = port_->findData(
+        preferences.value(QStringLiteral("connections/serial/port")).toString());
+    if (portIndex >= 0) port_->setCurrentIndex(portIndex);
+    baud_->setCurrentText(preferences.value(
+        QStringLiteral("connections/serial/baud"), baud_->currentText()).toString());
+    for (auto [combo, key] : {
+             std::pair<QComboBox*, QString>{dataBits_, QStringLiteral("data_bits")},
+             {stopBits_, QStringLiteral("stop_bits")},
+             {parity_, QStringLiteral("parity")},
+             {flowControl_, QStringLiteral("flow_control")}}) {
+        const auto index = combo->findData(preferences.value(
+            QStringLiteral("connections/serial/") + key, combo->currentData()));
+        if (index >= 0) combo->setCurrentIndex(index);
+    }
+}
+
+void SerialPanel::saveSettings() const {
+    QSettings preferences;
+    preferences.setValue(QStringLiteral("connections/serial/port"),
+                         port_->currentData());
+    preferences.setValue(QStringLiteral("connections/serial/baud"),
+                         baud_->currentText());
+    preferences.setValue(QStringLiteral("connections/serial/data_bits"),
+                         dataBits_->currentData());
+    preferences.setValue(QStringLiteral("connections/serial/stop_bits"),
+                         stopBits_->currentData());
+    preferences.setValue(QStringLiteral("connections/serial/parity"),
+                         parity_->currentData());
+    preferences.setValue(QStringLiteral("connections/serial/flow_control"),
+                         flowControl_->currentData());
 }
 
 QString SerialPanel::selectedSourceId() const {

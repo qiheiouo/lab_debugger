@@ -38,6 +38,9 @@ private slots:
     void loadSelectedSource();
 
 private:
+    void restoreSettings();
+    void saveSettings() const;
+
     QComboBox* mode_{};
     QLineEdit* remoteHost_{};
     QSpinBox* remotePort_{};

@@ -36,6 +36,9 @@ private slots:
     void loadSelectedSource();
 
 private:
+    void restoreSettings();
+    void saveSettings() const;
+
     QComboBox* port_{};
     QComboBox* baud_{};
     QComboBox* dataBits_{};

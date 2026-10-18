@@ -6,6 +6,8 @@
 
 class QAction;
 class QLabel;
+class QSplitter;
+class QTabWidget;
 
 namespace lab::ui {
 
@@ -46,6 +48,9 @@ private:
     ProtocolWidget* protocol_{};
     ReplayWidget* replay_{};
     SendPanel* sendPanel_{};
+    QTabWidget* sourceTabs_{};
+    QTabWidget* contentTabs_{};
+    QSplitter* mainSplitter_{};
     QLabel* traffic_{};
     QLabel* parserStatus_{};
     QAction* recordAction_{};

@@ -20,6 +20,7 @@
 #include <QLabel>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QSettings>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -54,32 +55,44 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     replay_ = new ReplayWidget(this);
     sendPanel_ = new SendPanel(this);
 
-    auto* tabs = new QTabWidget(this);
-    tabs->addTab(terminal_, tr("终端"));
-    tabs->addTab(plot_, tr("实时曲线"));
-    tabs->addTab(derivedFields_, tr("派生变量"));
-    tabs->addTab(alerts_, tr("Marker 与告警"));
-    tabs->addTab(timeAlignment_, tr("时间同步"));
-    tabs->addTab(protocol_, tr("协议解析"));
-    tabs->addTab(replay_, tr("Session 回放"));
+    contentTabs_ = new QTabWidget(this);
+    contentTabs_->setObjectName(QStringLiteral("contentTabs"));
+    contentTabs_->addTab(terminal_, tr("终端"));
+    contentTabs_->addTab(plot_, tr("实时曲线"));
+    contentTabs_->addTab(derivedFields_, tr("派生变量"));
+    contentTabs_->addTab(alerts_, tr("Marker 与告警"));
+    contentTabs_->addTab(timeAlignment_, tr("时间同步"));
+    contentTabs_->addTab(protocol_, tr("协议解析"));
+    contentTabs_->addTab(replay_, tr("Session 回放"));
 
     auto* right = new QWidget(this);
     auto* rightLayout = new QVBoxLayout(right);
     rightLayout->setContentsMargins(0, 0, 0, 0);
-    rightLayout->addWidget(tabs, 1);
+    rightLayout->addWidget(contentTabs_, 1);
     rightLayout->addWidget(sendPanel_);
 
-    auto* splitter = new QSplitter(Qt::Horizontal, this);
-    auto* sources = new QTabWidget(this);
-    sources->addTab(serialPanel_, tr("串口"));
-    sources->addTab(networkPanel_, tr("网络"));
-    sources->addTab(remoteAgentPanel_, tr("ROS Agent"));
-    sources->setMinimumWidth(340);
-    splitter->addWidget(sources);
-    splitter->addWidget(right);
-    splitter->setStretchFactor(1, 1);
-    splitter->setSizes({270, 1010});
-    setCentralWidget(splitter);
+    mainSplitter_ = new QSplitter(Qt::Horizontal, this);
+    mainSplitter_->setObjectName(QStringLiteral("mainSplitter"));
+    sourceTabs_ = new QTabWidget(this);
+    sourceTabs_->setObjectName(QStringLiteral("sourceTabs"));
+    sourceTabs_->addTab(serialPanel_, tr("串口"));
+    sourceTabs_->addTab(networkPanel_, tr("网络"));
+    sourceTabs_->addTab(remoteAgentPanel_, tr("ROS Agent"));
+    sourceTabs_->setMinimumWidth(340);
+    mainSplitter_->addWidget(sourceTabs_);
+    mainSplitter_->addWidget(right);
+    mainSplitter_->setStretchFactor(1, 1);
+    mainSplitter_->setSizes({270, 1010});
+    setCentralWidget(mainSplitter_);
+
+    QSettings preferences;
+    restoreGeometry(preferences.value(QStringLiteral("window/geometry")).toByteArray());
+    mainSplitter_->restoreState(
+        preferences.value(QStringLiteral("window/splitter")).toByteArray());
+    sourceTabs_->setCurrentIndex(
+        preferences.value(QStringLiteral("window/source_tab"), 0).toInt());
+    contentTabs_->setCurrentIndex(
+        preferences.value(QStringLiteral("window/content_tab"), 0).toInt());
 
     traffic_ = new QLabel(tr("RX 0 B  |  TX 0 B"), this);
     parserStatus_ = new QLabel(tr("解析队列 0"), this);
@@ -318,6 +331,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    QSettings preferences;
+    preferences.setValue(QStringLiteral("window/geometry"), saveGeometry());
+    preferences.setValue(QStringLiteral("window/splitter"), mainSplitter_->saveState());
+    preferences.setValue(QStringLiteral("window/source_tab"),
+                         sourceTabs_->currentIndex());
+    preferences.setValue(QStringLiteral("window/content_tab"),
+                         contentTabs_->currentIndex());
     session_.stopSession();
     session_.disconnectAllLocalSources();
     session_.disconnectRemoteAgent();

@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSettings>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -68,11 +69,15 @@ RemoteAgentPanel::RemoteAgentPanel(QWidget* parent) : QWidget(parent) {
     title->setFont(titleFont);
 
     host_ = new QLineEdit(QStringLiteral("127.0.0.1"), this);
+    host_->setObjectName(QStringLiteral("remoteAgentHost"));
     port_ = new QSpinBox(this);
+    port_->setObjectName(QStringLiteral("remoteAgentPort"));
     port_->setRange(1, 65535);
     port_->setValue(9750);
     clientName_ = new QLineEdit(QStringLiteral("Lab Debugger"), this);
+    clientName_->setObjectName(QStringLiteral("remoteAgentClientName"));
     autoReconnect_ = new QCheckBox(tr("掉线后自动重连并恢复订阅"), this);
+    autoReconnect_->setObjectName(QStringLiteral("remoteAgentAutoReconnect"));
     autoReconnect_->setChecked(true);
 
     auto* form = new QFormLayout;
@@ -91,6 +96,7 @@ RemoteAgentPanel::RemoteAgentPanel(QWidget* parent) : QWidget(parent) {
     clockSync_->setObjectName(QStringLiteral("secondaryText"));
 
     connectButton_ = new QPushButton(tr("连接"), this);
+    connectButton_->setObjectName(QStringLiteral("remoteAgentConnectButton"));
     disconnectButton_ = new QPushButton(tr("断开"), this);
     reconnectButton_ = new QPushButton(tr("重连"), this);
     disconnectButton_->setEnabled(false);
@@ -154,8 +160,10 @@ RemoteAgentPanel::RemoteAgentPanel(QWidget* parent) : QWidget(parent) {
     layout->addLayout(subscriptionRow);
     layout->addWidget(hint);
 
-    connect(connectButton_, &QPushButton::clicked,
-            this, &RemoteAgentPanel::connectRequested);
+    connect(connectButton_, &QPushButton::clicked, this, [this] {
+        saveSettings();
+        emit connectRequested();
+    });
     connect(disconnectButton_, &QPushButton::clicked,
             this, &RemoteAgentPanel::disconnectRequested);
     connect(reconnectButton_, &QPushButton::clicked,
@@ -168,6 +176,33 @@ RemoteAgentPanel::RemoteAgentPanel(QWidget* parent) : QWidget(parent) {
             this, &RemoteAgentPanel::requestSubscribe);
     connect(unsubscribeButton_, &QPushButton::clicked,
             this, &RemoteAgentPanel::requestUnsubscribe);
+    restoreSettings();
+}
+
+void RemoteAgentPanel::restoreSettings() {
+    QSettings preferences;
+    host_->setText(preferences.value(
+        QStringLiteral("connections/remote_agent/host"), host_->text()).toString());
+    port_->setValue(preferences.value(
+        QStringLiteral("connections/remote_agent/port"), port_->value()).toInt());
+    clientName_->setText(preferences.value(
+        QStringLiteral("connections/remote_agent/client_name"),
+        clientName_->text()).toString());
+    autoReconnect_->setChecked(preferences.value(
+        QStringLiteral("connections/remote_agent/auto_reconnect"),
+        autoReconnect_->isChecked()).toBool());
+}
+
+void RemoteAgentPanel::saveSettings() const {
+    QSettings preferences;
+    preferences.setValue(QStringLiteral("connections/remote_agent/host"),
+                         host_->text().trimmed());
+    preferences.setValue(QStringLiteral("connections/remote_agent/port"),
+                         port_->value());
+    preferences.setValue(QStringLiteral("connections/remote_agent/client_name"),
+                         clientName_->text().trimmed());
+    preferences.setValue(QStringLiteral("connections/remote_agent/auto_reconnect"),
+                         autoReconnect_->isChecked());
 }
 
 lab::adapters::remote_agent::RemoteAgentSettings RemoteAgentPanel::settings() const {

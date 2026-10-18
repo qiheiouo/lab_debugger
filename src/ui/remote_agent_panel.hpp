@@ -54,6 +54,8 @@ private slots:
     void requestUnsubscribe();
 
 private:
+    void restoreSettings();
+    void saveSettings() const;
     [[nodiscard]] std::optional<lab::core::agent::SubscriptionRequest>
     currentRequest();
     void updateTopicFieldCell(int row);
