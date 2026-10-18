@@ -5,6 +5,8 @@
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
+#include <unordered_set>
 
 namespace lab::core {
 
@@ -72,10 +74,14 @@ std::vector<NamedSeriesSnapshot> TimeSeriesStore::snapshotMany(
     if (since > until) return {};
     std::shared_lock lock(mutex_);
     std::vector<NamedSeriesSnapshot> result;
-    result.reserve(fields.size());
+    const auto maximumResultSize = std::min(fields.size(), series_.size());
+    result.reserve(maximumResultSize);
+    std::unordered_set<std::string_view> seen;
+    seen.reserve(maximumResultSize);
     for (const auto& field : fields) {
         const auto iterator = series_.find(field);
         if (iterator == series_.end()) continue;
+        if (!seen.emplace(field).second) continue;
         auto points = copyRange(*iterator->second, since, until);
         if (!points.empty()) {
             result.push_back({field, std::move(points)});

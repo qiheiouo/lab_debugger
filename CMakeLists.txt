@@ -164,9 +164,15 @@ if(LAB_DEBUGGER_BUILD_GUI)
             PUBLIC lab_core lab_serial_adapter lab_network_adapter
                    lab_remote_agent_adapter lab_rosbag2_adapter Qt6::Widgets
         )
+        target_compile_definitions(lab_app_ui PRIVATE
+            LAB_DEBUGGER_VERSION="${PROJECT_VERSION}"
+        )
 
         qt_add_executable(lab_debugger WIN32 src/app/main.cpp)
         target_link_libraries(lab_debugger PRIVATE lab_app_ui)
+        target_compile_definitions(lab_debugger PRIVATE
+            LAB_DEBUGGER_VERSION="${PROJECT_VERSION}"
+        )
         set_target_properties(lab_debugger PROPERTIES
             OUTPUT_NAME "LabDebugger"
         )

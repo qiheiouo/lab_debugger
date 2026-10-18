@@ -16,6 +16,7 @@
 #include <chrono>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -131,6 +132,72 @@ void testTimeSeriesAndStatistics() {
                 unordered[1].timestamp == 20 && unorderedBounds &&
                 unorderedBounds->earliest == 10 && unorderedBounds->latest == 30,
             "out-of-order aligned samples remain queryable by time range");
+
+    const auto many = unorderedStore.snapshotMany(
+        {"unordered", "unordered", "missing"}, 10, 20);
+    require(many.size() == 1 && many.front().field == "unordered" &&
+                many.front().points.size() == unordered.size() &&
+                many.front().points.front().timestamp == 10 &&
+                many.front().points.back().timestamp == 20,
+            "multi-series snapshots ignore duplicate and missing fields");
+
+    lab::core::TimeSeriesStore wrappedUnordered(3);
+    wrappedUnordered.append({30, "mock", "wrapped", 3.0, {}, 0});
+    wrappedUnordered.append({10, "mock", "wrapped", 1.0, {}, 1});
+    wrappedUnordered.append({20, "mock", "wrapped", 2.0, {}, 2});
+    wrappedUnordered.append({40, "mock", "wrapped", 4.0, {}, 3});
+    const auto wrapped = wrappedUnordered.snapshot("wrapped");
+    const auto wrappedBounds = wrappedUnordered.bounds("wrapped");
+    const auto wrappedInterpolation = wrappedUnordered.interpolate("wrapped", 15);
+    require(wrapped.size() == 3 && wrapped[0].timestamp == 10 &&
+                wrapped[1].timestamp == 20 && wrapped[2].timestamp == 40 &&
+                wrappedBounds && wrappedBounds->earliest == 10 &&
+                wrappedBounds->latest == 40 && wrappedInterpolation &&
+                std::abs(*wrappedInterpolation - 1.5) < 1e-12,
+            "out-of-order ring-buffer wrap remains sorted, bounded and interpolable");
+}
+
+void testConcurrentTimeSeriesSnapshots() {
+    lab::core::TimeSeriesStore store(4'096);
+    for (lab::core::Timestamp timestamp = 0; timestamp < 100; ++timestamp) {
+        store.append({timestamp, "writer", timestamp % 2 == 0 ? "even" : "odd",
+                      static_cast<double>(timestamp), {}, 0});
+    }
+
+    std::atomic<bool> invalid{false};
+    std::thread writer([&] {
+        for (lab::core::Timestamp timestamp = 100; timestamp < 10'000; ++timestamp) {
+            store.append({timestamp, "writer", timestamp % 2 == 0 ? "even" : "odd",
+                          static_cast<double>(timestamp), {}, 0});
+        }
+    });
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        const auto snapshots = store.snapshotMany(
+            {"even", "missing", "odd", "even"}, 50, 9'000);
+        if (snapshots.size() != 2 || snapshots[0].field != "even" ||
+            snapshots[1].field != "odd") {
+            invalid = true;
+            break;
+        }
+        for (const auto& snapshot : snapshots) {
+            if (!std::is_sorted(
+                    snapshot.points.begin(), snapshot.points.end(),
+                    [](const auto& left, const auto& right) {
+                        return left.timestamp < right.timestamp;
+                    }) ||
+                std::any_of(
+                    snapshot.points.begin(), snapshot.points.end(),
+                    [](const auto& point) {
+                        return point.timestamp < 50 || point.timestamp > 9'000;
+                    })) {
+                invalid = true;
+                break;
+            }
+        }
+        if (invalid) break;
+    }
+    writer.join();
+    require(!invalid, "concurrent append and multi-field snapshots stay consistent");
 }
 
 void testTimeSeriesCsvExport() {
@@ -166,6 +233,103 @@ void testTimeSeriesCsvExport() {
     require(!lab::core::exportTimeSeriesCsv(store, options, output, nullptr, &error) &&
                 !error.empty(),
             "CSV export rejects a reversed range");
+
+    lab::core::TimeSeriesStore bulkStore(6'000);
+    constexpr lab::core::Timestamp start = 10'000'000'000;
+    const auto precise = std::nextafter(1.0, 2.0);
+    bulkStore.append({start + 1, "source", "+plus", 2.0, {}, 0});
+    bulkStore.append({start + 1, "source", "-minus", 3.0, {}, 0});
+    bulkStore.append({start + 1, "source", "@at", 4.0, {}, 0});
+    bulkStore.append({start + 1, "source", "comma,\"中文", precise, {}, 0});
+    for (lab::core::Timestamp index = 0; index < 5'000; ++index) {
+        bulkStore.append(
+            {start + 2 + index, "source", "bulk", static_cast<double>(index), {}, 0});
+    }
+    lab::core::TimeSeriesCsvExportOptions bulkOptions;
+    bulkOptions.fields = {"bulk", "@at", "comma,\"中文", "+plus", "-minus", "bulk"};
+    bulkOptions.start = start;
+    bulkOptions.end = start + 5'001;
+    std::string bulkOutput;
+    std::size_t writeCalls = 0;
+    lab::core::TimeSeriesCsvExportSummary bulkSummary;
+    require(lab::core::exportTimeSeriesCsv(
+                bulkStore, bulkOptions,
+                [&](std::string_view chunk) {
+                    ++writeCalls;
+                    bulkOutput.append(chunk);
+                    return true;
+                },
+                &bulkSummary, &error),
+            "large CSV export succeeds: " + error);
+    require(bulkOutput.starts_with("\xEF\xBB\xBFtimestamp_ns") &&
+                bulkOutput.find(",0.000000001,\"'+plus\",2\n") != std::string::npos &&
+                bulkOutput.find(",0.000000001,\"'-minus\",3\n") != std::string::npos &&
+                bulkOutput.find(",0.000000001,\"'@at\",4\n") != std::string::npos &&
+                bulkOutput.find("\"comma,\"\"中文\"") != std::string::npos,
+            "CSV export preserves BOM, nanoseconds, escaping and formula safety");
+    const auto plusPosition = bulkOutput.find("\"'+plus\"");
+    const auto minusPosition = bulkOutput.find("\"'-minus\"");
+    const auto atPosition = bulkOutput.find("\"'@at\"");
+    const auto commaPosition = bulkOutput.find("\"comma,\"\"中文\"");
+    require(plusPosition < minusPosition && minusPosition < atPosition &&
+                atPosition < commaPosition,
+            "equal-timestamp CSV rows are stably ordered by field name");
+    require(bulkSummary.selectedFieldCount == 5 && bulkSummary.fieldsWithData == 5 &&
+                bulkSummary.rowCount == 5'004 && writeCalls > 1 &&
+                writeCalls < bulkSummary.rowCount,
+            "CSV export keeps every sample and writes in bounded chunks");
+
+    lab::core::TimeSeriesCsvExportOptions preciseOptions;
+    preciseOptions.fields = {"comma,\"中文"};
+    preciseOptions.start = start + 1;
+    preciseOptions.end = start + 1;
+    preciseOptions.includeUtf8Bom = false;
+    std::ostringstream preciseOutput;
+    require(lab::core::exportTimeSeriesCsv(
+                bulkStore, preciseOptions, preciseOutput, nullptr, &error),
+            "precise floating-point CSV export succeeds: " + error);
+    const auto preciseText = preciseOutput.str();
+    const auto valueStart = preciseText.rfind(',') + 1;
+    require(std::stod(preciseText.substr(valueStart)) == precise,
+            "CSV floating-point values round-trip exactly");
+
+    lab::core::TimeSeriesCsvExportOptions emptyOptions;
+    emptyOptions.fields = {"bulk"};
+    emptyOptions.start = start + 20'000;
+    emptyOptions.end = start + 30'000;
+    emptyOptions.includeUtf8Bom = false;
+    std::ostringstream emptyOutput;
+    lab::core::TimeSeriesCsvExportSummary emptySummary;
+    require(lab::core::exportTimeSeriesCsv(
+                bulkStore, emptyOptions, emptyOutput, &emptySummary, &error) &&
+                emptyOutput.str() ==
+                    "timestamp_ns,relative_seconds,field,value\n" &&
+                emptySummary.rowCount == 0 && emptySummary.fieldsWithData == 0,
+            "empty CSV ranges produce a valid header and zero rows");
+
+    emptyOptions.fields.clear();
+    require(!lab::core::exportTimeSeriesCsv(
+                bulkStore, emptyOptions, emptyOutput, nullptr, &error) &&
+                !error.empty(),
+            "CSV export rejects an empty field selection");
+    bulkOptions.includeUtf8Bom = false;
+    require(!lab::core::exportTimeSeriesCsv(
+                bulkStore, bulkOptions,
+                [](std::string_view) { return false; }, nullptr, &error) &&
+                !error.empty(),
+            "CSV export reports writer failures");
+
+    bool appendedDuringWrite = false;
+    require(lab::core::exportTimeSeriesCsv(
+                bulkStore, preciseOptions,
+                [&](std::string_view) {
+                    bulkStore.append(
+                        {start + 2, "writer", "during-export", 1.0, {}, 0});
+                    appendedDuringWrite = true;
+                    return true;
+                },
+                nullptr, &error) && appendedDuringWrite,
+            "CSV writing does not retain the time-series store lock");
 }
 
 void testThresholdAlertEngine() {
@@ -1058,6 +1222,7 @@ int main() {
     try {
         testRingBufferWrapAround();
         testTimeSeriesAndStatistics();
+        testConcurrentTimeSeriesSnapshots();
         testTimeSeriesCsvExport();
         testThresholdAlertEngine();
         testHealthAlertEngine();

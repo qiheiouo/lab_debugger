@@ -5,6 +5,7 @@
 #include <limits>
 #include <locale>
 #include <ostream>
+#include <queue>
 #include <sstream>
 #include <unordered_set>
 #include <utility>
@@ -100,34 +101,35 @@ bool exportTimeSeriesCsv(
     std::uint64_t rowCount = 0;
     std::ostringstream line;
     line.imbue(std::locale::classic());
-    while (true) {
-        ExportSeries* next = nullptr;
-        for (auto& candidate : series) {
-            if (candidate.index >= candidate.points.size()) {
-                continue;
-            }
-            if (!next) {
-                next = &candidate;
-                continue;
-            }
-            const auto& candidatePoint = candidate.points[candidate.index];
-            const auto& nextPoint = next->points[next->index];
-            if (candidatePoint.timestamp < nextPoint.timestamp ||
-                (candidatePoint.timestamp == nextPoint.timestamp &&
-                 candidate.field < next->field)) {
-                next = &candidate;
-            }
+    const auto later = [&series](std::size_t left, std::size_t right) {
+        const auto& leftSeries = series[left];
+        const auto& rightSeries = series[right];
+        const auto& leftPoint = leftSeries.points[leftSeries.index];
+        const auto& rightPoint = rightSeries.points[rightSeries.index];
+        if (leftPoint.timestamp != rightPoint.timestamp) {
+            return leftPoint.timestamp > rightPoint.timestamp;
         }
-        if (!next) {
-            break;
+        if (leftSeries.field != rightSeries.field) {
+            return leftSeries.field > rightSeries.field;
         }
+        return left > right;
+    };
+    std::priority_queue<
+        std::size_t, std::vector<std::size_t>, decltype(later)> pending(later);
+    for (std::size_t index = 0; index < series.size(); ++index) {
+        if (!series[index].points.empty()) pending.push(index);
+    }
+    while (!pending.empty()) {
+        const auto nextIndex = pending.top();
+        pending.pop();
+        auto& next = series[nextIndex];
 
-        const auto& point = next->points[next->index++];
+        const auto& point = next.points[next.index++];
         line.str(std::string{});
         line.clear();
         line << point.timestamp << ',' << std::fixed << std::setprecision(9)
              << secondsBetween(options.start, point.timestamp) << ','
-             << csvField(next->field) << ',' << std::defaultfloat
+             << csvField(next.field) << ',' << std::defaultfloat
              << std::setprecision(std::numeric_limits<double>::max_digits10)
              << point.value << '\n';
         buffer.append(line.str());
@@ -135,6 +137,7 @@ bool exportTimeSeriesCsv(
             return fail("failed while writing CSV sample rows", error);
         }
         ++rowCount;
+        if (next.index < next.points.size()) pending.push(nextIndex);
     }
     if (!flush()) {
         return fail("failed while finalizing the CSV output", error);

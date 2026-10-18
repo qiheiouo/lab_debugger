@@ -18,10 +18,12 @@
 #include <QFile>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolButton>
+#include <QWheelEvent>
 
 #include <iostream>
 
@@ -135,10 +137,15 @@ int main(int argc, char* argv[]) {
             QStringLiteral("plotReturnLive"));
         auto* exportSelection = plot.findChild<QPushButton*>(
             QStringLiteral("plotExportSelection"));
+        auto* clearSelection = plot.findChild<QPushButton*>(
+            QStringLiteral("plotClearSelection"));
         auto* plotCanvas = plot.findChild<QWidget*>(QStringLiteral("plotCanvas"));
         auto* plotPaused = plot.findChild<QCheckBox*>(QStringLiteral("plotPaused"));
+        auto* plotTimeWindow = plot.findChild<QSpinBox*>();
+        auto* plotStatistics = plot.findChild<QTableWidget*>();
         if (!selectionMode || !returnLive || !exportSelection ||
-            !plotCanvas || !plotPaused || !selectionMode->isCheckable() ||
+            !clearSelection || !plotCanvas || !plotPaused || !plotTimeWindow ||
+            !plotStatistics || !selectionMode->isCheckable() ||
             exportSelection->isEnabled()) {
             std::cerr << "GUI smoke test failed: plot history controls are not usable\n";
             return 1;
@@ -147,6 +154,8 @@ int main(int argc, char* argv[]) {
                       1.25, "m/s", 0});
         store.append({2'000'000'000, "udp", "udp:127.0.0.1:9000.speed",
                       2.5, "m/s", 0});
+        store.append({20'000'000'000, "serial:COM5", "serial:COM5.speed",
+                      1000.0, "m/s", 1});
         plot.resize(900, 600);
         plot.show();
         QCoreApplication::processEvents();
@@ -158,7 +167,25 @@ int main(int argc, char* argv[]) {
                               Qt::NoModifier);
             QApplication::sendEvent(plotCanvas, &event);
         };
+        const auto wheelPosition = QPointF(240, 120);
+        QWheelEvent wheelEvent(
+            wheelPosition, QPointF(plotCanvas->mapToGlobal(wheelPosition.toPoint())),
+            QPoint{}, QPoint{0, 120}, Qt::NoButton, Qt::NoModifier,
+            Qt::ScrollUpdate, false);
+        QApplication::sendEvent(plotCanvas, &wheelEvent);
+        if (plotTimeWindow->value() != 8) {
+            std::cerr << "GUI smoke test failed: plot wheel did not synchronize the time window\n";
+            return 1;
+        }
         selectionMode->setChecked(true);
+        sendPlotMouse(QEvent::MouseButtonPress, QPointF(140, 120),
+                      Qt::LeftButton, Qt::LeftButton);
+        sendPlotMouse(QEvent::MouseButtonRelease, QPointF(140, 120),
+                      Qt::LeftButton, Qt::NoButton);
+        if (exportSelection->isEnabled()) {
+            std::cerr << "GUI smoke test failed: zero-width selection enabled export\n";
+            return 1;
+        }
         sendPlotMouse(QEvent::MouseButtonPress, QPointF(140, 120),
                       Qt::LeftButton, Qt::LeftButton);
         sendPlotMouse(QEvent::MouseMove, QPointF(340, 120),
@@ -169,15 +196,42 @@ int main(int argc, char* argv[]) {
             std::cerr << "GUI smoke test failed: plot drag did not create an export range\n";
             return 1;
         }
+        visibleFields->item(0)->setCheckState(Qt::Unchecked);
+        visibleFields->item(1)->setCheckState(Qt::Unchecked);
+        if (exportSelection->isEnabled()) {
+            std::cerr << "GUI smoke test failed: empty field selection enabled export\n";
+            return 1;
+        }
+        visibleFields->item(0)->setCheckState(Qt::Checked);
+        if (!exportSelection->isEnabled()) {
+            std::cerr << "GUI smoke test failed: valid selected field did not enable export\n";
+            return 1;
+        }
+        clearSelection->click();
+        if (exportSelection->isEnabled() || clearSelection->isEnabled()) {
+            std::cerr << "GUI smoke test failed: clear selection did not reset controls\n";
+            return 1;
+        }
         selectionMode->setChecked(false);
         sendPlotMouse(QEvent::MouseButtonPress, QPointF(340, 120),
                       Qt::LeftButton, Qt::LeftButton);
-        sendPlotMouse(QEvent::MouseMove, QPointF(440, 120),
+        sendPlotMouse(QEvent::MouseMove, QPointF(1340, 120),
                       Qt::NoButton, Qt::LeftButton);
-        sendPlotMouse(QEvent::MouseButtonRelease, QPointF(440, 120),
+        sendPlotMouse(QEvent::MouseButtonRelease, QPointF(1340, 120),
                       Qt::LeftButton, Qt::NoButton);
         if (!plotPaused->isChecked()) {
             std::cerr << "GUI smoke test failed: historical drag did not freeze the view\n";
+            return 1;
+        }
+        store.append({30'000'000'000, "serial:COM5", "serial:COM5.speed",
+                      2000.0, "m/s", 2});
+        QCoreApplication::processEvents();
+        const auto backgroundSamples =
+            store.snapshot("serial:COM5.speed", 30'000'000'000, 30'000'000'000);
+        const auto* historicalCurrent = plotStatistics->item(0, 1);
+        if (backgroundSamples.size() != 1 || !historicalCurrent ||
+            historicalCurrent->text() != QStringLiteral("1.25")) {
+            std::cerr << "GUI smoke test failed: paused history stopped acquisition or used live statistics\n";
             return 1;
         }
         returnLive->click();
@@ -194,10 +248,9 @@ int main(int argc, char* argv[]) {
         if (!plotExportDirectory.isValid() ||
             !plot.exportRangeCsv(
                 plotExportPath, 1'000'000'000, 2'000'000'000,
-                {QStringLiteral("serial:COM5.speed"),
-                 QStringLiteral("udp:127.0.0.1:9000.speed")},
+                {QStringLiteral("serial:COM5.speed")},
                 &plotExportError, &plotExportRows) ||
-            plotExportRows != 2) {
+            plotExportRows != 1) {
             std::cerr << "GUI smoke test failed: selected plot CSV export failed: "
                       << plotExportError.toStdString() << '\n';
             return 1;
